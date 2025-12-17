@@ -1,7 +1,7 @@
 {
   "project_id": "ksolvik-misc",
   "patch_size": 128,
-  "scale": 10,
+  "scale": 500,
   "target_year": 2024,
   "target_key": "mcd64",
   "inputs_keys": ["embeddings", "mb_fire"],

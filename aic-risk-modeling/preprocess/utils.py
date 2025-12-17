@@ -33,7 +33,7 @@ def serialize_example(structured_array):
     """Convert structured numpy array to serliazed tf.Example proto"""
     return array_to_example(structured_array).SerializeToString()
 
-def split_dataset(element, n_partitions, validation_ratio) -> int:
+def split_dataset(element, n_partitions, validation_ratio=0.2) -> int:
     """Split dataset into training or validation data"""
     weights = [1 - validation_ratio, validation_ratio]
     return random.choices([0, 1], weights)[0]

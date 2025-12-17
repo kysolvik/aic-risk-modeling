@@ -49,7 +49,6 @@ def run():
     # Build beam pipeline
     sample_points  = sample_random_points(ROI, config_dict['n_sample'], RNG)
 
-    # beam_options = PipelineOptions([], direct_num_workers=8, direct_running_mode='multi_processing')
     beam_options = PipelineOptions(beam_args,
                                    project=config_dict['project_id'],
                                    region='us-east1',
