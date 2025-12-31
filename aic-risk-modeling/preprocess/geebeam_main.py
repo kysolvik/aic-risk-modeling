@@ -15,6 +15,8 @@ Example execution:
 import ee
 import io
 import numpy as np
+from numpy.typing import ArrayLike
+import pandas as pd
 import geopandas as gpd
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions
@@ -62,6 +64,27 @@ def sample_random_points(roi: gpd.GeoDataFrame, n_sample: int, rng: np.random.Ge
     sample_df.index = np.arange(sample_df.shape[0])
     return sample_df.values
 
+def points_to_df(sample_points: ArrayLike, validation_ratio: float) -> pd.DataFrame:
+  """Produce training/validation Dataframe from points array"""
+  lon = sample_points[:,0]
+  lat = sample_points[:,1]
+  out_df = pd.DataFrame({
+    'lat': lat,
+    'lon': lon,
+    'split': 'train',
+  }
+  )
+
+  # Shuffle order
+  out_df = out_df.sample(frac=1, random_state=RNG).reset_index(drop=True)
+  out_df['id'] = out_df.index
+
+  # Split
+  num_train = round(out_df.shape[0]*(1-validation_ratio))
+  out_df.loc[num_train:, 'split'] = 'val'
+
+  return out_df
+
 def array_to_example(structured_array):
     """"Convert structured numpy array to tf.Example proto."""
     feature = {}
@@ -72,13 +95,17 @@ def array_to_example(structured_array):
     return tf.train.Example(
         features = tf.train.Features(feature = feature))
 
-def serialize_example(structured_array):
+def serialize_example(element):
     """Convert structured numpy array to serliazed tf.Example proto"""
-    return array_to_example(structured_array).SerializeToString()
+    return array_to_example(element['array']).SerializeToString()
 
-def split_dataset(element, n_partitions, validation_ratio=0.2) -> int:
-    weights = [1 - validation_ratio, validation_ratio]
-    return random.choices([0, 1], weights)[0]
+def split_dataset(element, n_partitions) -> int:
+    split_mappings = {
+        'train': 0,
+        'val': 1,
+        'test': 2
+    }
+    return split_mappings[element['split']]
 
 def prepare_run_metadata(config):
     ee.Initialize(project=config['project_id'])
@@ -162,10 +189,10 @@ class EEComputePatch(beam.DoFn):
         return ee.ImageCollection(full_list).toBands().rename(band_names)
 
     @retry.Retry(tries=5, delay=1, backoff=2)
-    def process(self, coords):
+    def process(self, point):
         """Compute a patch of pixel, with upper-left corner defined by the coords."""
         t0 = time.time()
-        logging.warning(f"EE start {coords}")
+        logging.warning(f"EE start {point['id']}")
         prepped_image = self.build_prepped_image()
 
         # Make a request object.
@@ -180,10 +207,10 @@ class EEComputePatch(beam.DoFn):
                 'affineTransform': {
                     'scaleX': self.scale_x,
                     'shearX': 0,
-                    'translateX': coords[0],
+                    'translateX': point['lon'],
                     'shearY': 0,
                     'scaleY': self.scale_y,
-                    'translateY': coords[1]
+                    'translateY': point['lat']
                 },
                 'crsCode': 'EPSG:4326',
             },
@@ -198,13 +225,15 @@ class EEComputePatch(beam.DoFn):
         try:
             arr = np.load(io.BytesIO(raw))
         except Exception as e:
-            raise RuntimeError(f"Failed to load NPY for coords {coords}") from e
+            raise RuntimeError(f"Failed to load NPY for coords {point['id']}") from e
 
         logging.warning(
-            f"EE end {coords}, took {time.time() - t0:.1f}s, bytes={len(raw)}"
+            f"EE end {point['id']}, took {time.time() - t0:.1f}s, bytes={len(raw)}"
         )
 
-        yield arr
+        out_dict = dict(point)
+        out_dict['array'] = arr
+        yield out_dict
 
     def _prep_embeddings(self, year):
         return (
@@ -251,6 +280,10 @@ def run():
     # Randomly sample points
     roi = gpd.read_file(args.region_of_interest)
     sample_points  = sample_random_points(roi, config_dict['n_sample'], RNG)
+    # Convert to dataframe with some metadata attached (including split)
+    input_records = points_to_df(
+        sample_points, config_dict['validation_ratio']
+        ).to_dict('records')
 
     # Pre-run info:
     scale_x, scale_y = prepare_run_metadata(config_dict)
@@ -271,16 +304,21 @@ def run():
     with beam.Pipeline(options=beam_options) as pipeline:
         training_data, validation_data = (
             pipeline
-            | 'Create points' >> beam.Create(sample_points)
+            | 'Create points' >> beam.Create(input_records)
             | 'Get patch' >> beam.ParDo(EEComputePatch(config_dict, scale_x, scale_y))
-            | 'Serialize' >> beam.Map(serialize_example)
-            | 'Split dataset' >> beam.Partition(split_dataset, 2, config_dict['validation_ratio'])
+            | 'Split dataset' >> beam.Partition(split_dataset, 2)
         )
-        training_data | 'Write training data' >> beam.io.WriteToTFRecord(
+        (training_data
+            | 'Serialize training' >> beam.Map(serialize_example)
+            | 'Write training data' >> beam.io.WriteToTFRecord(
             os.path.join(args.output_path, 'training'), file_name_suffix='.tfrecord.gz'
+            )
         )
-        validation_data | 'Write validation data' >> beam.io.WriteToTFRecord(
+        (validation_data
+            | 'Serialize validation' >> beam.Map(serialize_example)
+            | 'Write validation data' >> beam.io.WriteToTFRecord(
             os.path.join(args.output_path, 'validation'), file_name_suffix='.tfrecord.gz'
+            )
         )
 
 if __name__ == '__main__':
