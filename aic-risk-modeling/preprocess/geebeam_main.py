@@ -85,6 +85,36 @@ def points_to_df(sample_points: ArrayLike, validation_ratio: float) -> pd.DataFr
 
   return out_df
 
+def _bytes_feature(value):
+    """Returns a bytes_list from a string / byte."""
+    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
+
+def _float_feature(value):
+    """Returns a float_list from a float / double."""
+    return tf.train.Feature(float_list=tf.train.FloatList(value=[value]))
+
+def _int64_feature(value):
+    """Returns an int64_list from a bool / enum / int / uint."""
+    return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
+
+def dict_to_example(element):
+    """"Convert structured numpy array to tf.Example proto."""
+    # First add metadata
+    feature = {
+        'id': _int64_feature(element['id']),
+        'lat': _float_feature(element['lat']),
+        'lon': _float_feature(element['lon']),
+    }
+
+    # Build image feature with named bands
+    for im_feat in element['array'].dtype.names:
+        feature[im_feat] = tf.train.Feature(
+            float_list = tf.train.FloatList(
+                value = element['array'][im_feat].flatten()))
+
+    return tf.train.Example(
+        features = tf.train.Features(feature = feature))
+
 def array_to_example(structured_array):
     """"Convert structured numpy array to tf.Example proto."""
     feature = {}
@@ -97,7 +127,7 @@ def array_to_example(structured_array):
 
 def serialize_example(element):
     """Convert structured numpy array to serliazed tf.Example proto"""
-    return array_to_example(element['array']).SerializeToString()
+    return dict_to_example(element).SerializeToString()
 
 def split_dataset(element, n_partitions) -> int:
     split_mappings = {
@@ -116,8 +146,6 @@ def prepare_run_metadata(config):
     scale_x = proj_dict['transform'][0]
     scale_y = -proj_dict['transform'][4]
 
-    # band_names = get_band_names(config)
-    print(scale_x, scale_y)
     return scale_x, scale_y
 
 def get_band_names(config):
@@ -280,6 +308,7 @@ def run():
     # Randomly sample points
     roi = gpd.read_file(args.region_of_interest)
     sample_points  = sample_random_points(roi, config_dict['n_sample'], RNG)
+     
     # Convert to dataframe with some metadata attached (including split)
     input_records = points_to_df(
         sample_points, config_dict['validation_ratio']
