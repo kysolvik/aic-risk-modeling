@@ -9,6 +9,8 @@ python geebeam_main.py \
     --sdk_container_image=us-east1-docker.pkg.dev/ksolvik-misc/columbia-aic-risk-modeling/fire-risk-preprocess/beam_python_prebuilt_sdk:9472ab08-b36c-4096-a6a2-bedcd892ac0c
 
 
+# Uncomment to build container image for faster deployment
+# Pushes to Google Archive Registry
 #    --prebuild_sdk_container_engine=local_docker \
 #    --docker_registry_push_url=us-east1-docker.pkg.dev/ksolvik-misc/columbia-aic-risk-modeling/fire-risk-preprocess
 #    --requirements_file ./pipeline_requirements.txt \
