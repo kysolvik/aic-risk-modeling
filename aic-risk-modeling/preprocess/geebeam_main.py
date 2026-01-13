@@ -22,6 +22,8 @@ import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions
 import random
 import tensorflow as tf
+import tensorflow_data_validation as tfdv
+from tfx_bsl.coders import example_coder
 import logging
 import time
 import argparse
@@ -85,6 +87,37 @@ def points_to_df(sample_points: ArrayLike, validation_ratio: float) -> pd.DataFr
 
   return out_df
 
+def _bytes_feature(value):
+    """Returns a bytes_list from a string / byte."""
+    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
+
+def _float_feature(value):
+    """Returns a float_list from a float / double."""
+    return tf.train.Feature(float_list=tf.train.FloatList(value=[value]))
+
+def _int64_feature(value):
+    """Returns an int64_list from a bool / enum / int / uint."""
+    return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
+
+def dict_to_example(element):
+    """"Convert structured numpy array to tf.Example proto."""
+    # First add metadata
+    feature = {
+        'id': _int64_feature(element['id']),
+        'lat': _float_feature(element['lat']),
+        'lon': _float_feature(element['lon']),
+    }
+
+    # Build image feature with named bands
+    for im_feat in element['array'].dtype.names:
+        feature[im_feat] = tf.train.Feature(
+            float_list = tf.train.FloatList(
+                value = element['array'][im_feat].flatten()))
+
+    # Build example and serialize
+    return tf.train.Example(
+        features = tf.train.Features(feature = feature)).SerializeToString()
+
 def array_to_example(structured_array):
     """"Convert structured numpy array to tf.Example proto."""
     feature = {}
@@ -94,10 +127,6 @@ def array_to_example(structured_array):
                 value = structured_array[f].flatten()))
     return tf.train.Example(
         features = tf.train.Features(feature = feature))
-
-def serialize_example(element):
-    """Convert structured numpy array to serliazed tf.Example proto"""
-    return array_to_example(element['array']).SerializeToString()
 
 def split_dataset(element, n_partitions) -> int:
     split_mappings = {
@@ -116,8 +145,6 @@ def prepare_run_metadata(config):
     scale_x = proj_dict['transform'][0]
     scale_y = -proj_dict['transform'][4]
 
-    # band_names = get_band_names(config)
-    print(scale_x, scale_y)
     return scale_x, scale_y
 
 def get_band_names(config):
@@ -163,7 +190,8 @@ class EEComputePatch(beam.DoFn):
     def setup(self):
         print(f"Initializing Earth Engine for project: {self.config['project_id']}")
         logging.warning("EE setup: starting")
-        ee.Initialize(project=self.config['project_id'], opt_url='https://earthengine-highvolume.googleapis.com')
+        ee.Initialize(project=self.config['project_id'],
+                      opt_url='https://earthengine-highvolume.googleapis.com')
         logging.warning("EE setup: finished")
 
     def build_prepped_image(self):
@@ -267,6 +295,21 @@ class EEComputePatch(beam.DoFn):
             .reduceResolution('mean', maxPixels=500)
             )
 
+class WriteTFExample(beam.PTransform):
+    """Write example"""
+    def __init__(self, output_dir, file_name_suffix='.tfrecord.gz'):
+        self.output_dir = output_dir
+        self.file_name_suffix = file_name_suffix
+
+    def expand(self, pcoll):
+        return (
+            pcoll
+            | 'Write to TFRecord' >> beam.io.WriteToTFRecord(
+                self.output_dir,
+                file_name_suffix=self.file_name_suffix
+            )
+        )
+
 def run():
     import logging
 
@@ -280,6 +323,7 @@ def run():
     # Randomly sample points
     roi = gpd.read_file(args.region_of_interest)
     sample_points  = sample_random_points(roi, config_dict['n_sample'], RNG)
+     
     # Convert to dataframe with some metadata attached (including split)
     input_records = points_to_df(
         sample_points, config_dict['validation_ratio']
@@ -302,24 +346,60 @@ def run():
 
     # Execute pipeline
     with beam.Pipeline(options=beam_options) as pipeline:
+
+        # Gather data and split
         training_data, validation_data = (
             pipeline
             | 'Create points' >> beam.Create(input_records)
             | 'Get patch' >> beam.ParDo(EEComputePatch(config_dict, scale_x, scale_y))
             | 'Split dataset' >> beam.Partition(split_dataset, 2)
         )
-        (training_data
-            | 'Serialize training' >> beam.Map(serialize_example)
-            | 'Write training data' >> beam.io.WriteToTFRecord(
-            os.path.join(args.output_path, 'training'), file_name_suffix='.tfrecord.gz'
-            )
+
+        # Convert to TF examples
+        training_examples = (
+            training_data
+            | 'Train to tf.Example' >> beam.Map(dict_to_example)
         )
-        (validation_data
-            | 'Serialize validation' >> beam.Map(serialize_example)
-            | 'Write validation data' >> beam.io.WriteToTFRecord(
-            os.path.join(args.output_path, 'validation'), file_name_suffix='.tfrecord.gz'
-            )
+        validation_examples = (
+            validation_data
+            | 'Val to tf.Example' >> beam.Map(dict_to_example)
         )
+
+        # Calculate stats on training data
+        decoder = example_coder.ExamplesToRecordBatchDecoder()
+        stats = (
+            training_examples
+            | 'Batch' >> beam.BatchElements(
+                min_batch_size=10,
+                max_batch_size=100)
+            | 'Decode to arrow' >> beam.Map(lambda b: decoder.DecodeBatch(b))
+            | 'Generate Statistics' >> tfdv.GenerateStatistics()
+        )
+        stats | 'Write stats' >> tfdv.WriteStatisticsToTFRecord(
+            os.path.join(args.output_path, 'stats.tfrecord'))
+
+        # Write out examples
+        (training_examples 
+         | 'Write training' >> WriteTFExample(
+             os.path.join(args.output_path, 'training'))
+        )
+        (validation_examples 
+         | 'Write validation' >> WriteTFExample(
+             os.path.join(args.output_path, 'validation'))
+        )
+    
+    # Infer schema
+    stats = tfdv.load_statistics(
+        os.path.join(args.output_path, 'stats.tfrecord')
+    )
+
+    schema = tfdv.infer_schema(stats)
+
+    tfdv.write_schema_text(
+        schema,
+        os.path.join(args.output_path, 'schema.pbtxt')
+    )
+
 
 if __name__ == '__main__':
     run()
