@@ -9,13 +9,13 @@ description = "Amazon fire risk modeling utilities"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 authors = [ 
-    { name = "Kylen Solvik", email='kylen.solvik@columbia.edu} 
+    { name = "Kylen Solvik", email = "kylen.solvik@columbia.edu" } 
     ]
 requires-python = ">=3.8"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["aic-risk-modeling]
+include = ["aic-risk-modeling"]
 
 [tool.setuptools]
 zip-safe = false
