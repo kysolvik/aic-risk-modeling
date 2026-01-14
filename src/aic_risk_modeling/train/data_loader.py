@@ -17,8 +17,8 @@ import logging
 from typing import List, Dict, Tuple, Optional
 
 import tensorflow as tf
-import tensorflow_data_validation as tfdv
 from tensorflow_metadata.proto.v0 import schema_pb2
+from google.protobuf import text_format
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ def _gcs_join(base: str, name: str) -> str:
     return base.rstrip("/") + "/" + name
 
 
-def infer_schema_from_gcs(gcs_dir: str) -> schema_pb2.Schema:
+def load_schema_from_gcs(gcs_dir: str) -> schema_pb2.Schema:
     """Load a schema from `schema.pbtxt` in GCS or infer from `stats.tfrecord`.
 
     Args:
@@ -40,22 +40,16 @@ def infer_schema_from_gcs(gcs_dir: str) -> schema_pb2.Schema:
         FileNotFoundError: if neither `schema.pbtxt` nor `stats.tfrecord` are found
     """
     schema_path = _gcs_join(gcs_dir, "schema.pbtxt")
-    stats_path = _gcs_join(gcs_dir, "stats.tfrecord")
+    schema = schema_pb2.Schema()
 
     # Prefer existing schema
     if tf.io.gfile.exists(schema_path):
         logger.info("Loading schema from %s", schema_path)
-        return tfdv.load_schema_text(schema_path)
-
-    # Otherwise try to infer from stats
-    if tf.io.gfile.exists(stats_path):
-        logger.info("Inferring schema from %s", stats_path)
-        stats = tfdv.load_statistics(stats_path)
-        schema = tfdv.infer_schema(stats)
-        return schema
+        with tf.io.gfile.GFile(schema_path, "r") as f:
+            return text_format.Parse(f.read(), schema)
 
     raise FileNotFoundError(
-        f"Could not find schema.pbtxt or stats.tfrecord in {gcs_dir}")
+        f"Could not find schema.pbtxt in {gcs_dir}")
 
 
 def schema_to_feature_spec(
@@ -112,7 +106,8 @@ def _to_tuple_transform(example: Dict, input_bands: List[str], output_bands: Lis
     inputs = {name: example[name] for name in input_bands}
     # If multiple outputs return dict/list, here return single output scalar/mask
     if len(output_bands) == 1:
-        return inputs, example[output_bands[0]]
+        # IMPORTANT: for BurnDate, return mask of burned pixels, any date.
+        return inputs, (example[output_bands[0]] > 0)
     return inputs, {name: example[name] for name in output_bands}
 
 
