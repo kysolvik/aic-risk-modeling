@@ -12,6 +12,9 @@ Usage example
 >>> feature_spec = schema_to_feature_spec(schema, non_img_features=['lon','lat','id'], patch_size=128)
 >>> ds = dataset_from_gcs('gs://aic-fire-amazon/results/training-*.tfrecord.gz', feature_spec, input_bands=[...], output_bands=['BurnDate'], batch_size=8)
 """
+
+from __future__ import annotations
+
 import os
 import logging
 from typing import List, Dict, Tuple, Optional
@@ -118,7 +121,7 @@ def dataset_from_gcs(
     output_bands: List[str],
     batch_size: int = 8,
     shuffle: bool = True,
-    cache: bool = True,
+    cache: Optional[str | bool] = False,
     compression: Optional[str] = "GZIP",
     shuffle_buffer: int = 512,
 ) -> tf.data.Dataset:
@@ -131,7 +134,7 @@ def dataset_from_gcs(
         output_bands: list of feature names to use as outputs (targets)
         batch_size: batch size
         shuffle: whether to shuffle
-        cache: whether to cache dataset in memory
+        cache: False (no caching), True (in memory caching), or str (cache to disk at path).
         compression: e.g., 'GZIP' or None
 
     Returns:
@@ -149,7 +152,9 @@ def dataset_from_gcs(
     parse_fn = lambda x: tf.io.parse_single_example(x, feature_spec)
     ds = ds.map(parse_fn, num_parallel_calls=tf.data.AUTOTUNE)
 
-    if cache:
+    if isinstance(cache, str):
+        ds = ds.cache(cache)
+    elif cache is True:
         ds = ds.cache()
     if shuffle:
         ds = ds.shuffle(shuffle_buffer)
