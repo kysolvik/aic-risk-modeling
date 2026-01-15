@@ -12,10 +12,6 @@ authors = [
     { name = "Kylen Solvik", email = "kylen.solvik@columbia.edu" } 
     ]
 requires-python = ">=3.8"
-
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["aic_risk_modeling"]
-
-[tool.setuptools]
-zip-safe = false
+dependencies = [
+    "tensorflow-metadata",
+]
