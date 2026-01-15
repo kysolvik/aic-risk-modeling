@@ -2,13 +2,16 @@
 from google.cloud import aiplatform
 
 # Training parameters
-epochs = 10
+epochs = 1
 model_type='mlp'
 gcs_data_dir='gs://aic-fire-amazon/results_2024_5k/'
 tfrecord_pattern='*.tfrecord.gz'
 output_band='BurnDate'
 patch_size=128
 batch_size=4
+model_output_path='gs://aic-fire-amazon/models/vertex_model_{model_type}.keras'
+
+
 
 # Basic parameters
 project='ksolvik-misc'
@@ -18,9 +21,10 @@ bucket='aic-fire-amazon'
 aiplatform.init(project=project, location=location, staging_bucket=bucket)
 
 # https://cloud.google.com/python/docs/reference/aiplatform/latest/google.cloud.aiplatform.CustomTrainingJob
-job = aiplatform.CustomTrainingJob(
+job = aiplatform.CustomPythonPackageTrainingJob(
     display_name=f"fire-risk-model",
-    script_path="../src/aic_risk_modeling/train/train_model.py",
+    python_package_gcs_uri="gs://aic-fire-amazon/python_packages/aic_risk_modeling-0.0.1.tar.gz",
+    python_module_name="aic_risk_modeling.train.train_model",
     container_uri="us-docker.pkg.dev/vertex-ai/training/tf-cpu.2-16.py310:latest",
 )
 
@@ -36,5 +40,6 @@ job.run(
         f"--patch_size={patch_size}",
         f"--batch_size={batch_size}",
         f"--epochs={epochs}",
+        f"--model_output_path={model_output_path}",
     ],
 )
