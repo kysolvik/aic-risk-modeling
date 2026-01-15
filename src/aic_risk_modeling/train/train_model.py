@@ -1,5 +1,18 @@
-"""Entry point for training model on Vertex AI
+"""Entry point for training risk model on Vertex AI.
 
+This module provides functionality to train a segmentation model for predicting burned areas.
+It handles data loading from GCS, model building based on specified architecture, and training
+with checkpointing and early stopping.
+
+Command-line Arguments:
+    --model_type (str, required): Type of model architecture to use (e.g., 'unet').
+    --gcs_data_dir (str, required): GCS path to directory containing training/validation data.
+    --tfrecord_pattern (str, optional): Pattern for TFRecord files. Default: '*.tfrecord'.
+    --patch_size (int, optional): Spatial dimensions of input patches. Default: 128.
+    --output_band (str, optional): Name of target output band. Default: 'BurnDate'.
+    --batch_size (int, optional): Batch size for training. Default: 4.
+    --epochs (int, required): Number of training epochs.
+    --model_output_path (str, optional): Path to save trained model, can be cloud storage.
 """
 
 
@@ -132,6 +145,8 @@ def run(
         callbacks=[model_checkpoint_callback, early_stopping_callback]
     )
 
+    model.save(model_output_path)
+
     return model
 
 if __name__ == "__main__":
@@ -142,7 +157,7 @@ if __name__ == "__main__":
     parser.add_argument('--gcs_data_dir', type=str, required=True)
     parser.add_argument('--tfrecord_pattern', type=str, default='*.tfrecord')
     parser.add_argument('--patch_size', type=int, default=128)
-    parser.add_argument('--output_band', type=str, default='BurnedDate')
+    parser.add_argument('--output_band', type=str, default='BurnDate')
     parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--epochs', type=int, required=True)
     parser.add_argument('--model_output_path', type=str)
@@ -158,3 +173,5 @@ if __name__ == "__main__":
         epochs=args.epochs,
         model_output_path=args.model_output_path
     )
+
+    print("Training complete, model saved to:", args.model_output_path)
