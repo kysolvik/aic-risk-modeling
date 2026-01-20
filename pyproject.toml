@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=60.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aic-risk-modeling"
+version = "0.0.1"
+description = "Amazon fire risk modeling utilities"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [ 
+    { name = "Kylen Solvik", email = "kylen.solvik@columbia.edu" } 
+    ]
+requires-python = ">=3.8"
+dependencies = [
+    "tensorflow-metadata",
+]
