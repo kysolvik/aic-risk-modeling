@@ -2,13 +2,12 @@
 
 Subpackages:
 - `train` (training utilities and data loaders)
-- `preprocess` (preprocessing and Beam helpers)
 
 Uses __getattr__ to do lazy submodule imports (according to PEP 562) to
 reduce imports of heavy optional dependencies (e.g., `tensorflow-data-validation`).
 """
 
-__all__ = ["train", "preprocess"]
+__all__ = ["train"]
 
 # Lazily import subpackages on attribute access (PEP 562)
 import importlib
