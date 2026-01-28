@@ -30,6 +30,17 @@ from aic_risk_modeling.train import data_loader, models
 SEED = 54
 RNG = np.random.default_rng(SEED)
 
+def load_config(
+        config_path
+    ):
+    if config_path.startswith('gs://'):
+        from tensorflow.io.gfile import GFile
+        with GFile(config_path, 'r') as f:
+            config = json.load(f)
+    else:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+    return config
 
 def build_datasets(
         gcs_data_dir,
@@ -127,6 +138,7 @@ def run(
             ]
         )
     checkpoint_filepath = './checkpoint.model.keras'
+
     model_checkpoint_callback = keras.callbacks.ModelCheckpoint(
         filepath=checkpoint_filepath,
         monitor='val_loss',
@@ -153,15 +165,29 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_type', type=str, required=True)
-    parser.add_argument('--gcs_data_dir', type=str, required=True)
+    parser.add_argument('--config_path', type=str, required=False)
+    parser.add_argument('--model_type', type=str, required=False)
+    parser.add_argument('--gcs_data_dirs', type=str, required=False, nargs='+')
     parser.add_argument('--tfrecord_pattern', type=str, default='*.tfrecord')
     parser.add_argument('--patch_size', type=int, default=128)
+    parser.add_argument('--input_bands', type=str, nargs='+', default=None)
     parser.add_argument('--output_band', type=str, default='BurnDate')
     parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--epochs', type=int, required=True)
     parser.add_argument('--model_output_path', type=str)
     args = parser.parse_args()
+
+    if args.config_path:
+        config = load_config(args.config_path)
+        args.model_type = config.get('model_type', args.model_type)
+        args.gcs_data_dirs = config.get('gcs_data_dirs', args.gcs_data_dirs)
+        args.tfrecord_pattern = config.get('tfrecord_pattern', args.tfrecord_pattern)
+        args.patch_size = config.get('patch_size', args.patch_size)
+        args.input_bands = config.get('input_bands', args.input_bands)
+        args.output_band = config.get('output_band', args.output_band)
+        args.batch_size = config.get('batch_size', args.batch_size)
+        args.epochs = config.get('epochs', args.epochs)
+        args.model_output_path = config.get('model_output_path', args.model_output_path)
 
     run(
         model_type=args.model_type,
