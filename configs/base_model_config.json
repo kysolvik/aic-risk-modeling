@@ -1,0 +1,26 @@
+{
+    "model_type": "mlp",
+    "epochs": 1,
+    "data_dirs": ["gs://aic-fire-amazon/data/embeddings_mean_post2021/","gs://aic-fire-amazon/data/results_target2024_2000/"],
+    "tfrecord_pattern": "*.tfrecord.gz",
+    "input_bands":[
+        "A00_2023", "A01_2023", "A02_2023", "A03_2023", "A04_2023", "A05_2023", "A06_2023",
+        "A07_2023", "A08_2023", "A09_2023", "A10_2023", "A11_2023", "A12_2023", "A13_2023",
+        "A14_2023", "A15_2023", "A16_2023", "A17_2023", "A18_2023", "A19_2023", "A20_2023",
+        "A21_2023", "A22_2023", "A23_2023", "A24_2023", "A25_2023", "A26_2023", "A27_2023",
+        "A28_2023", "A29_2023", "A30_2023", "A31_2023", "A32_2023", "A33_2023", "A34_2023",
+        "A35_2023", "A36_2023", "A37_2023", "A38_2023", "A39_2023", "A40_2023", "A41_2023",
+        "A42_2023", "A43_2023", "A44_2023", "A45_2023", "A46_2023", "A47_2023", "A48_2023",
+        "A49_2023", "A50_2023", "A51_2023", "A52_2023", "A53_2023", "A54_2023", "A55_2023",
+        "A56_2023", "A57_2023", "A58_2023", "A59_2023", "A60_2023", "A61_2023", "A62_2023",
+        "A63_2023", "burned_area_2022", "def", "deforestation_2022"],
+    "output_band": "BurnDate",
+    "patch_size": 128,
+    "batch_size": 4,
+    "model_output_path": "gs://aic-fire-amazon/models/vertex_model_mlp.keras",
+    "transforms": {
+        "BurnDate": "gt0",
+        "deforestation_2022": "eq2",
+        "def": "normalize_mcwd"
+    }
+} 
