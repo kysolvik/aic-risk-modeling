@@ -15,7 +15,7 @@ from .data_loader import (
     schema_to_feature_spec,
     dataset_from_dir,
     dataset_from_gcs,
-    select_inputs_outputs,
+    select_bands_transform,
     merge_datasets,
     apply_transforms,
 )

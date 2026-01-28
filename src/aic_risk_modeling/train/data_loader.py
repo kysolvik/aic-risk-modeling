@@ -5,7 +5,7 @@ Functions
 - schema_to_feature_spec(schema, non_img_features, patch_size): convert schema proto to TF parsing spec
 - build_features_dict(schema, patch_size, non_img_features): convenience wrapper to produce a features dict
 - dataset_from_dir(tfrecord_pattern, feature_spec, batch_size, shuffle): return batched dataset with all features as dict
-- select_inputs_outputs(dataset, input_bands, output_bands, transforms): extract inputs/outputs from feature dict
+- select_bands_transform(dataset, input_bands, output_bands, transforms): extract inputs/outputs from feature dict
 - merge_datasets(datasets, merge_fn): merge multiple datasets along feature axis
 - apply_transforms(example, transforms): apply custom transforms to example fields
 
@@ -17,7 +17,7 @@ Typical workflow:
 >>> merged = merge_datasets([ds1, ds2])
 >>> # Select inputs/outputs and apply transforms
 >>> transforms = {'BurnDate': lambda x: x > 0}
->>> final_ds = select_inputs_outputs(merged,
+>>> final_ds = select_bands_transform(merged,
 >>>                                    input_bands=['A01', 'A02'],
 >>>                                    output_bands=['BurnDate'],
 >>>                                    transforms=transforms)
@@ -119,7 +119,7 @@ def build_features_dict(
 
 def apply_transforms(
     example: Dict,
-    transforms: Optional[Dict[str, Callable]] = None
+    transform_dict: Optional[Dict[str, Callable]] = None
 ) -> Dict:
     """Apply custom transforms to specific fields in an example.
 
@@ -131,11 +131,11 @@ def apply_transforms(
     Returns:
         Dictionary with transforms applied to specified features
     """
-    if transforms is None:
+    if transform_dict is None:
         return example
 
     result = example.copy()
-    for feature_name, transform_fn in transforms.items():
+    for feature_name, transform_fn in transform_dict.items():
         if feature_name in result:
             if callable(transform_fn):
                 result[feature_name] = transform_fn(result[feature_name])
@@ -204,7 +204,7 @@ def dataset_from_dir(
     """Builds a tf.data.Dataset from TFRecord files, returning all features as a dict.
 
     Use this to load raw data that will be merged with other datasets before selecting
-    inputs/outputs. For input/output selection and transforms, use `select_inputs_outputs()`.
+    inputs/outputs. For input/output selection and transforms, use `select_bands_transform()`.
 
     Args:
         dir: Directory containing tfrecord.gz files
@@ -224,7 +224,7 @@ def dataset_from_dir(
         >>> ds1 = dataset_from_dir('gs://.../training-*.tfrecord.gz', feature_spec, batch_size=8)
         >>> ds2 = dataset_from_dir('gs://.../other-*.tfrecord.gz', feature_spec, batch_size=8)
         >>> merged = merge_datasets([ds1, ds2])
-        >>> final = select_inputs_outputs(merged, input_bands=['A01'], output_bands=['BurnDate'])
+        >>> final = select_bands_transform(merged, input_bands=['A01'], output_bands=['BurnDate'])
     """
     full_path_pattern = os.path.join(dir, tfrecord_pattern)
     files = tf.io.gfile.glob(full_path_pattern)
@@ -256,7 +256,7 @@ def dataset_from_dir(
     return ds
 
 
-def select_inputs_outputs(
+def select_bands_transform(
     dataset: tf.data.Dataset,
     input_bands: List[str],
     output_bands: List[str],
@@ -279,7 +279,7 @@ def select_inputs_outputs(
     Example:
         >>> merged = merge_datasets([ds1, ds2])
         >>> transforms = {'BurnDate': lambda x: x > 0}
-        >>> final = select_inputs_outputs(
+        >>> final = select_bands_transform(
         ...     merged,
         ...     input_bands=['A01', 'A02'],
         ...     output_bands=['BurnDate'],
@@ -375,12 +375,12 @@ if __name__ == "__main__":
 
     # Select inputs/outputs with transforms
     print("\n--- After selecting inputs/outputs with transforms ---")
-    transforms = {'BurnDate': lambda x: x > 0}
-    ds_final = select_inputs_outputs(
+    transform_dict = {'BurnDate': lambda x: x > 0}
+    ds_final = select_bands_transform(
         ds_raw,
         input_bands=[k for k in feature_spec.keys() if k not in ['lat', 'lon', 'id', 'BurnDate']],
         output_bands=['BurnDate'],
-        transforms=transforms
+        transforms=transform_dict
     )
 
     for inputs, labels in ds_final.take(1):
