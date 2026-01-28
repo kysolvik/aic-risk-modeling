@@ -42,44 +42,50 @@ def load_config(
             config = json.load(f)
     return config
 
-def build_datasets(
-        gcs_data_dir,
+
+def build_merged_dataset(
+        data_dirs,
         tfrecord_pattern,
         patch_size,
-        output_band,
-        batch_size=4,
+        batch_size=4
         ):
-    training_pattern = os.path.join(gcs_data_dir, 'training-{}'.format(tfrecord_pattern))
-    validation_pattern = os.path.join(gcs_data_dir, 'validation-{}'.format(tfrecord_pattern))
+    training_datasets = []
+    training_pattern = 'training-{}'.format(tfrecord_pattern)
+    validation_datasets = []
+    validation_pattern = 'validation-{}'.format(tfrecord_pattern)
+    for data_dir in data_dirs:
+        training_ds = data_loader.dataset_from_dir(
+            data_dir,
+            training_pattern,
+            patch_size=patch_size,
+            batch_size=batch_size,
+            cache=False
+        )
+        validation_ds = data_loader.dataset_from_dir(
+            data_dir,
+            validation_pattern,
+            patch_size=patch_size,
+            batch_size=batch_size,
+            cache=False
+        )
+        training_datasets.append(training_ds)
+        validation_datasets.append(validation_ds)
+    
+    training_merged = data_loader.merge_datasets(training_datasets).shuffle(buffer_size=64)
+    validation_merged = data_loader.merge_datasets(validation_datasets)
 
-    schema = data_loader.load_schema_from_gcs(gcs_data_dir)
-    feature_spec = data_loader.build_features_dict(schema, patch_size=patch_size)
+    return training_merged, validation_merged
 
-    training_ds = data_loader.dataset_from_gcs(training_pattern, feature_spec,
-                                input_bands=[k for k in feature_spec.keys() if k not in ['lat','lon','id', output_band]],
-                                output_bands=[output_band],
-                                batch_size=batch_size,
-                                shuffle_buffer=256,
-                                cache=False)
-    validation_ds = data_loader.dataset_from_gcs(validation_pattern, feature_spec,
-                                input_bands=[k for k in feature_spec.keys() if k not in ['lat','lon','id', output_band]],
-                                output_bands=[output_band],
-                                batch_size=batch_size,
-                                shuffle=False,
-                                cache=False)
 
-    return training_ds, validation_ds, feature_spec
-
-def build_model(model_type, feature_spec, patch_size, output_band):
+def build_model(model_type, input_bands, patch_size):
     function_name = f"get_{model_type}"  # becomes "get_unet"
-    input_bands = [k for k in feature_spec.keys() if k not in ['lat','lon','id', output_band]]
     input_shape = [patch_size, patch_size, len(input_bands)]
     try:
         # Attempt to get the function dynamically
         model_fn = getattr(models, function_name)
         model = model_fn(input_shape)
         print(f"Successfully initialized {model_type} model.")
-        
+
     except AttributeError:
         # 1. Get all members of the 'model' module
         # 2. Filter for things that are functions AND start with 'get_'
@@ -87,10 +93,10 @@ def build_model(model_type, feature_spec, patch_size, output_band):
             name for name, obj in inspect.getmembers(model, inspect.isfunction)
             if name.startswith("get_")
         ]
-        
+
         # 3. Clean up the names for the error message (e.g., 'get_unet' -> 'unet')
         valid_options = [n.replace("get_", "") for n in available_funcs]
-        
+
         raise ValueError(
             f"Invalid model type '{model_type}'. \n"
             f"Expected one of: {valid_options}\n"
@@ -107,27 +113,41 @@ def build_model(model_type, feature_spec, patch_size, output_band):
     return new_model
 
 def run(
-        gcs_data_dir,
+        data_dirs,
         tfrecord_pattern,
         patch_size,
+        input_bands,
         output_band,
         batch_size,
         model_type,
         epochs,
         model_output_path,
-
+        transforms,
 ):
     # Get datasets
-    training_ds, validation_ds, feature_spec = build_datasets(
-        gcs_data_dir=gcs_data_dir,
+    training_ds, validation_ds = build_merged_dataset(
+        data_dirs=data_dirs,
         tfrecord_pattern=tfrecord_pattern,
         patch_size=patch_size,
-        output_band=output_band,
         batch_size=batch_size,
     )
 
+    # Select bands
+    training_ds = data_loader.select_bands_transform(
+        training_ds,
+        input_bands=input_bands,
+        output_bands=[output_band],
+        transforms=transforms,
+    )
+    validation_ds = data_loader.select_bands_transform(
+        validation_ds,
+        input_bands=input_bands,
+        output_bands=[output_band],
+        transforms=transforms,
+    )
+
     # Get model
-    model = build_model(model_type.lower(), feature_spec, patch_size, output_band)
+    model = build_model(model_type.lower(), input_bands, patch_size)
 
     # Compile and run
     model.compile(
@@ -167,20 +187,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config_path', type=str, required=False)
     parser.add_argument('--model_type', type=str, required=False)
-    parser.add_argument('--gcs_data_dirs', type=str, required=False, nargs='+')
+    parser.add_argument('--data_dirs', type=str, required=False, nargs='+')
     parser.add_argument('--tfrecord_pattern', type=str, default='*.tfrecord')
     parser.add_argument('--patch_size', type=int, default=128)
     parser.add_argument('--input_bands', type=str, nargs='+', default=None)
     parser.add_argument('--output_band', type=str, default='BurnDate')
     parser.add_argument('--batch_size', type=int, default=4)
-    parser.add_argument('--epochs', type=int, required=True)
+    parser.add_argument('--epochs', type=int, required=False)
     parser.add_argument('--model_output_path', type=str)
+    parser.add_argument('--transforms', type=str)
     args = parser.parse_args()
 
     if args.config_path:
         config = load_config(args.config_path)
         args.model_type = config.get('model_type', args.model_type)
-        args.gcs_data_dirs = config.get('gcs_data_dirs', args.gcs_data_dirs)
+        args.data_dirs = config.get('data_dirs', args.data_dirs)
         args.tfrecord_pattern = config.get('tfrecord_pattern', args.tfrecord_pattern)
         args.patch_size = config.get('patch_size', args.patch_size)
         args.input_bands = config.get('input_bands', args.input_bands)
@@ -188,16 +209,21 @@ if __name__ == "__main__":
         args.batch_size = config.get('batch_size', args.batch_size)
         args.epochs = config.get('epochs', args.epochs)
         args.model_output_path = config.get('model_output_path', args.model_output_path)
+        # Note: Transforms has to be a dict, so this may not work.
+        # To apply custom transforms, use config
+        args.transforms = config.get('transforms', args.transforms)
 
     run(
         model_type=args.model_type,
-        gcs_data_dir=args.gcs_data_dir,
+        data_dirs=args.data_dirs,
         tfrecord_pattern=args.tfrecord_pattern,
         patch_size=args.patch_size,
+        input_bands=args.input_bands,
         output_band=args.output_band,
         batch_size=args.batch_size,
         epochs=args.epochs,
-        model_output_path=args.model_output_path
+        model_output_path=args.model_output_path,
+        transforms=args.transforms,
     )
 
     print("Training complete, model saved to:", args.model_output_path)
