@@ -106,3 +106,47 @@ def get_multi_scale_mlp_head(input_shape, hidden=128):
     # Define the model
     model = keras.Model(inputs, outputs)
     return model
+
+def get_simple_convlstm(input_shape):
+    
+    inputs = keras.Input(shape=input_shape)
+    c1 = keras.layers.ConvLSTM2D(filters=32, kernel_size=(3, 3), 
+          input_shape=input_shape, activation='relu', padding='same')(inputs)
+    outputs = keras.layers.Conv2D(filters=1, kernel_size=(3, 3),
+                                  activation="sigmoid", padding="same")(c1)
+
+    model = keras.Model(inputs, outputs)
+    return model
+
+def get_convlstm(input_shape):
+    
+    inputs = keras.Input(shape=input_shape)
+    c1 = keras.layers.ConvLSTM2D(
+        filters=32,
+        kernel_size=(5, 5),
+        padding="same",
+        return_sequences=True,
+        activation="relu",
+    )(inputs)
+    b1 = keras.layers.BatchNormalization()(c1)
+    c2 = keras.layers.ConvLSTM2D(
+        filters=32,
+        kernel_size=(3, 3),
+        padding="same",
+        return_sequences=True,
+        activation="relu",
+    )(b1)
+    b2 = keras.layers.BatchNormalization()(c2)
+    c3 = keras.layers.ConvLSTM2D(
+        filters=32,
+        kernel_size=(1, 1),
+        padding="same",
+        return_sequences=False,
+        activation="relu",
+    )(b2)
+    b3 = keras.layers.BatchNormalization()(c3)
+    outputs = keras.layers.Conv2D(filters=1, kernel_size=(3, 3),
+                                  activation="sigmoid", padding="same")(b3)
+
+    model = keras.Model(inputs, outputs)
+    return model
