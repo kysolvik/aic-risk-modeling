@@ -16,12 +16,8 @@ Command-line Arguments:
 """
 
 
-import os
 import numpy as np
 import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-import pickle
 import json
 import inspect
 
@@ -34,8 +30,7 @@ def load_config(
         config_path
     ):
     if config_path.startswith('gs://'):
-        from tensorflow.io.gfile import GFile
-        with GFile(config_path, 'r') as f:
+        with tf.io.gfile.GFile(config_path, 'r') as f:
             config = json.load(f)
     else:
         with open(config_path, 'r') as f:
@@ -70,7 +65,7 @@ def build_merged_dataset(
         )
         training_datasets.append(training_ds)
         validation_datasets.append(validation_ds)
-    
+
     training_merged = data_loader.merge_datasets(training_datasets).shuffle(buffer_size=64)
     validation_merged = data_loader.merge_datasets(validation_datasets)
 
@@ -151,21 +146,22 @@ def run(
 
     # Compile and run
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0025),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.005),
         loss="Dice",
         metrics=[
             tf.keras.metrics.BinaryIoU(target_class_ids=[1]),
+            tf.keras.metrics.AUC(),
             ]
         )
     checkpoint_filepath = './checkpoint.model.keras'
 
-    model_checkpoint_callback = keras.callbacks.ModelCheckpoint(
+    model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
         filepath=checkpoint_filepath,
         monitor='val_loss',
         mode='min',
         save_best_only=True)
 
-    early_stopping_callback = keras.callbacks.EarlyStopping(
+    early_stopping_callback = tf.keras.callbacks.EarlyStopping(
         monitor='val_loss',
         mode='min',
         patience=5)
