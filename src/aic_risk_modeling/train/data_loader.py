@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import List, Dict, Tuple, Optional, Callable
+from typing import List, Dict,  Optional, Callable
 
 import tensorflow as tf
 from tensorflow_metadata.proto.v0 import schema_pb2
@@ -256,12 +256,27 @@ def dataset_from_dir(
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
 
+def _stack_vars(features, label, input_keys, exclude_keys: Optional[List[str]] = None):
+    if exclude_keys:
+        filter_keys = [k for k in input_keys if k not in exclude_keys]
+    else:
+        filter_keys = input_keys
+
+    stacked_tensor = tf.stack([features[k] for k in filter_keys], axis=-1)
+
+    if exclude_keys:
+        all_features = {k: features[k] for k in features if k in exclude_keys}
+        all_features["image"] = stacked_tensor
+        return all_features, label
+    else:
+        return {"image": stacked_tensor}, label
 
 def select_bands_transform(
     dataset: tf.data.Dataset,
     input_bands: List[str],
     output_bands: List[str],
     transforms: Optional[Dict[str, Callable]] = None,
+    stack_inputs: bool = True
 ) -> tf.data.Dataset:
     """Select input and output bands from a dataset of feature dicts, with optional transforms.
 
@@ -288,7 +303,11 @@ def select_bands_transform(
         ... )
     """
     def select_fn(example):
-        return _to_tuple_transform(example, input_bands, output_bands, transforms)
+        inputs, labels = _to_tuple_transform(example, input_bands, output_bands, transforms)
+        if stack_inputs:
+            return _stack_vars(inputs, labels, input_bands)
+        else:
+            return inputs, labels
 
     return dataset.map(select_fn, num_parallel_calls=tf.data.AUTOTUNE)
 
@@ -308,6 +327,7 @@ def merge_datasets(
 
     Args:
         datasets: List of tf.data.Datasets to merge. Each should yield inputs_dict.
+        stack_features: If True, stack features into a single tensor along a new axis.
 
     Returns:
         A merged tf.data.Dataset
@@ -323,7 +343,6 @@ def merge_datasets(
     # Zip datasets and apply merge function
     zipped = tf.data.Dataset.zip(tuple(datasets))
     return zipped.map(_merged_zipped_ds, num_parallel_calls=tf.data.AUTOTUNE)
-
 
 # Alias for backward compatibility
 dataset_from_gcs = dataset_from_dir
