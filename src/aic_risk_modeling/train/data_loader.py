@@ -158,38 +158,6 @@ def apply_transforms(
     return result
 
 
-def _to_tuple_transform(
-    example: Dict,
-    input_bands: List[str],
-    output_bands: List[str],
-    transforms: Optional[Dict[str, Callable]] = None
-):
-    """Transform a parsed example into (inputs, outputs) tuple.
-
-    Args:
-        example: Dictionary of parsed features
-        input_bands: List of feature names to use as inputs
-        output_bands: List of feature names to use as outputs
-        transforms: Optional dict of feature_name -> transform_fn for custom transforms
-
-    Returns:
-        Tuple of (inputs_dict, outputs_dict or outputs_tensor)
-    """
-    # Apply transforms first
-    example = apply_transforms(example, transforms)
-
-    # Extract inputs and outputs
-    inputs = {name: example[name] for name in input_bands}
-
-    # Return outputs based on number of output bands
-    if len(output_bands) == 1:
-        # Single output: return as tensor
-        return inputs, example[output_bands[0]]
-    else:
-        # Multiple outputs: return as dict
-        return inputs, {name: example[name] for name in output_bands}
-
-
 def dataset_from_dir(
     dir: str,
     tfrecord_pattern: str = "*.tfrecord.gz",
@@ -256,7 +224,19 @@ def dataset_from_dir(
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
 
-def _stack_vars(features, label, input_keys, exclude_keys: Optional[List[str]] = None):
+def _stack_time_series(features, input_keys, years):
+    grouped_tensors = []
+    for year in years:
+        year_keys = [k for k in input_keys if k.endswith(f"_{year}")]
+        year_tensor = _stack_vars(features, year_keys)
+        grouped_tensors.append(year_tensor["image"])
+
+    timeseries_tensor = tf.stack(grouped_tensors, axis=1)
+    print(timeseries_tensor.shape)
+    return {"image": timeseries_tensor}
+
+
+def _stack_vars(features, input_keys, exclude_keys: Optional[List[str]] = None):
     if exclude_keys:
         filter_keys = [k for k in input_keys if k not in exclude_keys]
     else:
@@ -267,16 +247,61 @@ def _stack_vars(features, label, input_keys, exclude_keys: Optional[List[str]] =
     if exclude_keys:
         all_features = {k: features[k] for k in features if k in exclude_keys}
         all_features["image"] = stacked_tensor
-        return all_features, label
+        return all_features
     else:
-        return {"image": stacked_tensor}, label
+        return {"image": stacked_tensor}
+
+def _to_tuple_transform(
+    example: Dict,
+    input_bands: List[str],
+    output_bands: List[str],
+    transforms: Optional[Dict[str, Callable]] = None,
+    stack_inputs: bool = True,
+    stack_time_series: bool = False,
+    years: Optional[List[int]] = None,
+):
+    """Transform a parsed example into (inputs, outputs) tuple.
+
+    Args:
+        example: Dictionary of parsed features
+        input_bands: List of feature names to use as inputs
+        output_bands: List of feature names to use as outputs
+        transforms: Optional dict of feature_name -> transform_fn for custom transforms
+        stack_inputs: If True, stack input bands into a single tensor along a new axis.
+
+
+    Returns:
+        Tuple of (inputs_dict, outputs_dict or outputs_tensor)
+    """
+    # Apply transforms first
+    example = apply_transforms(example, transforms)
+
+    # Extract inputs and outputs
+    inputs = {name: example[name] for name in input_bands}
+
+    # Stack
+    if stack_time_series:
+        # Get groups of years
+        inputs = _stack_time_series(inputs, input_bands, years) 
+    elif stack_inputs:
+        inputs = _stack_vars(inputs, input_bands)
+
+    # Return outputs based on number of output bands
+    if len(output_bands) == 1:
+        # Single output: return as tensor
+        return inputs, example[output_bands[0]]
+    else:
+        # Multiple outputs: return as dict
+        return inputs, {name: example[name] for name in output_bands}
 
 def select_bands_transform(
     dataset: tf.data.Dataset,
     input_bands: List[str],
     output_bands: List[str],
     transforms: Optional[Dict[str, Callable]] = None,
-    stack_inputs: bool = True
+    stack_inputs: bool = True,
+    stack_time_series: bool = False,
+    years: Optional[List[int]] = None,
 ) -> tf.data.Dataset:
     """Select input and output bands from a dataset of feature dicts, with optional transforms.
 
@@ -303,11 +328,9 @@ def select_bands_transform(
         ... )
     """
     def select_fn(example):
-        inputs, labels = _to_tuple_transform(example, input_bands, output_bands, transforms)
-        if stack_inputs:
-            return _stack_vars(inputs, labels, input_bands)
-        else:
-            return inputs, labels
+        inputs, labels = _to_tuple_transform(example, input_bands, output_bands,
+                                             transforms, stack_inputs, stack_time_series, years)
+        return inputs, labels
 
     return dataset.map(select_fn, num_parallel_calls=tf.data.AUTOTUNE)
 
