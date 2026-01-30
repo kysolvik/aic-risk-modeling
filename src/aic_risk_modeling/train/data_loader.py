@@ -241,7 +241,8 @@ def dataset_from_dir(
         schema = load_schema_from_gcs(dir)
         feature_spec = schema_to_feature_spec(schema)
 
-    parse_fn = lambda x: tf.io.parse_single_example(x, feature_spec)
+    def parse_fn(x):
+        return tf.io.parse_single_example(x, feature_spec)
     ds = ds.map(parse_fn, num_parallel_calls=tf.data.AUTOTUNE)
 
     if isinstance(cache, str):
@@ -369,7 +370,7 @@ if __name__ == "__main__":
 
     for batch in ds_raw.take(1):
         print(f"Raw batch keys: {list(batch.keys())}")
-        print(f"Sample feature shapes:")
+        print("Sample feature shapes:")
         for key, val in list(batch.items())[:3]:
             print(f"  {key}: {val.shape}")
 
