@@ -72,9 +72,10 @@ def build_merged_dataset(
     return training_merged, validation_merged
 
 
-def build_model(model_type, input_bands, patch_size):
-    function_name = f"get_{model_type}"  # becomes "get_unet"
-    input_shape = [patch_size, patch_size, len(input_bands)]
+def build_model(model_type, input_bands, patch_size, years):
+    function_name = f"get_{model_type}"
+    # NOTE: ONLY ALLOWS FOR IMAGE TIME SERIES INPUTS
+    input_shape = [len(years), patch_size, patch_size, int(len(input_bands)/len(years))]
     try:
         # Attempt to get the function dynamically
         model_fn = getattr(models, function_name)
@@ -99,12 +100,8 @@ def build_model(model_type, input_bands, patch_size):
         )
 
     # Attach input layer
-    inputs_dict = {
-        name: tf.keras.Input(shape=(None, None, 1), name=name)
-        for name in input_bands
-    }
-    concat = tf.keras.layers.Concatenate()(list(inputs_dict.values()))
-    new_model = tf.keras.Model(inputs=inputs_dict, outputs=model(concat))
+    image_input = tf.keras.Input(shape=input_shape, name='image')
+    new_model = tf.keras.Model(image_input, model(image_input))
     return new_model
 
 def run(
@@ -118,6 +115,9 @@ def run(
         epochs,
         model_output_path,
         transforms,
+        stack_time_series,
+        stack_inputs,
+        years
 ):
     # Get datasets
     training_ds, validation_ds = build_merged_dataset(
@@ -133,16 +133,22 @@ def run(
         input_bands=input_bands,
         output_bands=[output_band],
         transforms=transforms,
+        stack_time_series=stack_time_series,
+        stack_inputs=stack_inputs,
+        years=years
     )
     validation_ds = data_loader.select_bands_transform(
         validation_ds,
         input_bands=input_bands,
         output_bands=[output_band],
         transforms=transforms,
+        stack_time_series=stack_time_series,
+        stack_inputs=stack_inputs,
+        years=years
     )
 
     # Get model
-    model = build_model(model_type.lower(), input_bands, patch_size)
+    model = build_model(model_type.lower(), input_bands, patch_size, years=years)
 
     # Compile and run
     model.compile(
@@ -192,6 +198,9 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, required=False)
     parser.add_argument('--model_output_path', type=str)
     parser.add_argument('--transforms', type=str)
+    parser.add_argument('--years', type=int, nargs='+', default=None)
+    parser.add_argument('--stack_time_series', type=bool, default=False)
+    parser.add_argument('--stack_inputs', type=bool, default=True)
     args = parser.parse_args()
 
     if args.config_path:
@@ -208,6 +217,9 @@ if __name__ == "__main__":
         # Note: Transforms has to be a dict, so this may not work.
         # To apply custom transforms, use config
         args.transforms = config.get('transforms', args.transforms)
+        args.years = config.get('years', args.years)
+        args.stack_time_series = config.get('stack_time_series', args.stack_time_series)
+        args.stack_inputs = config.get('stack_inputs', args.stack_inputs)
 
     run(
         model_type=args.model_type,
@@ -220,6 +232,9 @@ if __name__ == "__main__":
         epochs=args.epochs,
         model_output_path=args.model_output_path,
         transforms=args.transforms,
+        stack_time_series=args.stack_time_series,
+        stack_inputs=args.stack_inputs,
+        years=args.years
     )
 
     print("Training complete, model saved to:", args.model_output_path)
