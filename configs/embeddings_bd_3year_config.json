@@ -1,5 +1,5 @@
 {
-    "model_type": "mlp",
+    "model_type": "simple_convlstm",
     "epochs": 20,
     "data_dirs": ["gs://aic-fire-amazon/data/embeddings_mean_post2021/","gs://aic-fire-amazon/data/mcd64_burndate/"],
     "tfrecord_pattern": "*.tfrecord.gz",
@@ -39,11 +39,10 @@
     "batch_size": 4,
     "model_output_path": "gs://aic-fire-amazon/models/vertex_model_embeddings_bd_3year_mlp.keras",
     "transforms": {
-        "BurnDate_2024": "gt0",
-        "BurnDate_2023": "gt0",
-        "BurnDate_2022": "gt0",
-        "BurnDate_2021": "gt0",
-        "deforestation_2022": "eq2",
-        "def": "normalize_mcwd"
-    }
+        "BurnDate_2024": "gt0"
+    },
+    "years": [2021, 2022, 2023],
+    "stack_time_series": true,
+    "stack_inputs": false
+
 } 
