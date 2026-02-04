@@ -153,7 +153,7 @@ def run(
 
     # Compile and run
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.005),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
         loss="Dice",
         metrics=[
             tf.keras.metrics.BinaryIoU(target_class_ids=[1]),
