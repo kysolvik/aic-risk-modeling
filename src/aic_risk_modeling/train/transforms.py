@@ -12,8 +12,8 @@ def eq2(tensor):
 
 def normalize_mcwd(tensor):
     """Normalize MCWD values using precomputed mean and stddev."""
-    mean = tf.constant(889.8259811401367, dtype=tf.float32)
-    std = tf.constant(507.33071914299626, dtype=tf.float32)
+    mean = tf.constant(600.0, dtype=tf.float32)
+    std = tf.constant(400.0, dtype=tf.float32)
 
     return (tf.cast(tensor, tf.float32) - mean) / (std + 1e-7)
 
