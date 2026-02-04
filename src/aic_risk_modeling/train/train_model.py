@@ -75,7 +75,7 @@ def build_merged_dataset(
 def build_model(model_type, input_bands, patch_size, years):
     function_name = f"get_{model_type}"
     # NOTE: ONLY ALLOWS FOR IMAGE TIME SERIES INPUTS
-    input_shape = [len(years), patch_size, patch_size, int(len(input_bands)/len(years))]
+    input_shape = [len(years), patch_size, patch_size, input_bands]
     try:
         # Attempt to get the function dynamically
         model_fn = getattr(models, function_name)
