@@ -116,10 +116,28 @@ def build_features_dict(
     """Convenience wrapper—returns feature_spec (same shape as schema_to_feature_spec)"""
     return schema_to_feature_spec(schema, non_img_features=non_img_features, patch_size=patch_size)
 
+def _apply_single_transform(result, feature_name, transform_fn):
+    if feature_name in result:
+        if callable(transform_fn):
+            result[feature_name] = transform_fn(result[feature_name])
+        elif isinstance(transform_fn, str):
+            # Look up in registry
+            try:
+                callable_fn = transforms.transform_registry[transform_fn]
+                return callable_fn(result[feature_name])
+            except KeyError:
+                raise ValueError(
+                    f"Transform '{transform_fn}' for feature '{feature_name}' not found in registry\n."
+                    "Existing transforms: " + str(transforms.transform_registry.keys()))
+        else:
+            raise ValueError(
+                f"Transform for feature '{feature_name}' must be a callable or a string key in the registry."
+                )
 
 def apply_transforms(
     example: Dict,
-    transform_dict: Optional[Dict[str, Callable]] = None
+    transform_dict: Optional[Dict[str, Callable]] = None,
+    years: Optional[List[int]] = None,
 ) -> Dict:
     """Apply custom transforms to specific fields in an example.
 
@@ -135,26 +153,19 @@ def apply_transforms(
         return example
 
     result = example.copy()
+    done_list = []
     for feature_name, transform_fn in transform_dict.items():
-        if feature_name in result:
-            if callable(transform_fn):
-                result[feature_name] = transform_fn(result[feature_name])
-            elif isinstance(transform_fn, str):
-                # Look up in registry
-                try:
-                    callable_fn = transforms.transform_registry[transform_fn]
-                    result[feature_name] = callable_fn(result[feature_name])
-                except KeyError:
-                    raise ValueError(
-                        f"Transform '{transform_fn}' for feature '{feature_name}' not found in registry\n."
-                        "Existing transforms: " + str(transforms.transform_registry.keys()))
-            else:
-                raise ValueError(
-                    f"Transform for feature '{feature_name}' must be a callable or a string key in the registry."
-                    )
-
-
-
+        # First check for transforms without years specified
+        if feature_name not in done_list:
+            result[feature_name] = _apply_single_transform(result, feature_name, transform_fn)
+            done_list.append(feature_name)
+        if years is not None:
+            # Then check for transforms with years specified
+            for year in years:
+                feature_name_wyear = f"{feature_name}_{year}"
+                if feature_name_wyear not in done_list:
+                    result[feature_name_wyear] = _apply_single_transform(
+                        result, feature_name, transform_fn)
     return result
 
 
@@ -232,7 +243,6 @@ def _stack_time_series(features, input_keys, years):
         grouped_tensors.append(year_tensor["image"])
 
     timeseries_tensor = tf.stack(grouped_tensors, axis=1)
-    print(timeseries_tensor.shape)
     return {"image": timeseries_tensor}
 
 
@@ -277,14 +287,18 @@ def _to_tuple_transform(
     example = apply_transforms(example, transforms)
 
     # Extract inputs and outputs
-    inputs = {name: example[name] for name in input_bands}
+    if years is None:
+        input_bands_wyears = input_bands
+    else:
+        input_bands_wyears = [f"{k}_{year}" for k in input_bands for year in years]
+    inputs = {name: example[name] for name in input_bands_wyears}
 
     # Stack
     if stack_time_series:
         # Get groups of years
-        inputs = _stack_time_series(inputs, input_bands, years) 
+        inputs = _stack_time_series(inputs, input_bands_wyears, years)
     elif stack_inputs:
-        inputs = _stack_vars(inputs, input_bands)
+        inputs = _stack_vars(inputs, input_bands_wyears)
 
     # Return outputs based on number of output bands
     if len(output_bands) == 1:
