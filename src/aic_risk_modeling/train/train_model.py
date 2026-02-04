@@ -113,6 +113,7 @@ def run(
         batch_size,
         model_type,
         epochs,
+        learning_rate,
         model_output_path,
         transforms,
         stack_time_series,
@@ -201,6 +202,7 @@ if __name__ == "__main__":
     parser.add_argument('--years', type=int, nargs='+', default=None)
     parser.add_argument('--stack_time_series', type=bool, default=False)
     parser.add_argument('--stack_inputs', type=bool, default=True)
+    parser.add_argument('--learning_rate', type=float, default=0.005)
     args = parser.parse_args()
 
     if args.config_path:
@@ -220,7 +222,7 @@ if __name__ == "__main__":
         args.years = config.get('years', args.years)
         args.stack_time_series = config.get('stack_time_series', args.stack_time_series)
         args.stack_inputs = config.get('stack_inputs', args.stack_inputs)
-
+        args.learning_rate = config.get('learning_rate', args.learning_rate)
     run(
         model_type=args.model_type,
         data_dirs=args.data_dirs,
@@ -232,6 +234,7 @@ if __name__ == "__main__":
         epochs=args.epochs,
         model_output_path=args.model_output_path,
         transforms=args.transforms,
+        learning_rate=args.learning_rate,
         stack_time_series=args.stack_time_series,
         stack_inputs=args.stack_inputs,
         years=args.years
