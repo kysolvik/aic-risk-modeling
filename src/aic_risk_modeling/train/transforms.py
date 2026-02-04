@@ -2,7 +2,10 @@
 import tensorflow as tf
 
 def gt0(tensor):
-    return tensor > 0
+    return tf.cast(tensor > 0, tf.float32)
+
+def gt0_bool(tensor):
+    return tf.cast(tensor > 0, tf.bool)
 
 def eq2(tensor):
     return tf.cast(tensor == 2, tf.float32)
@@ -16,6 +19,7 @@ def normalize_mcwd(tensor):
 
 transform_registry = {
     "gt0": gt0,
+    "gt0_bool": gt0_bool,
     "eq2": eq2,
     "normalize_mcwd": normalize_mcwd,
     "none": lambda x: x
