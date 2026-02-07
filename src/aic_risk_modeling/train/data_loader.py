@@ -117,22 +117,21 @@ def build_features_dict(
     return schema_to_feature_spec(schema, non_img_features=non_img_features, patch_size=patch_size)
 
 def _apply_single_transform(result, feature_name, transform_fn):
-    if feature_name in result:
-        if callable(transform_fn):
-            result[feature_name] = transform_fn(result[feature_name])
-        elif isinstance(transform_fn, str):
-            # Look up in registry
-            try:
-                callable_fn = transforms.transform_registry[transform_fn]
-                return callable_fn(result[feature_name])
-            except KeyError:
-                raise ValueError(
-                    f"Transform '{transform_fn}' for feature '{feature_name}' not found in registry\n."
-                    "Existing transforms: " + str(transforms.transform_registry.keys()))
-        else:
+    if callable(transform_fn):
+        result[feature_name] = transform_fn(result[feature_name])
+    elif isinstance(transform_fn, str):
+        # Look up in registry
+        try:
+            callable_fn = transforms.transform_registry[transform_fn]
+            return callable_fn(result[feature_name])
+        except KeyError:
             raise ValueError(
-                f"Transform for feature '{feature_name}' must be a callable or a string key in the registry."
-                )
+                f"Transform '{transform_fn}' for feature '{feature_name}' not found in registry\n."
+                "Existing transforms: " + str(transforms.transform_registry.keys()))
+    else:
+        raise ValueError(
+            f"Transform for feature '{feature_name}' must be a callable or a string key in the registry."
+            )
 
 def apply_transforms(
     example: Dict,
@@ -155,17 +154,22 @@ def apply_transforms(
     result = example.copy()
     done_list = []
     for feature_name, transform_fn in transform_dict.items():
-        # First check for transforms without years specified
-        if feature_name not in done_list:
+        # First check for transforms with exact name match (no adding years)
+        # This could include "BurnDate_2024", which would override a general
+        # "BurnDate" transform
+        if feature_name not in done_list and feature_name in result:
             result[feature_name] = _apply_single_transform(result, feature_name, transform_fn)
             done_list.append(feature_name)
         if years is not None:
-            # Then check for transforms with years specified
+            # Then check for transforms with years appended
+            # If "BurnDate" transform is specified, it will be applied for all
+            # years (e.g. BurnDate_2023, BurnDate_2022...), but NOT those which
+            # had their own transform specified (e.g. BurnDate_2024, in the example above)
             for year in years:
                 feature_name_wyear = f"{feature_name}_{year}"
-                if feature_name_wyear not in done_list:
+                if feature_name_wyear not in done_list and feature_name_wyear in result:
                     result[feature_name_wyear] = _apply_single_transform(
-                        result, feature_name, transform_fn)
+                        result, feature_name_wyear, transform_fn)
     return result
 
 
@@ -284,7 +288,7 @@ def _to_tuple_transform(
         Tuple of (inputs_dict, outputs_dict or outputs_tensor)
     """
     # Apply transforms first
-    example = apply_transforms(example, transforms)
+    example = apply_transforms(example, transforms, years)
 
     # Extract inputs and outputs
     if years is None:
