@@ -66,7 +66,7 @@ def build_merged_dataset(
         training_datasets.append(training_ds)
         validation_datasets.append(validation_ds)
 
-    training_merged = data_loader.merge_datasets(training_datasets).shuffle(buffer_size=64)
+    training_merged = data_loader.merge_datasets(training_datasets).shuffle(buffer_size=512)
     validation_merged = data_loader.merge_datasets(validation_datasets)
 
     return training_merged, validation_merged
