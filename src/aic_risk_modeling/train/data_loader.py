@@ -265,6 +265,11 @@ def _stack_vars(features, input_keys, exclude_keys: Optional[List[str]] = None):
     else:
         return {"image": stacked_tensor}
 
+
+def _prep_metadata(example):
+    """Just coords for now"""
+    return tf.stack([example['lat'], example['lon']], axis=-1)
+
 def _to_tuple_transform(
     example: Dict,
     input_bands: List[str],
@@ -273,7 +278,7 @@ def _to_tuple_transform(
     stack_inputs: bool = True,
     stack_time_series: bool = False,
     years: Optional[List[int]] = None,
-    include_metadata: bool = True,
+    include_coords: bool = True,
 ):
     """Transform a parsed example into (inputs, outputs) tuple.
 
@@ -283,8 +288,7 @@ def _to_tuple_transform(
         output_bands: List of feature names to use as outputs
         transforms: Optional dict of feature_name -> transform_fn for custom transforms
         stack_inputs: If True, stack input bands into a single tensor along a new axis.
-        include_metadata: If True, add feature "metadata" with named metadata inputs (
-            all non-img features).
+        include_coords: If True, add feature "coords" with named lat/lon.
 
 
     Returns:
@@ -307,9 +311,9 @@ def _to_tuple_transform(
     elif stack_inputs:
         inputs = _stack_vars(inputs, input_bands_wyears)
 
-    # Add metadata
-    if include_metadata:
-        inputs["metadata"] = {fn: example[fn] for fn in example if example[fn].ndim<2}
+    # Add coords
+    if include_coords:
+        inputs["metadata"] = _prep_metadata(example)
 
     # Return outputs based on number of output bands
     if len(output_bands) == 1:
@@ -327,7 +331,7 @@ def select_bands_transform(
     stack_inputs: bool = True,
     stack_time_series: bool = False,
     years: Optional[List[int]] = None,
-    include_metadata: bool = True
+    include_coords: bool = True
 ) -> tf.data.Dataset:
     """Select input and output bands from a dataset of feature dicts, with optional transforms.
 
@@ -339,8 +343,7 @@ def select_bands_transform(
         output_bands: List of feature names to use as outputs
         transforms: Optional dict mapping feature names to transform functions.
                    E.g., {'BurnDate': lambda x: x > 0} converts BurnDate to binary.
-        include_metadata: Adds all non-img features as metadata dict.
-
+        include_coords: Adds lat/lon features
     Returns:
         A dataset yielding (inputs_dict, outputs_dict/tensor) tuples
 
@@ -357,7 +360,7 @@ def select_bands_transform(
     def select_fn(example):
         inputs, labels = _to_tuple_transform(example, input_bands, output_bands,
                                              transforms, stack_inputs, stack_time_series, years,
-                                             include_metadata)
+                                             include_coords)
         return inputs, labels
 
     return dataset.map(select_fn, num_parallel_calls=tf.data.AUTOTUNE)

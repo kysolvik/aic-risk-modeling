@@ -108,12 +108,12 @@ def get_multi_scale_mlp_head(input_shape, hidden=128):
     return model
 
 def get_simple_convlstm(input_shape):
-    
+
     inputs = keras.Input(shape=input_shape)
     t1 = keras.layers.TimeDistributed(
         keras.layers.Conv2D(32, (3, 3), padding='same', activation='relu')
     )(inputs)
-    c1 = keras.layers.ConvLSTM2D(filters=64, kernel_size=(3, 3), 
+    c1 = keras.layers.ConvLSTM2D(filters=64, kernel_size=(3, 3),
           input_shape=input_shape, padding='same')(t1)
     b1 = keras.layers.BatchNormalization()(c1)
     outputs = keras.layers.Conv2D(filters=1, kernel_size=(3, 3),
@@ -122,16 +122,17 @@ def get_simple_convlstm(input_shape):
     model = keras.Model(inputs, outputs)
     return model
 
-def get_convlstm(input_shape):
-    
-    inputs = keras.Input(shape=input_shape)
+def get_convlstm(image_shape, include_metadata=False, metadata_shape=None):
+    image_inputs = keras.Input(shape=image_shape, name='image')
+
+    # Image
     c1 = keras.layers.ConvLSTM2D(
         filters=32,
         kernel_size=(5, 5),
         padding="same",
         return_sequences=True,
         activation="relu",
-    )(inputs)
+    )(image_inputs)
     b1 = keras.layers.BatchNormalization()(c1)
     c2 = keras.layers.ConvLSTM2D(
         filters=32,
@@ -149,8 +150,25 @@ def get_convlstm(input_shape):
         activation="relu",
     )(b2)
     b3 = keras.layers.BatchNormalization()(c3)
-    outputs = keras.layers.Conv2D(filters=1, kernel_size=(3, 3),
-                                  activation="sigmoid", padding="same")(b3)
 
-    model = keras.Model(inputs, outputs)
+    if include_metadata:
+        metadata_inputs = keras.Input(shape=metadata_shape, name='metadata')
+        # metadata
+        m1 = keras.layers.Dense(16, activation='relu')(metadata_inputs)
+        m2 = keras.layers.Dense(8, activation='relu')(m1)
+        # Broadcast
+        h = b3.shape[1]
+        w = b3.shape[2]
+        m3 = keras.ops.expand_dims(keras.ops.expand_dims(m2, 1), 1)
+        m4 = keras.ops.tile(m3, [1, h, w, 1])
+
+        concat = keras.layers.Concatenate()([b3, m4])
+        outputs = keras.layers.Conv2D(filters=1, kernel_size=(3, 3),
+                                    activation="sigmoid", padding="same")(concat)
+
+    else:
+        outputs = keras.layers.Conv2D(filters=1, kernel_size=(3, 3),
+                                    activation="sigmoid", padding="same")(b3)
+
+    model = keras.Model([image_inputs, metadata_inputs], outputs)
     return model
