@@ -1,0 +1,22 @@
+{
+    "model_type": "simple_convlstm",
+    "epochs": 25,
+    "learning_rate": 0.005,
+    "data_dirs": ["gs://aic-fire-amazon/data/allpreds/"],
+    "tfrecord_pattern": "*.tfrecord.gz",
+    "input_bands":[
+        "BurnDate", "classification"
+    ],
+    "output_band": "BurnDate_2024",
+    "patch_size": 128,
+    "batch_size": 4,
+    "model_output_path": "gs://aic-fire-amazon/models/vertex_model_burndate_mb_smallconvlstm_10year.keras",
+    "transforms": {
+        "BurnDate_2024": "gt0_bool",
+        "BurnDate": "gt0"
+    },
+    "years": [2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023],
+    "stack_time_series": true,
+    "stack_inputs": false
+
+}
