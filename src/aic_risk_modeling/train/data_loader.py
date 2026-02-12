@@ -273,6 +273,7 @@ def _to_tuple_transform(
     stack_inputs: bool = True,
     stack_time_series: bool = False,
     years: Optional[List[int]] = None,
+    include_metadata: bool = True,
 ):
     """Transform a parsed example into (inputs, outputs) tuple.
 
@@ -282,6 +283,8 @@ def _to_tuple_transform(
         output_bands: List of feature names to use as outputs
         transforms: Optional dict of feature_name -> transform_fn for custom transforms
         stack_inputs: If True, stack input bands into a single tensor along a new axis.
+        include_metadata: If True, add feature "metadata" with named metadata inputs (
+            all non-img features).
 
 
     Returns:
@@ -304,6 +307,10 @@ def _to_tuple_transform(
     elif stack_inputs:
         inputs = _stack_vars(inputs, input_bands_wyears)
 
+    # Add metadata
+    if include_metadata:
+        inputs["metadata"] = {fn: example[fn] for fn in example if example[fn].ndim<2}
+
     # Return outputs based on number of output bands
     if len(output_bands) == 1:
         # Single output: return as tensor
@@ -320,6 +327,7 @@ def select_bands_transform(
     stack_inputs: bool = True,
     stack_time_series: bool = False,
     years: Optional[List[int]] = None,
+    include_metadata: bool = True
 ) -> tf.data.Dataset:
     """Select input and output bands from a dataset of feature dicts, with optional transforms.
 
@@ -331,6 +339,7 @@ def select_bands_transform(
         output_bands: List of feature names to use as outputs
         transforms: Optional dict mapping feature names to transform functions.
                    E.g., {'BurnDate': lambda x: x > 0} converts BurnDate to binary.
+        include_metadata: Adds all non-img features as metadata dict.
 
     Returns:
         A dataset yielding (inputs_dict, outputs_dict/tensor) tuples
@@ -347,7 +356,8 @@ def select_bands_transform(
     """
     def select_fn(example):
         inputs, labels = _to_tuple_transform(example, input_bands, output_bands,
-                                             transforms, stack_inputs, stack_time_series, years)
+                                             transforms, stack_inputs, stack_time_series, years,
+                                             include_metadata)
         return inputs, labels
 
     return dataset.map(select_fn, num_parallel_calls=tf.data.AUTOTUNE)
