@@ -16,12 +16,8 @@ Command-line Arguments:
 """
 
 
-import os
 import numpy as np
 import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-import pickle
 import json
 import inspect
 
@@ -30,45 +26,62 @@ from aic_risk_modeling.train import data_loader, models
 SEED = 54
 RNG = np.random.default_rng(SEED)
 
+def load_config(
+        config_path
+    ):
+    if config_path.startswith('gs://'):
+        with tf.io.gfile.GFile(config_path, 'r') as f:
+            config = json.load(f)
+    else:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+    return config
 
-def build_datasets(
-        gcs_data_dir,
+
+def build_merged_dataset(
+        data_dirs,
         tfrecord_pattern,
         patch_size,
-        output_band,
-        batch_size=4,
+        batch_size=4
         ):
-    training_pattern = os.path.join(gcs_data_dir, 'training-{}'.format(tfrecord_pattern))
-    validation_pattern = os.path.join(gcs_data_dir, 'validation-{}'.format(tfrecord_pattern))
+    training_datasets = []
+    training_pattern = 'training-{}'.format(tfrecord_pattern)
+    validation_datasets = []
+    validation_pattern = 'validation-{}'.format(tfrecord_pattern)
+    for data_dir in data_dirs:
+        training_ds = data_loader.dataset_from_dir(
+            data_dir,
+            training_pattern,
+            patch_size=patch_size,
+            batch_size=batch_size,
+            cache=False
+        )
+        validation_ds = data_loader.dataset_from_dir(
+            data_dir,
+            validation_pattern,
+            patch_size=patch_size,
+            batch_size=batch_size,
+            cache=False
+        )
+        training_datasets.append(training_ds)
+        validation_datasets.append(validation_ds)
 
-    schema = data_loader.load_schema_from_gcs(gcs_data_dir)
-    feature_spec = data_loader.build_features_dict(schema, patch_size=patch_size)
+    training_merged = data_loader.merge_datasets(training_datasets).shuffle(buffer_size=64)
+    validation_merged = data_loader.merge_datasets(validation_datasets)
 
-    training_ds = data_loader.dataset_from_gcs(training_pattern, feature_spec,
-                                input_bands=[k for k in feature_spec.keys() if k not in ['lat','lon','id', output_band]],
-                                output_bands=[output_band],
-                                batch_size=batch_size,
-                                shuffle_buffer=256,
-                                cache=False)
-    validation_ds = data_loader.dataset_from_gcs(validation_pattern, feature_spec,
-                                input_bands=[k for k in feature_spec.keys() if k not in ['lat','lon','id', output_band]],
-                                output_bands=[output_band],
-                                batch_size=batch_size,
-                                shuffle=False,
-                                cache=False)
+    return training_merged, validation_merged
 
-    return training_ds, validation_ds, feature_spec
 
-def build_model(model_type, feature_spec, patch_size, output_band):
-    function_name = f"get_{model_type}"  # becomes "get_unet"
-    input_bands = [k for k in feature_spec.keys() if k not in ['lat','lon','id', output_band]]
-    input_shape = [patch_size, patch_size, len(input_bands)]
+def build_model(model_type, input_bands, patch_size, years):
+    function_name = f"get_{model_type}"
+    # NOTE: ONLY ALLOWS FOR IMAGE TIME SERIES INPUTS
+    input_shape = [len(years), patch_size, patch_size, len(input_bands)]
     try:
         # Attempt to get the function dynamically
         model_fn = getattr(models, function_name)
         model = model_fn(input_shape)
         print(f"Successfully initialized {model_type} model.")
-        
+
     except AttributeError:
         # 1. Get all members of the 'model' module
         # 2. Filter for things that are functions AND start with 'get_'
@@ -76,10 +89,10 @@ def build_model(model_type, feature_spec, patch_size, output_band):
             name for name, obj in inspect.getmembers(model, inspect.isfunction)
             if name.startswith("get_")
         ]
-        
+
         # 3. Clean up the names for the error message (e.g., 'get_unet' -> 'unet')
         valid_options = [n.replace("get_", "") for n in available_funcs]
-        
+
         raise ValueError(
             f"Invalid model type '{model_type}'. \n"
             f"Expected one of: {valid_options}\n"
@@ -87,53 +100,75 @@ def build_model(model_type, feature_spec, patch_size, output_band):
         )
 
     # Attach input layer
-    inputs_dict = {
-        name: tf.keras.Input(shape=(None, None, 1), name=name)
-        for name in input_bands
-    }
-    concat = tf.keras.layers.Concatenate()(list(inputs_dict.values()))
-    new_model = tf.keras.Model(inputs=inputs_dict, outputs=model(concat))
+    image_input = tf.keras.Input(shape=input_shape, name='image')
+    new_model = tf.keras.Model(image_input, model(image_input))
     return new_model
 
 def run(
-        gcs_data_dir,
+        data_dirs,
         tfrecord_pattern,
         patch_size,
+        input_bands,
         output_band,
         batch_size,
         model_type,
         epochs,
+        learning_rate,
         model_output_path,
-
+        transforms,
+        stack_time_series,
+        stack_inputs,
+        years
 ):
     # Get datasets
-    training_ds, validation_ds, feature_spec = build_datasets(
-        gcs_data_dir=gcs_data_dir,
+    training_ds, validation_ds = build_merged_dataset(
+        data_dirs=data_dirs,
         tfrecord_pattern=tfrecord_pattern,
         patch_size=patch_size,
-        output_band=output_band,
         batch_size=batch_size,
     )
 
+    # Select bands
+    training_ds = data_loader.select_bands_transform(
+        training_ds,
+        input_bands=input_bands,
+        output_bands=[output_band],
+        transforms=transforms,
+        stack_time_series=stack_time_series,
+        stack_inputs=stack_inputs,
+        years=years
+    )
+    validation_ds = data_loader.select_bands_transform(
+        validation_ds,
+        input_bands=input_bands,
+        output_bands=[output_band],
+        transforms=transforms,
+        stack_time_series=stack_time_series,
+        stack_inputs=stack_inputs,
+        years=years
+    )
+
     # Get model
-    model = build_model(model_type.lower(), feature_spec, patch_size, output_band)
+    model = build_model(model_type.lower(), input_bands, patch_size, years=years)
 
     # Compile and run
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0025),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
         loss="Dice",
         metrics=[
             tf.keras.metrics.BinaryIoU(target_class_ids=[1]),
+            tf.keras.metrics.AUC(),
             ]
         )
     checkpoint_filepath = './checkpoint.model.keras'
-    model_checkpoint_callback = keras.callbacks.ModelCheckpoint(
+
+    model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
         filepath=checkpoint_filepath,
         monitor='val_loss',
         mode='min',
         save_best_only=True)
 
-    early_stopping_callback = keras.callbacks.EarlyStopping(
+    early_stopping_callback = tf.keras.callbacks.EarlyStopping(
         monitor='val_loss',
         mode='min',
         patience=5)
@@ -153,25 +188,56 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_type', type=str, required=True)
-    parser.add_argument('--gcs_data_dir', type=str, required=True)
+    parser.add_argument('--config_path', type=str, required=False)
+    parser.add_argument('--model_type', type=str, required=False)
+    parser.add_argument('--data_dirs', type=str, required=False, nargs='+')
     parser.add_argument('--tfrecord_pattern', type=str, default='*.tfrecord')
     parser.add_argument('--patch_size', type=int, default=128)
+    parser.add_argument('--input_bands', type=str, nargs='+', default=None)
     parser.add_argument('--output_band', type=str, default='BurnDate')
     parser.add_argument('--batch_size', type=int, default=4)
-    parser.add_argument('--epochs', type=int, required=True)
+    parser.add_argument('--epochs', type=int, required=False)
     parser.add_argument('--model_output_path', type=str)
+    parser.add_argument('--transforms', type=str)
+    parser.add_argument('--years', type=int, nargs='+', default=None)
+    parser.add_argument('--stack_time_series', type=bool, default=False)
+    parser.add_argument('--stack_inputs', type=bool, default=True)
+    parser.add_argument('--learning_rate', type=float, default=0.005)
     args = parser.parse_args()
 
+    if args.config_path:
+        config = load_config(args.config_path)
+        args.model_type = config.get('model_type', args.model_type)
+        args.data_dirs = config.get('data_dirs', args.data_dirs)
+        args.tfrecord_pattern = config.get('tfrecord_pattern', args.tfrecord_pattern)
+        args.patch_size = config.get('patch_size', args.patch_size)
+        args.input_bands = config.get('input_bands', args.input_bands)
+        args.output_band = config.get('output_band', args.output_band)
+        args.batch_size = config.get('batch_size', args.batch_size)
+        args.epochs = config.get('epochs', args.epochs)
+        args.model_output_path = config.get('model_output_path', args.model_output_path)
+        # Note: Transforms has to be a dict, so this may not work.
+        # To apply custom transforms, use config
+        args.transforms = config.get('transforms', args.transforms)
+        args.years = config.get('years', args.years)
+        args.stack_time_series = config.get('stack_time_series', args.stack_time_series)
+        args.stack_inputs = config.get('stack_inputs', args.stack_inputs)
+        args.learning_rate = config.get('learning_rate', args.learning_rate)
     run(
         model_type=args.model_type,
-        gcs_data_dir=args.gcs_data_dir,
+        data_dirs=args.data_dirs,
         tfrecord_pattern=args.tfrecord_pattern,
         patch_size=args.patch_size,
+        input_bands=args.input_bands,
         output_band=args.output_band,
         batch_size=args.batch_size,
         epochs=args.epochs,
-        model_output_path=args.model_output_path
+        model_output_path=args.model_output_path,
+        transforms=args.transforms,
+        learning_rate=args.learning_rate,
+        stack_time_series=args.stack_time_series,
+        stack_inputs=args.stack_inputs,
+        years=args.years
     )
 
     print("Training complete, model saved to:", args.model_output_path)
