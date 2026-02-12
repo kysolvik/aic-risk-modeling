@@ -72,14 +72,14 @@ def build_merged_dataset(
     return training_merged, validation_merged
 
 
-def build_model(model_type, input_bands, patch_size, years):
+def build_model(model_type, input_bands, include_coords, patch_size, years):
     function_name = f"get_{model_type}"
     # NOTE: ONLY ALLOWS FOR IMAGE TIME SERIES INPUTS
-    input_shape = [len(years), patch_size, patch_size, len(input_bands)]
+    image_shape = [len(years), patch_size, patch_size, len(input_bands)]
     try:
         # Attempt to get the function dynamically
         model_fn = getattr(models, function_name)
-        model = model_fn(input_shape)
+        model = model_fn(image_shape, include_metadata=include_coords, metadata_shape=(2,))
         print(f"Successfully initialized {model_type} model.")
 
     except AttributeError:
@@ -99,10 +99,7 @@ def build_model(model_type, input_bands, patch_size, years):
             f"Note: The script looks for functions named 'get_<type>' in model.py"
         )
 
-    # Attach input layer
-    image_input = tf.keras.Input(shape=input_shape, name='image')
-    new_model = tf.keras.Model(image_input, model(image_input))
-    return new_model
+    return model
 
 def run(
         data_dirs,
@@ -112,6 +109,7 @@ def run(
         output_band,
         batch_size,
         model_type,
+        include_coords,
         epochs,
         learning_rate,
         model_output_path,
@@ -149,7 +147,8 @@ def run(
     )
 
     # Get model
-    model = build_model(model_type.lower(), input_bands, patch_size, years=years)
+    model = build_model(model_type.lower(), input_bands, include_coords,
+                        patch_size, years=years)
 
     # Compile and run
     model.compile(
@@ -190,6 +189,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config_path', type=str, required=False)
     parser.add_argument('--model_type', type=str, required=False)
+    parser.add_argument('--include_coords', type=str, required=False)
     parser.add_argument('--data_dirs', type=str, required=False, nargs='+')
     parser.add_argument('--tfrecord_pattern', type=str, default='*.tfrecord')
     parser.add_argument('--patch_size', type=int, default=128)
@@ -208,6 +208,7 @@ if __name__ == "__main__":
     if args.config_path:
         config = load_config(args.config_path)
         args.model_type = config.get('model_type', args.model_type)
+        args.include_coords = config.get('include_coords', args.include_coords)
         args.data_dirs = config.get('data_dirs', args.data_dirs)
         args.tfrecord_pattern = config.get('tfrecord_pattern', args.tfrecord_pattern)
         args.patch_size = config.get('patch_size', args.patch_size)
@@ -229,6 +230,7 @@ if __name__ == "__main__":
         tfrecord_pattern=args.tfrecord_pattern,
         patch_size=args.patch_size,
         input_bands=args.input_bands,
+        include_coords=args.include_coords,
         output_band=args.output_band,
         batch_size=args.batch_size,
         epochs=args.epochs,
