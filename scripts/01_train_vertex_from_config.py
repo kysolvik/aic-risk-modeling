@@ -1,22 +1,35 @@
 
 from google.cloud import aiplatform
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('config_json',
+                    help='Path to config json on GCS'
+                    )
+parser.add_argument('display_name',
+                    help='Job display name on Vertex AI'
+                    )
+args = parser.parse_args()
 
 # Basic parameters
 project='ksolvik-misc'
 location='us-east1'
 bucket='aic-fire-amazon'
-config_json='gs://aic-fire-amazon/configs/embeddings_bd_3year_config.json'
+config_json=args.config_json
+display_name=args.display_name
+
+print(config_json)
+print(display_name)
 
 aiplatform.init(project=project, location=location, staging_bucket=bucket)
 
 # https://cloud.google.com/python/docs/reference/aiplatform/latest/google.cloud.aiplatform.CustomTrainingJob
 job = aiplatform.CustomPythonPackageTrainingJob(
-    display_name="fire-risk-model-v5-emb-lstm",
+    display_name=args.display_name,
     python_package_gcs_uri="gs://aic-fire-amazon/python_packages/aic_risk_modeling-0.0.1.tar.gz",
     python_module_name="aic_risk_modeling.train.train_model",
     container_uri="us-docker.pkg.dev/vertex-ai/training/tf-gpu.2-16.py310:latest",
 )
-
 job.run(
     machine_type="n1-highmem-4",
     scheduling_strategy=aiplatform.compat.types.custom_job.Scheduling.Strategy.SPOT,
