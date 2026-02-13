@@ -26,7 +26,7 @@ aiplatform.init(project=project, location=location, staging_bucket=bucket)
 # https://cloud.google.com/python/docs/reference/aiplatform/latest/google.cloud.aiplatform.CustomTrainingJob
 job = aiplatform.CustomPythonPackageTrainingJob(
     display_name=args.display_name,
-    python_package_gcs_uri="gs://aic-fire-amazon/python_packages/aic_risk_modeling-0.0.1.tar.gz",
+    python_package_gcs_uri="gs://aic-fire-amazon/python_packages/aic_risk_modeling-0.0.2.tar.gz",
     python_module_name="aic_risk_modeling.train.train_model",
     container_uri="us-docker.pkg.dev/vertex-ai/training/tf-gpu.2-16.py310:latest",
 )
