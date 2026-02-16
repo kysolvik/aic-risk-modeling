@@ -157,7 +157,8 @@ def run(
         loss=loss_function,
         metrics=[
             tf.keras.metrics.BinaryIoU(target_class_ids=[1]),
-            tf.keras.metrics.AUC(),
+            tf.keras.metrics.AUC(curve="ROC"),
+            tf.keras.metrics.AUC(curve="PR")
             ]
         )
     checkpoint_filepath = './checkpoint.model.keras'
