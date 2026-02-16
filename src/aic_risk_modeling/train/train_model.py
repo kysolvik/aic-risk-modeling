@@ -112,6 +112,7 @@ def run(
         include_coords,
         epochs,
         learning_rate,
+        loss_function,
         model_output_path,
         transforms,
         stack_time_series,
@@ -153,7 +154,7 @@ def run(
     # Compile and run
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
-        loss="Dice",
+        loss=loss_function,
         metrics=[
             tf.keras.metrics.BinaryIoU(target_class_ids=[1]),
             tf.keras.metrics.AUC(),
@@ -189,7 +190,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config_path', type=str, required=False)
     parser.add_argument('--model_type', type=str, required=False)
-    parser.add_argument('--include_coords', type=str, required=False)
+    parser.add_argument('--include_coords', type=str, required=False, default=False)
     parser.add_argument('--data_dirs', type=str, required=False, nargs='+')
     parser.add_argument('--tfrecord_pattern', type=str, default='*.tfrecord')
     parser.add_argument('--patch_size', type=int, default=128)
@@ -203,6 +204,7 @@ if __name__ == "__main__":
     parser.add_argument('--stack_time_series', type=bool, default=False)
     parser.add_argument('--stack_inputs', type=bool, default=True)
     parser.add_argument('--learning_rate', type=float, default=0.005)
+    parser.add_argument('--loss_function', type=str, default="Dice")
     args = parser.parse_args()
 
     if args.config_path:
@@ -224,6 +226,7 @@ if __name__ == "__main__":
         args.stack_time_series = config.get('stack_time_series', args.stack_time_series)
         args.stack_inputs = config.get('stack_inputs', args.stack_inputs)
         args.learning_rate = config.get('learning_rate', args.learning_rate)
+        args.loss_function = config.get('loss_function', args.loss_function)
     run(
         model_type=args.model_type,
         data_dirs=args.data_dirs,
@@ -237,6 +240,7 @@ if __name__ == "__main__":
         model_output_path=args.model_output_path,
         transforms=args.transforms,
         learning_rate=args.learning_rate,
+        loss_function=args.loss_function,
         stack_time_series=args.stack_time_series,
         stack_inputs=args.stack_inputs,
         years=args.years
