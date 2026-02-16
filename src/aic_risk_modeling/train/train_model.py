@@ -38,6 +38,9 @@ def load_config(
     return config
 
 
+def clean_class_weight(cw_dict):
+    return {int(k): v for k, v in cw_dict.items()}
+
 def build_merged_dataset(
         data_dirs,
         tfrecord_pattern,
@@ -113,6 +116,7 @@ def run(
         epochs,
         learning_rate,
         loss_function,
+        class_weight,
         model_output_path,
         transforms,
         stack_time_series,
@@ -178,6 +182,7 @@ def run(
         training_ds,
         validation_data=validation_ds,
         epochs=epochs,
+        class_weight=class_weight,
         callbacks=[model_checkpoint_callback, early_stopping_callback]
     )
 
@@ -206,6 +211,7 @@ if __name__ == "__main__":
     parser.add_argument('--stack_inputs', type=bool, default=True)
     parser.add_argument('--learning_rate', type=float, default=0.005)
     parser.add_argument('--loss_function', type=str, default="Dice")
+    parser.add_argument('--class_weight', type=float, nargs='+', default=None)
     args = parser.parse_args()
 
     if args.config_path:
@@ -228,6 +234,10 @@ if __name__ == "__main__":
         args.stack_inputs = config.get('stack_inputs', args.stack_inputs)
         args.learning_rate = config.get('learning_rate', args.learning_rate)
         args.loss_function = config.get('loss_function', args.loss_function)
+        args.class_weight = config.get('class_weight', args.class_weight)
+
+    # Clean class weight
+    args.class_weight = clean_class_weight(args.class_weight)
     run(
         model_type=args.model_type,
         data_dirs=args.data_dirs,
@@ -242,6 +252,7 @@ if __name__ == "__main__":
         transforms=args.transforms,
         learning_rate=args.learning_rate,
         loss_function=args.loss_function,
+        class_weight=args.class_weight,
         stack_time_series=args.stack_time_series,
         stack_inputs=args.stack_inputs,
         years=args.years
