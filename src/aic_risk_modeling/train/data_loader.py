@@ -373,6 +373,40 @@ def _merged_zipped_ds(*zipped_ds):
         merged_inputs.update(ds)
     return merged_inputs
 
+def _remove_unshared_features(datasets):
+    """Remove features that aren't shared across all datasets.
+
+    Args:
+        datasets: List of tf.data.Datasets, each yielding feature dicts
+
+    Returns:
+        List of datasets with a map applied that filters to only shared feature keys
+    """
+    if not datasets:
+        return datasets
+
+    # Get feature keys from first batch of each dataset
+    shared_keys = None
+    for ds in datasets:
+        # Take one batch to inspect keys
+        batch_keys = set(ds.element_spec.keys())
+        if shared_keys is None:
+            shared_keys = batch_keys
+        else:
+            shared_keys = shared_keys.intersection(batch_keys)
+
+    if shared_keys is None:
+        raise ValueError("Could not determine feature keys from datasets")
+
+    # Filter each dataset to only include shared keys
+    filtered_datasets = []
+    for ds in datasets:
+        def filter_features(features):
+            return {k: v for k, v in features.items() if k in shared_keys}
+        filtered_ds = ds.map(filter_features, num_parallel_calls=tf.data.AUTOTUNE)
+        filtered_datasets.append(filtered_ds)
+
+    return filtered_datasets
 
 def merge_datasets(
     datasets: List[tf.data.Dataset],
@@ -386,11 +420,6 @@ def merge_datasets(
 
     Returns:
         A merged tf.data.Dataset
-
-    Example:
-        >>> ds1 = dataset_from_dir(...)  # yields (inputs1, outputs1)
-        >>> ds2 = dataset_from_dir(...)  # yields (inputs2, outputs2)
-        >>> merged = merge_datasets([ds1, ds2])  # yields {**inputs1, **inputs2}
     """
     if not datasets:
         raise ValueError("Must provide at least one dataset to merge")
@@ -400,6 +429,7 @@ def merge_datasets(
         zipped = tf.data.Dataset.zip(tuple(datasets))
         return zipped.map(_merged_zipped_ds, num_parallel_calls=tf.data.AUTOTUNE)
     elif axis == "examples":
+        datasets = _remove_unshared_features(datasets)
         return tf.data.Dataset.sample_from_datasets(datasets)
     else:
         raise ValueError('merge_datasets axis must be either "examples" or "features".'
