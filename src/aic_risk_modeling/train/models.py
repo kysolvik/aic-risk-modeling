@@ -127,7 +127,7 @@ def get_convlstm(image_shape, include_metadata=False, metadata_shape=None):
 
     # Image
     c1 = keras.layers.ConvLSTM2D(
-        filters=32,
+        filters=64,
         kernel_size=(5, 5),
         padding="same",
         return_sequences=True,
@@ -135,7 +135,7 @@ def get_convlstm(image_shape, include_metadata=False, metadata_shape=None):
     )(image_inputs)
     b1 = keras.layers.BatchNormalization()(c1)
     c2 = keras.layers.ConvLSTM2D(
-        filters=32,
+        filters=64,
         kernel_size=(3, 3),
         padding="same",
         return_sequences=True,
@@ -143,7 +143,7 @@ def get_convlstm(image_shape, include_metadata=False, metadata_shape=None):
     )(b1)
     b2 = keras.layers.BatchNormalization()(c2)
     c3 = keras.layers.ConvLSTM2D(
-        filters=32,
+        filters=64,
         kernel_size=(1, 1),
         padding="same",
         return_sequences=False,
