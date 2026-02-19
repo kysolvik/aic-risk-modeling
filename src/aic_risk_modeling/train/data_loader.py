@@ -405,6 +405,34 @@ def merge_datasets(
         raise ValueError('merge_datasets axis must be either "examples" or "features".'
                          'Got {}'.format(axis))
 
+
+def build_merged_dataset(
+        data_dirs,
+        tfrecord_pattern,
+        patch_size,
+        axis='examples', # examples or features
+        shuffle=True,
+        batch_size=4
+        ):
+    datasets = []
+    for data_dir in data_dirs:
+        ds = dataset_from_dir(
+            data_dir,
+            tfrecord_pattern,
+            patch_size=patch_size,
+            batch_size=batch_size,
+            cache=False
+        )
+        datasets.append(ds)
+
+    merged = merge_datasets(datasets, axis=axis)
+
+    if shuffle:
+        merged = merged.shuffle(buffer_size=128)
+
+    return merged
+
+
 # Alias for backward compatibility
 dataset_from_gcs = dataset_from_dir
 

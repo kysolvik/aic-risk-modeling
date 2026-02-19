@@ -41,32 +41,6 @@ def load_config(
 def clean_class_weight(cw_dict):
     return {int(k): v for k, v in cw_dict.items()}
 
-def build_merged_dataset(
-        data_dirs,
-        tfrecord_pattern,
-        patch_size,
-        axis='examples', # examples or features
-        shuffle=True,
-        batch_size=4
-        ):
-    datasets = []
-    for data_dir in data_dirs:
-        ds = data_loader.dataset_from_dir(
-            data_dir,
-            tfrecord_pattern,
-            patch_size=patch_size,
-            batch_size=batch_size,
-            cache=False
-        )
-        datasets.append(ds)
-
-    merged = data_loader.merge_datasets(datasets, axis=axis)
-
-    if shuffle:
-        merged = merged.shuffle(buffer_size=128)
-
-    return merged
-
 
 def build_model(model_type, input_bands, include_coords, patch_size, years):
     function_name = f"get_{model_type}"
@@ -118,7 +92,7 @@ def run(
         years
 ):
     # Get datasets
-    training_ds = build_merged_dataset(
+    training_ds = data_loader.build_merged_dataset(
         data_dirs=data_dirs,
         tfrecord_pattern='training-*{}'.format(tfrecord_pattern),
         shuffle=True,
@@ -127,7 +101,7 @@ def run(
         batch_size=batch_size,
     )
 
-    validation_ds = build_merged_dataset(
+    validation_ds = data_loader.build_merged_dataset(
         data_dirs=data_dirs,
         tfrecord_pattern='validation-*{}'.format(tfrecord_pattern),
         axis=merge_axis,
