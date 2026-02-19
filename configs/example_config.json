@@ -3,7 +3,8 @@
     "epochs": 25,
     "learning_rate": 0.005,
     "data_dirs": ["gs://aic-fire-amazon/data/allpreds/"],
-    "tfrecord_pattern": "*.tfrecord.gz",
+    "tfrecord_pattern": "training-*.tfrecord.gz",
+    "val_tfrecord_pattern": "validation-*.tfrecord.gz",
     "input_bands":[
         "BurnDate", "classification"
     ],
