@@ -150,13 +150,13 @@ def run(
 
     model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
         filepath=checkpoint_filepath,
-        monitor='val_loss',
-        mode='min',
+        monitor='val_pr_auc',
+        mode='max',
         save_best_only=True)
 
     early_stopping_callback = tf.keras.callbacks.EarlyStopping(
-        monitor='val_loss',
-        mode='min',
+        monitor='val_pr_auc',
+        mode='max',
         patience=5)
 
     model.fit(
@@ -191,7 +191,7 @@ if __name__ == "__main__":
         data_dirs=config['data_dirs'],
         tfrecord_pattern=config.get('tfrecord_pattern', 'train*tfrecord.gz'),
         val_data_dirs=config.get('val_data_dirs', config['data_dirs']),
-        val_tfrecord_pattern=config.get('tfrecord_pattern', 'val*tfrecord.gz'),
+        val_tfrecord_pattern=config.get('val_tfrecord_pattern', 'val*tfrecord.gz'),
         merge_axis=config.get('merge_axis', 'examples'),
         patch_size=config['patch_size'],
         input_bands=config['input_bands'],
