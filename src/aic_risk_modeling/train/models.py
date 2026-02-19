@@ -165,10 +165,11 @@ def get_convlstm(image_shape, include_metadata=False, metadata_shape=None):
         concat = keras.layers.Concatenate()([b3, m4])
         outputs = keras.layers.Conv2D(filters=1, kernel_size=(3, 3),
                                     activation="sigmoid", padding="same")(concat)
+        model = keras.Model([image_inputs, metadata_inputs], outputs)
 
     else:
         outputs = keras.layers.Conv2D(filters=1, kernel_size=(3, 3),
                                     activation="sigmoid", padding="same")(b3)
+        model = keras.Model(image_inputs, outputs)
 
-    model = keras.Model([image_inputs, metadata_inputs], outputs)
     return model
