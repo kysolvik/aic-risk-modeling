@@ -161,8 +161,8 @@ def run(
         loss=loss_function,
         metrics=[
             tf.keras.metrics.BinaryIoU(target_class_ids=[1]),
-            tf.keras.metrics.AUC(curve="ROC"),
-            tf.keras.metrics.AUC(curve="PR")
+            tf.keras.metrics.AUC(curve="ROC", name="roc_auc"),
+            tf.keras.metrics.AUC(curve="PR", name="pr_auc")
             ]
         )
     checkpoint_filepath = './checkpoint.model.keras'
@@ -237,7 +237,8 @@ if __name__ == "__main__":
         args.class_weight = config.get('class_weight', args.class_weight)
 
     # Clean class weight
-    args.class_weight = clean_class_weight(args.class_weight)
+    if args.class_weight is not None:
+        args.class_weight = clean_class_weight(args.class_weight)
     run(
         model_type=args.model_type,
         data_dirs=args.data_dirs,
