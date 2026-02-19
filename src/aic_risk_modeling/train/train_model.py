@@ -45,34 +45,27 @@ def build_merged_dataset(
         data_dirs,
         tfrecord_pattern,
         patch_size,
+        axis='examples', # examples or features
+        shuffle=True,
         batch_size=4
         ):
-    training_datasets = []
-    training_pattern = 'training-{}'.format(tfrecord_pattern)
-    validation_datasets = []
-    validation_pattern = 'validation-{}'.format(tfrecord_pattern)
+    datasets = []
     for data_dir in data_dirs:
-        training_ds = data_loader.dataset_from_dir(
+        ds = data_loader.dataset_from_dir(
             data_dir,
-            training_pattern,
+            tfrecord_pattern,
             patch_size=patch_size,
             batch_size=batch_size,
             cache=False
         )
-        validation_ds = data_loader.dataset_from_dir(
-            data_dir,
-            validation_pattern,
-            patch_size=patch_size,
-            batch_size=batch_size,
-            cache=False
-        )
-        training_datasets.append(training_ds)
-        validation_datasets.append(validation_ds)
+        datasets.append(ds)
 
-    training_merged = data_loader.merge_datasets(training_datasets).shuffle(buffer_size=128)
-    validation_merged = data_loader.merge_datasets(validation_datasets)
+    merged = data_loader.merge_datasets(datasets, axis=axis)
 
-    return training_merged, validation_merged
+    if shuffle:
+        merged = merged.shuffle(buffer_size=128)
+
+    return merged
 
 
 def build_model(model_type, input_bands, include_coords, patch_size, years):
@@ -106,6 +99,7 @@ def build_model(model_type, input_bands, include_coords, patch_size, years):
 
 def run(
         data_dirs,
+        merge_axis,
         tfrecord_pattern,
         patch_size,
         input_bands,
@@ -124,9 +118,20 @@ def run(
         years
 ):
     # Get datasets
-    training_ds, validation_ds = build_merged_dataset(
+    training_ds = build_merged_dataset(
         data_dirs=data_dirs,
-        tfrecord_pattern=tfrecord_pattern,
+        tfrecord_pattern='training-*{}'.format(tfrecord_pattern),
+        shuffle=True,
+        axis=merge_axis,
+        patch_size=patch_size,
+        batch_size=batch_size,
+    )
+
+    validation_ds = build_merged_dataset(
+        data_dirs=data_dirs,
+        tfrecord_pattern='validation-*{}'.format(tfrecord_pattern),
+        axis=merge_axis,
+        shuffle=False,
         patch_size=patch_size,
         batch_size=batch_size,
     )
@@ -198,6 +203,7 @@ if __name__ == "__main__":
     parser.add_argument('--model_type', type=str, required=False)
     parser.add_argument('--include_coords', type=str, required=False, default=False)
     parser.add_argument('--data_dirs', type=str, required=False, nargs='+')
+    parser.add_argument('--merge_axis', type=str, required=False, default='examples')
     parser.add_argument('--tfrecord_pattern', type=str, default='*.tfrecord')
     parser.add_argument('--patch_size', type=int, default=128)
     parser.add_argument('--input_bands', type=str, nargs='+', default=None)
@@ -219,6 +225,7 @@ if __name__ == "__main__":
         args.model_type = config.get('model_type', args.model_type)
         args.include_coords = config.get('include_coords', args.include_coords)
         args.data_dirs = config.get('data_dirs', args.data_dirs)
+        args.merge_axis = config.get('merge_axis', args.merge_axis)
         args.tfrecord_pattern = config.get('tfrecord_pattern', args.tfrecord_pattern)
         args.patch_size = config.get('patch_size', args.patch_size)
         args.input_bands = config.get('input_bands', args.input_bands)
@@ -242,6 +249,7 @@ if __name__ == "__main__":
     run(
         model_type=args.model_type,
         data_dirs=args.data_dirs,
+        merge_axis=args.merge_axis,
         tfrecord_pattern=args.tfrecord_pattern,
         patch_size=args.patch_size,
         input_bands=args.input_bands,

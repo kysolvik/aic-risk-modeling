@@ -375,13 +375,14 @@ def _merged_zipped_ds(*zipped_ds):
 
 
 def merge_datasets(
-    datasets: List[tf.data.Dataset]
+    datasets: List[tf.data.Dataset],
+    axis: str
 ) -> tf.data.Dataset:
     """Merge multiple datasets by zipping them along the feature axis.
 
     Args:
         datasets: List of tf.data.Datasets to merge. Each should yield inputs_dict.
-        stack_features: If True, stack features into a single tensor along a new axis.
+        axis: "examples" or "features".
 
     Returns:
         A merged tf.data.Dataset
@@ -394,9 +395,15 @@ def merge_datasets(
     if not datasets:
         raise ValueError("Must provide at least one dataset to merge")
 
-    # Zip datasets and apply merge function
-    zipped = tf.data.Dataset.zip(tuple(datasets))
-    return zipped.map(_merged_zipped_ds, num_parallel_calls=tf.data.AUTOTUNE)
+    if axis == "features":
+        # Zip datasets and apply merge function
+        zipped = tf.data.Dataset.zip(tuple(datasets))
+        return zipped.map(_merged_zipped_ds, num_parallel_calls=tf.data.AUTOTUNE)
+    elif axis == "examples":
+        return tf.data.Dataset.sample_from_datasets(datasets)
+    else:
+        raise ValueError('merge_datasets axis must be either "examples" or "features".'
+                         'Got {}'.format(axis))
 
 # Alias for backward compatibility
 dataset_from_gcs = dataset_from_dir
