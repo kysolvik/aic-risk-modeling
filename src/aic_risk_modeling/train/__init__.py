@@ -20,6 +20,7 @@ from .data_loader import (
     select_bands_transform,
     merge_datasets,
     apply_transforms,
+    build_merged_dataset,
 )
 
 from .data_norm import (
@@ -46,4 +47,5 @@ __all__ = [
     "load_stats_from_text",
     "get_norm_stats",
     "create_normalizer",
+    "build_merged_dataset",
 ]
