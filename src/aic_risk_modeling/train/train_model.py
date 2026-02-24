@@ -3,16 +3,6 @@
 This module provides functionality to train a segmentation model for predicting burned areas.
 It handles data loading from GCS, model building based on specified architecture, and training
 with checkpointing and early stopping.
-
-Command-line Arguments:
-    --model_type (str, required): Type of model architecture to use (e.g., 'unet').
-    --gcs_data_dir (str, required): GCS path to directory containing training/validation data.
-    --tfrecord_pattern (str, optional): Pattern for TFRecord files. Default: '*.tfrecord'.
-    --patch_size (int, optional): Spatial dimensions of input patches. Default: 128.
-    --output_band (str, optional): Name of target output band. Default: 'BurnDate'.
-    --batch_size (int, optional): Batch size for training. Default: 4.
-    --epochs (int, required): Number of training epochs.
-    --model_output_path (str, optional): Path to save trained model, can be cloud storage.
 """
 
 
