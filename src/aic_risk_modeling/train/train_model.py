@@ -210,4 +210,4 @@ if __name__ == "__main__":
         years=config['years']
     )
 
-    print("Training complete, model saved to:", args.model_output_path)
+    print("Training complete, model saved to:", config['model_output_path'])
