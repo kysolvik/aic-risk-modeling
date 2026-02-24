@@ -458,7 +458,7 @@ def build_merged_dataset(
     merged = merge_datasets(datasets, axis=axis)
 
     if shuffle:
-        merged = merged.shuffle(buffer_size=128)
+        merged = merged.shuffle(buffer_size=64)
 
     return merged
 
