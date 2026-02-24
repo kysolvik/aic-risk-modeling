@@ -1,35 +1,35 @@
 
-import tensorflow as tf
+import keras
 
 def gt0(tensor):
-    return tf.cast(tensor > 0, tf.float32)
+    return keras.ops.cast(tensor > 0, 'float32')
 
 def gt0_bool(tensor):
-    return tf.cast(tensor > 0, tf.bool)
+    return keras.ops.cast(tensor > 0, 'bool')
 
 def eq2(tensor):
-    return tf.cast(tensor == 2, tf.float32)
+    return keras.ops.cast(tensor == 2, 'float32')
 
 def normalize_mcwd(tensor):
     """Normalize MCWD values using precomputed mean and stddev."""
-    mean = tf.constant(600.0, dtype=tf.float32)
-    std = tf.constant(400.0, dtype=tf.float32)
+    mean = keras.ops.convert_to_tensor(600.0, dtype='float32')
+    std = keras.ops.convert_to_tensor(400.0, dtype='float32')
 
-    return (tf.cast(tensor, tf.float32) - mean) / (std + 1e-7)
+    return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
 
 def normalize_evi(tensor):
     """Normalize evi values using precomputed mean and stddev."""
-    mean = tf.constant(6250.0, dtype=tf.float32)
-    std = tf.constant(1200.0, dtype=tf.float32)
+    mean = keras.ops.convert_to_tensor(6250.0, dtype='float32')
+    std = keras.ops.convert_to_tensor(1200.0, dtype='float32')
 
-    return (tf.cast(tensor, tf.float32) - mean) / (std + 1e-7)
+    return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
 
 def normalize_ndvi(tensor):
     """Normalize ndvi values using precomputed mean and stddev."""
-    mean = tf.constant(8600.0, dtype=tf.float32)
-    std = tf.constant(1100.0, dtype=tf.float32)
+    mean = keras.ops.convert_to_tensor(8600.0, dtype='float32')
+    std = keras.ops.convert_to_tensor(1100.0, dtype='float32')
 
-    return (tf.cast(tensor, tf.float32) - mean) / (std + 1e-7)
+    return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
 
 transform_registry = {
     "gt0": gt0,

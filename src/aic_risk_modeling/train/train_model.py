@@ -18,6 +18,7 @@ Command-line Arguments:
 
 import numpy as np
 import tensorflow as tf
+import keras
 import json
 import inspect
 
@@ -138,23 +139,23 @@ def run(
 
     # Compile and run
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+        optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
         loss=loss_function,
         metrics=[
-            tf.keras.metrics.BinaryIoU(target_class_ids=[1]),
-            tf.keras.metrics.AUC(curve="ROC", name="roc_auc"),
-            tf.keras.metrics.AUC(curve="PR", name="pr_auc")
+            keras.metrics.BinaryIoU(target_class_ids=[1]),
+            keras.metrics.AUC(curve="ROC", name="roc_auc"),
+            keras.metrics.AUC(curve="PR", name="pr_auc")
             ]
         )
     checkpoint_filepath = './checkpoint.model.keras'
 
-    model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+    model_checkpoint_callback = keras.callbacks.ModelCheckpoint(
         filepath=checkpoint_filepath,
         monitor='val_pr_auc',
         mode='max',
         save_best_only=True)
 
-    early_stopping_callback = tf.keras.callbacks.EarlyStopping(
+    early_stopping_callback = keras.callbacks.EarlyStopping(
         monitor='val_pr_auc',
         mode='max',
         patience=5)
