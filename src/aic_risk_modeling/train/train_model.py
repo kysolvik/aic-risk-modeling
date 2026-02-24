@@ -41,39 +41,6 @@ def load_config(
 def clean_class_weight(cw_dict):
     return {int(k): v for k, v in cw_dict.items()}
 
-def build_merged_dataset(
-        data_dirs,
-        tfrecord_pattern,
-        patch_size,
-        batch_size=4
-        ):
-    training_datasets = []
-    training_pattern = 'training-{}'.format(tfrecord_pattern)
-    validation_datasets = []
-    validation_pattern = 'validation-{}'.format(tfrecord_pattern)
-    for data_dir in data_dirs:
-        training_ds = data_loader.dataset_from_dir(
-            data_dir,
-            training_pattern,
-            patch_size=patch_size,
-            batch_size=batch_size,
-            cache=False
-        )
-        validation_ds = data_loader.dataset_from_dir(
-            data_dir,
-            validation_pattern,
-            patch_size=patch_size,
-            batch_size=batch_size,
-            cache=False
-        )
-        training_datasets.append(training_ds)
-        validation_datasets.append(validation_ds)
-
-    training_merged = data_loader.merge_datasets(training_datasets).shuffle(buffer_size=128)
-    validation_merged = data_loader.merge_datasets(validation_datasets)
-
-    return training_merged, validation_merged
-
 
 def build_model(model_type, input_bands, include_coords, patch_size, years):
     function_name = f"get_{model_type}"
@@ -107,6 +74,9 @@ def build_model(model_type, input_bands, include_coords, patch_size, years):
 def run(
         data_dirs,
         tfrecord_pattern,
+        val_data_dirs,
+        val_tfrecord_pattern,
+        merge_axis,
         patch_size,
         input_bands,
         output_band,
@@ -124,9 +94,20 @@ def run(
         years
 ):
     # Get datasets
-    training_ds, validation_ds = build_merged_dataset(
+    training_ds = data_loader.build_merged_dataset(
         data_dirs=data_dirs,
         tfrecord_pattern=tfrecord_pattern,
+        shuffle=True,
+        axis=merge_axis,
+        patch_size=patch_size,
+        batch_size=batch_size,
+    )
+
+    validation_ds = data_loader.build_merged_dataset(
+        data_dirs=val_data_dirs,
+        tfrecord_pattern=val_tfrecord_pattern,
+        axis=merge_axis,
+        shuffle=False,
         patch_size=patch_size,
         batch_size=batch_size,
     )
@@ -169,13 +150,13 @@ def run(
 
     model_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
         filepath=checkpoint_filepath,
-        monitor='val_loss',
-        mode='min',
+        monitor='val_pr_auc',
+        mode='max',
         save_best_only=True)
 
     early_stopping_callback = tf.keras.callbacks.EarlyStopping(
-        monitor='val_loss',
-        mode='min',
+        monitor='val_pr_auc',
+        mode='max',
         patience=5)
 
     model.fit(
@@ -194,69 +175,38 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config_path', type=str, required=False)
-    parser.add_argument('--model_type', type=str, required=False)
-    parser.add_argument('--include_coords', type=str, required=False, default=False)
-    parser.add_argument('--data_dirs', type=str, required=False, nargs='+')
-    parser.add_argument('--tfrecord_pattern', type=str, default='*.tfrecord')
-    parser.add_argument('--patch_size', type=int, default=128)
-    parser.add_argument('--input_bands', type=str, nargs='+', default=None)
-    parser.add_argument('--output_band', type=str, default='BurnDate')
-    parser.add_argument('--batch_size', type=int, default=4)
-    parser.add_argument('--epochs', type=int, required=False)
-    parser.add_argument('--model_output_path', type=str)
-    parser.add_argument('--transforms', type=str)
-    parser.add_argument('--years', type=int, nargs='+', default=None)
-    parser.add_argument('--stack_time_series', type=bool, default=False)
-    parser.add_argument('--stack_inputs', type=bool, default=True)
-    parser.add_argument('--learning_rate', type=float, default=0.005)
-    parser.add_argument('--loss_function', type=str, default="Dice")
-    parser.add_argument('--class_weight', type=float, nargs='+', default=None)
+    parser.add_argument('--config_path', type=str, required=True)
     args = parser.parse_args()
 
-    if args.config_path:
-        config = load_config(args.config_path)
-        args.model_type = config.get('model_type', args.model_type)
-        args.include_coords = config.get('include_coords', args.include_coords)
-        args.data_dirs = config.get('data_dirs', args.data_dirs)
-        args.tfrecord_pattern = config.get('tfrecord_pattern', args.tfrecord_pattern)
-        args.patch_size = config.get('patch_size', args.patch_size)
-        args.input_bands = config.get('input_bands', args.input_bands)
-        args.output_band = config.get('output_band', args.output_band)
-        args.batch_size = config.get('batch_size', args.batch_size)
-        args.epochs = config.get('epochs', args.epochs)
-        args.model_output_path = config.get('model_output_path', args.model_output_path)
-        # Note: Transforms has to be a dict, so this may not work.
-        # To apply custom transforms, use config
-        args.transforms = config.get('transforms', args.transforms)
-        args.years = config.get('years', args.years)
-        args.stack_time_series = config.get('stack_time_series', args.stack_time_series)
-        args.stack_inputs = config.get('stack_inputs', args.stack_inputs)
-        args.learning_rate = config.get('learning_rate', args.learning_rate)
-        args.loss_function = config.get('loss_function', args.loss_function)
-        args.class_weight = config.get('class_weight', args.class_weight)
+    config = load_config(args.config_path)
 
     # Clean class weight
-    if args.class_weight is not None:
-        args.class_weight = clean_class_weight(args.class_weight)
+    class_weight = config.get('class_weight')
+    if class_weight is not None:
+        class_weight = clean_class_weight(class_weight)
+
+    # Note: config.get() options are the optional ones
     run(
-        model_type=args.model_type,
-        data_dirs=args.data_dirs,
-        tfrecord_pattern=args.tfrecord_pattern,
-        patch_size=args.patch_size,
-        input_bands=args.input_bands,
-        include_coords=args.include_coords,
-        output_band=args.output_band,
-        batch_size=args.batch_size,
-        epochs=args.epochs,
-        model_output_path=args.model_output_path,
-        transforms=args.transforms,
-        learning_rate=args.learning_rate,
-        loss_function=args.loss_function,
-        class_weight=args.class_weight,
-        stack_time_series=args.stack_time_series,
-        stack_inputs=args.stack_inputs,
-        years=args.years
+        model_type=config['model_type'],
+        data_dirs=config['data_dirs'],
+        tfrecord_pattern=config.get('tfrecord_pattern', 'train*tfrecord.gz'),
+        val_data_dirs=config.get('val_data_dirs', config['data_dirs']),
+        val_tfrecord_pattern=config.get('val_tfrecord_pattern', 'val*tfrecord.gz'),
+        merge_axis=config.get('merge_axis', 'examples'),
+        patch_size=config['patch_size'],
+        input_bands=config['input_bands'],
+        include_coords=config['include_coords'],
+        output_band=config['output_band'],
+        batch_size=config['batch_size'],
+        epochs=config['epochs'],
+        model_output_path=config['model_output_path'],
+        transforms=config['transforms'],
+        learning_rate=config['learning_rate'],
+        loss_function=config['loss_function'],
+        class_weight=class_weight,
+        stack_time_series=config['stack_time_series'],
+        stack_inputs=config['stack_inputs'],
+        years=config['years']
     )
 
     print("Training complete, model saved to:", args.model_output_path)

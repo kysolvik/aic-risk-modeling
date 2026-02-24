@@ -373,30 +373,95 @@ def _merged_zipped_ds(*zipped_ds):
         merged_inputs.update(ds)
     return merged_inputs
 
+def _remove_unshared_features(datasets):
+    """Remove features that aren't shared across all datasets.
+
+    Args:
+        datasets: List of tf.data.Datasets, each yielding feature dicts
+
+    Returns:
+        List of datasets with a map applied that filters to only shared feature keys
+    """
+    if not datasets:
+        return datasets
+
+    # Get feature keys from first batch of each dataset
+    shared_keys = None
+    for ds in datasets:
+        # Take one batch to inspect keys
+        batch_keys = set(ds.element_spec.keys())
+        if shared_keys is None:
+            shared_keys = batch_keys
+        else:
+            shared_keys = shared_keys.intersection(batch_keys)
+
+    if shared_keys is None:
+        raise ValueError("Could not determine feature keys from datasets")
+
+    # Filter each dataset to only include shared keys
+    filtered_datasets = []
+    for ds in datasets:
+        def filter_features(features):
+            return {k: v for k, v in features.items() if k in shared_keys}
+        filtered_ds = ds.map(filter_features, num_parallel_calls=tf.data.AUTOTUNE)
+        filtered_datasets.append(filtered_ds)
+
+    return filtered_datasets
 
 def merge_datasets(
-    datasets: List[tf.data.Dataset]
+    datasets: List[tf.data.Dataset],
+    axis: str
 ) -> tf.data.Dataset:
     """Merge multiple datasets by zipping them along the feature axis.
 
     Args:
         datasets: List of tf.data.Datasets to merge. Each should yield inputs_dict.
-        stack_features: If True, stack features into a single tensor along a new axis.
+        axis: "examples" or "features".
 
     Returns:
         A merged tf.data.Dataset
-
-    Example:
-        >>> ds1 = dataset_from_dir(...)  # yields (inputs1, outputs1)
-        >>> ds2 = dataset_from_dir(...)  # yields (inputs2, outputs2)
-        >>> merged = merge_datasets([ds1, ds2])  # yields {**inputs1, **inputs2}
     """
     if not datasets:
         raise ValueError("Must provide at least one dataset to merge")
 
-    # Zip datasets and apply merge function
-    zipped = tf.data.Dataset.zip(tuple(datasets))
-    return zipped.map(_merged_zipped_ds, num_parallel_calls=tf.data.AUTOTUNE)
+    if axis == "features":
+        # Zip datasets and apply merge function
+        zipped = tf.data.Dataset.zip(tuple(datasets))
+        return zipped.map(_merged_zipped_ds, num_parallel_calls=tf.data.AUTOTUNE)
+    elif axis == "examples":
+        datasets = _remove_unshared_features(datasets)
+        return tf.data.Dataset.sample_from_datasets(datasets)
+    else:
+        raise ValueError('merge_datasets axis must be either "examples" or "features".'
+                         'Got {}'.format(axis))
+
+
+def build_merged_dataset(
+        data_dirs,
+        tfrecord_pattern,
+        patch_size,
+        axis='examples', # examples or features
+        shuffle=True,
+        batch_size=4
+        ):
+    datasets = []
+    for data_dir in data_dirs:
+        ds = dataset_from_dir(
+            data_dir,
+            tfrecord_pattern,
+            patch_size=patch_size,
+            batch_size=batch_size,
+            cache=False
+        )
+        datasets.append(ds)
+
+    merged = merge_datasets(datasets, axis=axis)
+
+    if shuffle:
+        merged = merged.shuffle(buffer_size=64)
+
+    return merged
+
 
 # Alias for backward compatibility
 dataset_from_gcs = dataset_from_dir
