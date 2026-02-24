@@ -22,7 +22,7 @@ import keras
 import json
 import inspect
 
-from aic_risk_modeling.train import data_loader, models
+from aic_risk_modeling.train import data_loader, models, losses
 
 SEED = 54
 RNG = np.random.default_rng(SEED)
@@ -186,6 +186,9 @@ if __name__ == "__main__":
     if class_weight is not None:
         class_weight = clean_class_weight(class_weight)
 
+    # Get loss function
+    loss_function = losses.get_loss(config['loss_function'])
+
     # Note: config.get() options are the optional ones
     run(
         model_type=config['model_type'],
@@ -203,7 +206,7 @@ if __name__ == "__main__":
         model_output_path=config['model_output_path'],
         transforms=config['transforms'],
         learning_rate=config['learning_rate'],
-        loss_function=config['loss_function'],
+        loss_function=loss_function,
         class_weight=class_weight,
         stack_time_series=config['stack_time_series'],
         stack_inputs=config['stack_inputs'],
