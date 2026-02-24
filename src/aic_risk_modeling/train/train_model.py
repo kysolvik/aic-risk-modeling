@@ -39,10 +39,6 @@ def load_config(
     return config
 
 
-def clean_class_weight(cw_dict):
-    return {int(k): v for k, v in cw_dict.items()}
-
-
 def build_model(model_type, input_bands, include_coords, patch_size, years):
     function_name = f"get_{model_type}"
     # NOTE: ONLY ALLOWS FOR IMAGE TIME SERIES INPUTS
@@ -88,7 +84,6 @@ def run(
         learning_rate,
         loss_function,
         weight_decay,
-        class_weight,
         model_output_path,
         transforms,
         stack_time_series,
@@ -166,7 +161,6 @@ def run(
         training_ds,
         validation_data=validation_ds,
         epochs=epochs,
-        class_weight=class_weight,
         callbacks=[model_checkpoint_callback, early_stopping_callback]
     )
 
@@ -182,11 +176,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     config = load_config(args.config_path)
-
-    # Clean class weight
-    class_weight = config.get('class_weight')
-    if class_weight is not None:
-        class_weight = clean_class_weight(class_weight)
 
     # Get loss function
     loss_function = losses.get_loss(config['loss_function'])
@@ -210,7 +199,6 @@ if __name__ == "__main__":
         learning_rate=config['learning_rate'],
         loss_function=loss_function,
         weight_decay=config.get('weight_decay', None),
-        class_weight=class_weight,
         stack_time_series=config['stack_time_series'],
         stack_inputs=config['stack_inputs'],
         years=config['years']
