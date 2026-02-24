@@ -87,6 +87,7 @@ def run(
         epochs,
         learning_rate,
         loss_function,
+        weight_decay,
         class_weight,
         model_output_path,
         transforms,
@@ -139,7 +140,8 @@ def run(
 
     # Compile and run
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
+        optimizer=keras.optimizers.Adam(learning_rate=learning_rate,
+                                        weight_decay=weight_decay),
         loss=loss_function,
         metrics=[
             keras.metrics.BinaryIoU(target_class_ids=[1]),
@@ -207,6 +209,7 @@ if __name__ == "__main__":
         transforms=config['transforms'],
         learning_rate=config['learning_rate'],
         loss_function=loss_function,
+        weight_decay=config.get('weight_decay', None),
         class_weight=class_weight,
         stack_time_series=config['stack_time_series'],
         stack_inputs=config['stack_inputs'],
