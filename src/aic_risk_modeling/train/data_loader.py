@@ -30,6 +30,7 @@ import logging
 from typing import List, Dict,  Optional, Callable
 
 import tensorflow as tf
+import keras
 from tensorflow_metadata.proto.v0 import schema_pb2
 from google.protobuf import text_format
 
@@ -246,7 +247,7 @@ def _stack_time_series(features, input_keys, years):
         year_tensor = _stack_vars(features, year_keys)
         grouped_tensors.append(year_tensor["image"])
 
-    timeseries_tensor = tf.stack(grouped_tensors, axis=1)
+    timeseries_tensor = keras.ops.stack(grouped_tensors, axis=1)
     return {"image": timeseries_tensor}
 
 
@@ -256,7 +257,7 @@ def _stack_vars(features, input_keys, exclude_keys: Optional[List[str]] = None):
     else:
         filter_keys = input_keys
 
-    stacked_tensor = tf.stack([features[k] for k in filter_keys], axis=-1)
+    stacked_tensor = keras.ops.stack([features[k] for k in filter_keys], axis=-1)
 
     if exclude_keys:
         all_features = {k: features[k] for k in features if k in exclude_keys}
@@ -268,7 +269,7 @@ def _stack_vars(features, input_keys, exclude_keys: Optional[List[str]] = None):
 
 def _prep_metadata(example):
     """Just coords for now"""
-    return tf.stack([example['lat'], example['lon']], axis=-1)
+    return keras.ops.stack([example['lat'], example['lon']], axis=-1)
 
 def _to_tuple_transform(
     example: Dict,

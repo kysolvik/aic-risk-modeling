@@ -1,6 +1,7 @@
 from google.protobuf import text_format
 from tensorflow_metadata.proto.v0 import statistics_pb2
 import tensorflow as tf
+import keras
 
 def load_stats_from_text(path):
     """Load tfdv-generated DatasetFeatureStatisticsList from a text file."""
@@ -40,10 +41,10 @@ def create_normalizer(stats_txt_path, features_to_normalize):
     def normalize_fn(features):
         for name, stats in norm_constants.items():
             if name in features:
-                mean = tf.constant(stats['mean'], dtype=tf.float32)
-                std = tf.constant(stats['stddev'], dtype=tf.float32)
+                mean = keras.ops.convert_to_tensor(stats['mean'], dtype='float32')
+                std = keras.ops.convert_to_tensor(stats['stddev'], dtype='float32')
                 
-                features[name] = (tf.cast(features[name], tf.float32) - mean) / (std + 1e-7)
+                features[name] = (keras.ops.cast(features[name], 'float32') - mean) / (std + 1e-7)
         
         return features
 
