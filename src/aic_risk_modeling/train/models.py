@@ -136,7 +136,7 @@ def get_convlstm(image_shape, include_metadata=False, metadata_shape=None):
     )(image_inputs)
     b1 = layers.BatchNormalization()(c1)
     c2 = layers.ConvLSTM2D(
-        filters=64,
+        filters=128,
         kernel_size=(3, 3),
         padding="same",
         return_sequences=True,
@@ -144,7 +144,7 @@ def get_convlstm(image_shape, include_metadata=False, metadata_shape=None):
     )(b1)
     b2 = layers.BatchNormalization()(c2)
     c3 = layers.ConvLSTM2D(
-        filters=64,
+        filters=256,
         kernel_size=(1, 1),
         padding="same",
         return_sequences=False,
