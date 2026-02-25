@@ -16,7 +16,7 @@ def weighted_bce_dice(pos_weight):
     """Weighted BCE and Dice loss combined (mean)"""
     def loss(y_true, y_pred):
         y_true = keras.ops.cast(y_true, dtype='float32')
-        bce = keras.losses.binary_crossentropy(y_true, y_pred)
+        bce = keras.losses.binary_crossentropy(y_true, y_pred, axis=0)
         weights = y_true * pos_weight + (1 - y_true)
         bce = keras.ops.mean(bce*weights)
         dice = keras.losses.dice(y_true, y_pred)
