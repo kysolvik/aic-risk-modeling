@@ -12,22 +12,29 @@ def eq2(tensor):
 
 def normalize_mcwd(tensor):
     """Normalize MCWD values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(600.0, dtype='float32')
-    std = keras.ops.convert_to_tensor(400.0, dtype='float32')
+    mean = keras.ops.convert_to_tensor(650.0, dtype='float32')
+    std = keras.ops.convert_to_tensor(425.0, dtype='float32')
 
     return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
 
 def normalize_evi(tensor):
     """Normalize evi values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(6250.0, dtype='float32')
-    std = keras.ops.convert_to_tensor(1200.0, dtype='float32')
+    mean = keras.ops.convert_to_tensor(4250.0, dtype='float32')
+    std = keras.ops.convert_to_tensor(750.0, dtype='float32')
 
     return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
 
 def normalize_ndvi(tensor):
     """Normalize ndvi values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(8600.0, dtype='float32')
-    std = keras.ops.convert_to_tensor(1100.0, dtype='float32')
+    mean = keras.ops.convert_to_tensor(6750.0, dtype='float32')
+    std = keras.ops.convert_to_tensor(1200.0, dtype='float32')
+
+    return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
+
+def normalize_classification(tensor):
+    """Normalize ndvi values using precomputed mean and stddev."""
+    mean = keras.ops.convert_to_tensor(0.85, dtype='float32')
+    std = keras.ops.convert_to_tensor(0.3, dtype='float32')
 
     return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
 
@@ -38,5 +45,6 @@ transform_registry = {
     "normalize_mcwd": normalize_mcwd,
     "normalize_evi": normalize_evi,
     "normalize_ndvi": normalize_ndvi,
+    "normalize_classification": normalize_classification,
     "none": lambda x: x
 }
