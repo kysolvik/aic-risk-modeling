@@ -125,8 +125,8 @@ def run(
 
     # Compile and run
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=learning_rate,
-                                        weight_decay=weight_decay),
+        optimizer=keras.optimizers.AdamW(learning_rate=learning_rate,
+                                         weight_decay=weight_decay),
         loss=loss_function,
         metrics=[
             keras.metrics.BinaryIoU(target_class_ids=[1]),
