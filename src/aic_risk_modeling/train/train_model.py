@@ -145,7 +145,7 @@ def run(
     early_stopping_callback = keras.callbacks.EarlyStopping(
         monitor='val_pr_auc',
         mode='max',
-        patience=5)
+        patience=8)
 
     model.fit(
         training_ds,
