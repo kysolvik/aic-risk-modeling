@@ -153,7 +153,9 @@ def run(
         epochs=epochs,
         callbacks=[model_checkpoint_callback, early_stopping_callback]
     )
-
+    
+    # Load best checkpoint
+    model.load_weights(checkpoint_filepath)
     model.save(model_output_path)
 
     return model
