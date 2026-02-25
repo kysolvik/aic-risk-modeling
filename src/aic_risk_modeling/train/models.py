@@ -66,19 +66,22 @@ def get_unet_lite(input_shape):
 
     return keras.Model(inputs, outputs, name="U-Net-Lite")
 
-def get_mlp(input_shape):
-    inputs = keras.Input(shape=input_shape)
+def get_mlp(image_shape, include_metadata=False, metadata_shape=None):
+    image_inputs = keras.Input(shape=image_shape, name='image')
 
     # Entry block
-    x = layers.Dense(128, activation='relu')(inputs)
-    # x = layers.Dropout(0.3)(x)
-    x = layers.Dense(64, activation='relu')(x)
+    x = layers.Reshape((image_shape[1], image_shape[2], -1))(image_inputs)
+    x = layers.Dense(1024, activation='relu')(x)
+    x = layers.Dropout(0.3)(x)
+    x = layers.Dense(512, activation='relu')(x)
+    x = layers.Dropout(0.3)(x)
+    x = layers.Dense(128, activation='relu')(x)
 
     # Add a per-pixel classification layer
     outputs = layers.Dense(1, activation="sigmoid")(x)
 
     # Define the model
-    model = keras.Model(inputs, outputs)
+    model = keras.Model(image_inputs, outputs)
     return model
 
 def get_multi_scale_mlp_head(input_shape, hidden=128):
