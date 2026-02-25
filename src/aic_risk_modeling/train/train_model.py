@@ -5,17 +5,46 @@ It handles data loading from GCS, model building based on specified architecture
 with checkpointing and early stopping.
 """
 
+import os
+import json
+import inspect
 
 import numpy as np
 import tensorflow as tf
 import keras
-import json
-import inspect
+from google.cloud import storage
+from urllib.parse import urlparse
 
 from aic_risk_modeling.train import data_loader, models, losses
 
 SEED = 54
 RNG = np.random.default_rng(SEED)
+
+
+def upload_csv_to_gcs(local_path, gcs_uri):
+    """
+    Upload a CSV file to Google Cloud Storage.
+
+    Args:
+        local_path (str): Path to local CSV file.
+        gcs_uri (str): Full GCS URI (e.g. "gs://my-bucket/path/to/file.csv")
+    """
+    if not gcs_uri.startswith("gs://"):
+        raise ValueError("gcs_uri must start with 'gs://'")
+
+    # Parse bucket and blob path
+    parsed = urlparse(gcs_uri)
+    bucket_name = parsed.netloc
+    blob_path = parsed.path.lstrip("/")
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_path)
+
+    blob.upload_from_filename(local_path)
+
+    print(f"Uploaded {local_path} to {gcs_uri}")
+
 
 def load_config(
         config_path
@@ -147,16 +176,24 @@ def run(
         mode='max',
         patience=8)
 
+    csv_logger_callback = keras.callbacks.CSVLogger(
+        './training.csv'
+    )
     model.fit(
         training_ds,
         validation_data=validation_ds,
         epochs=epochs,
-        callbacks=[model_checkpoint_callback, early_stopping_callback]
+        callbacks=[model_checkpoint_callback, early_stopping_callback, csv_logger_callback]
     )
     
     # Load best checkpoint
     model.load_weights(checkpoint_filepath)
     model.save(model_output_path)
+
+    # Copy logged data to gs
+    output_root, _ = os.path.splitext(model_output_path)
+    csv_output_path = output_root + '.csv'
+    upload_csv_to_gcs('./training.csv', csv_output_path)
 
     return model
 
