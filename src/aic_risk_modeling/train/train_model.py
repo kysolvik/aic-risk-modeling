@@ -100,6 +100,7 @@ def run(
         model_type,
         include_coords,
         epochs,
+        steps_per_epoch,
         learning_rate,
         loss_function,
         weight_decay,
@@ -152,9 +153,17 @@ def run(
     model = build_model(model_type.lower(), input_bands, include_coords,
                         patch_size, years=years)
 
+    # Learning rate scheduler
+    decay_steps = (epochs-2)*steps_per_epoch
+    warmup_steps = 2*steps_per_epoch
+    initial_learning_rate = 0.0
+    lr_schedule = keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate, decay_steps, warmup_target=learning_rate,
+        warmup_steps=warmup_steps
+    )
     # Compile and run
     model.compile(
-        optimizer=keras.optimizers.AdamW(learning_rate=learning_rate,
+        optimizer=keras.optimizers.AdamW(learning_rate=lr_schedule,
                                          weight_decay=weight_decay),
         loss=loss_function,
         metrics=[
@@ -226,6 +235,7 @@ if __name__ == "__main__":
         model_output_path=config['model_output_path'],
         transforms=config['transforms'],
         learning_rate=config['learning_rate'],
+        steps_per_epoch=config.get('steps_per_epoch', 5000),
         loss_function=loss_function,
         weight_decay=config.get('weight_decay', None),
         stack_time_series=config['stack_time_series'],
