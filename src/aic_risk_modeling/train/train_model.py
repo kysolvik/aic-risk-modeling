@@ -154,8 +154,8 @@ def run(
                         patch_size, years=years)
 
     # Learning rate scheduler
-    decay_steps = (epochs-2)*steps_per_epoch
-    warmup_steps = 2*steps_per_epoch
+    decay_steps = (epochs-1)*steps_per_epoch
+    warmup_steps = 1*steps_per_epoch
     initial_learning_rate = 0.0
     lr_schedule = keras.optimizers.schedules.CosineDecay(
         initial_learning_rate, decay_steps, warmup_target=learning_rate,
