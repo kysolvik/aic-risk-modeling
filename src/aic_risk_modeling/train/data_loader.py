@@ -275,7 +275,7 @@ def _stack_vars(features, input_keys, exclude_keys: Optional[List[str]] = None):
 
 def _prep_metadata(example):
     """Just coords for now"""
-    return keras.ops.stack([example['md_lat'], example['md_lon']], axis=-1)
+    return keras.ops.stack([example['md_y'], example['md_x']], axis=-1)
 
 def _to_tuple_transform(
     example: Dict,
@@ -472,64 +472,3 @@ def build_merged_dataset(
 
 # Alias for backward compatibility
 dataset_from_gcs = dataset_from_dir
-
-
-if __name__ == "__main__":
-    # Quick example demonstrating the load → merge → select workflow
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--gcs_dir",
-        required=True,
-        help="GCS directory containing schema or stats (e.g. gs://.../results)"
-        )
-    parser.add_argument(
-        "--tfrecord_pattern",
-        required=False,
-        help="TFRecord glob pattern (e.g. *.tfrecord.gz)",
-        default="*.tfrecord.gz")
-    parser.add_argument(
-        "--patch_size",
-        required=False,
-        type=int,
-        default=128)
-    args = parser.parse_args()
-
-    tfrecord_pattern_path = os.path.join(args.gcs_dir, args.tfrecord_pattern)
-
-    schema = load_schema_from_gcs(args.gcs_dir)
-    feature_spec = schema_to_feature_spec(schema, patch_size=args.patch_size)
-
-    print("Example features:")
-    for i, f in enumerate(list(feature_spec.keys())[:20]):
-        print(i + 1, f)
-
-    # Example workflow: load raw data → merge → select inputs/outputs
-    print("\n--- Loading raw dataset (all features) ---")
-    ds_raw = dataset_from_dir(
-        tfrecord_pattern_path,
-        feature_spec,
-        batch_size=2
-    )
-
-    for batch in ds_raw.take(1):
-        print(f"Raw batch keys: {list(batch.keys())}")
-        print("Sample feature shapes:")
-        for key, val in list(batch.items())[:3]:
-            print(f"  {key}: {val.shape}")
-
-    # Select inputs/outputs with transforms
-    print("\n--- After selecting inputs/outputs with transforms ---")
-    transform_dict = {'BurnDate': lambda x: x > 0}
-    ds_final = select_bands_transform(
-        ds_raw,
-        input_bands=[k for k in feature_spec.keys() if k not in ['lat', 'lon', 'id', 'BurnDate']],
-        output_bands=['BurnDate'],
-        transforms=transform_dict
-    )
-
-    for inputs, labels in ds_final.take(1):
-        print(f"Inputs keys: {list(inputs.keys())}")
-        print(f"Label shape: {labels.shape}")
-        print(f"Label dtype: {labels.dtype}")
