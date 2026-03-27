@@ -90,9 +90,6 @@ def schema_to_feature_spec(
     Returns:
         Dict suitable for tf.io.parse_single_example
     """
-    if non_img_features is None:
-        non_img_features = []
-
     feature_spec = {}
     for feature in schema.feature:
         if feature.name.startswith('im_'):
@@ -185,7 +182,6 @@ def dataset_from_dir(
     tfrecord_pattern: str = "*.tfrecord.gz",
     feature_spec: Optional[Dict[str, tf.io.FixedLenFeature] | None] = None,
     batch_size: int = 8,
-    patch_size: int = 128,
     shuffle: bool = False,
     cache: Optional[str | bool] = False,
     compression: Optional[str] = "GZIP",
