@@ -33,6 +33,7 @@ import tensorflow as tf
 import keras
 from tensorflow_metadata.proto.v0 import schema_pb2
 from google.protobuf import text_format
+from google.protobuf.json_format import MessageToDict
 
 from aic_risk_modeling.train import transforms
 
@@ -90,19 +91,24 @@ def schema_to_feature_spec(
         Dict suitable for tf.io.parse_single_example
     """
     if non_img_features is None:
-        non_img_features = ["lon", "lat", "id"]
+        non_img_features = []
 
     feature_spec = {}
     for feature in schema.feature:
-        if feature.type == schema_pb2.FeatureType.BYTES:
-            feature_spec[feature.name] = tf.io.FixedLenFeature([], tf.string)
-        elif feature.type == schema_pb2.FeatureType.INT:
-            feature_spec[feature.name] = tf.io.FixedLenFeature([], tf.int64)
-        elif feature.type == schema_pb2.FeatureType.FLOAT:
-            if feature.name not in non_img_features:
-                feature_spec[feature.name] = tf.io.FixedLenFeature([patch_size, patch_size], tf.float32)
+        if feature.name.startswith('im_'):
+            tf_size = [patch_size, patch_size]
+        else:
+            feature_size = int(MessageToDict(feature)['shape']['dim'][0]['size'])
+            if feature_size > 0:
+                tf_size = [feature_size]
             else:
-                feature_spec[feature.name] = tf.io.FixedLenFeature([], tf.float32)
+                tf_size = []
+        if feature.type == schema_pb2.FeatureType.BYTES:
+            feature_spec[feature.name] = tf.io.FixedLenFeature(tf_size, tf.string)
+        elif feature.type == schema_pb2.FeatureType.INT:
+            feature_spec[feature.name] = tf.io.FixedLenFeature(tf_size, tf.int64)
+        elif feature.type == schema_pb2.FeatureType.FLOAT:
+                feature_spec[feature.name] = tf.io.FixedLenFeature(tf_size, tf.float32)
         else:
             # Fallback to a scalar float
             feature_spec[feature.name] = tf.io.FixedLenFeature([], tf.float32)
@@ -269,7 +275,7 @@ def _stack_vars(features, input_keys, exclude_keys: Optional[List[str]] = None):
 
 def _prep_metadata(example):
     """Just coords for now"""
-    return keras.ops.stack([example['lat'], example['lon']], axis=-1)
+    return keras.ops.stack([example['md_lat'], example['md_lon']], axis=-1)
 
 def _to_tuple_transform(
     example: Dict,

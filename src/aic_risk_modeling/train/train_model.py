@@ -3,29 +3,48 @@
 This module provides functionality to train a segmentation model for predicting burned areas.
 It handles data loading from GCS, model building based on specified architecture, and training
 with checkpointing and early stopping.
-
-Command-line Arguments:
-    --model_type (str, required): Type of model architecture to use (e.g., 'unet').
-    --gcs_data_dir (str, required): GCS path to directory containing training/validation data.
-    --tfrecord_pattern (str, optional): Pattern for TFRecord files. Default: '*.tfrecord'.
-    --patch_size (int, optional): Spatial dimensions of input patches. Default: 128.
-    --output_band (str, optional): Name of target output band. Default: 'BurnDate'.
-    --batch_size (int, optional): Batch size for training. Default: 4.
-    --epochs (int, required): Number of training epochs.
-    --model_output_path (str, optional): Path to save trained model, can be cloud storage.
 """
 
+import os
+import json
+import inspect
 
 import numpy as np
 import tensorflow as tf
 import keras
-import json
-import inspect
+from google.cloud import storage
+from urllib.parse import urlparse
 
-from aic_risk_modeling.train import data_loader, models
+from aic_risk_modeling.train import data_loader, models, losses
 
 SEED = 54
 RNG = np.random.default_rng(SEED)
+
+
+def upload_csv_to_gcs(local_path, gcs_uri):
+    """
+    Upload a CSV file to Google Cloud Storage.
+
+    Args:
+        local_path (str): Path to local CSV file.
+        gcs_uri (str): Full GCS URI (e.g. "gs://my-bucket/path/to/file.csv")
+    """
+    if not gcs_uri.startswith("gs://"):
+        raise ValueError("gcs_uri must start with 'gs://'")
+
+    # Parse bucket and blob path
+    parsed = urlparse(gcs_uri)
+    bucket_name = parsed.netloc
+    blob_path = parsed.path.lstrip("/")
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_path)
+
+    blob.upload_from_filename(local_path)
+
+    print(f"Uploaded {local_path} to {gcs_uri}")
+
 
 def load_config(
         config_path
@@ -37,10 +56,6 @@ def load_config(
         with open(config_path, 'r') as f:
             config = json.load(f)
     return config
-
-
-def clean_class_weight(cw_dict):
-    return {int(k): v for k, v in cw_dict.items()}
 
 
 def build_model(model_type, input_bands, include_coords, patch_size, years):
@@ -85,9 +100,10 @@ def run(
         model_type,
         include_coords,
         epochs,
+        steps_per_epoch,
         learning_rate,
         loss_function,
-        class_weight,
+        weight_decay,
         model_output_path,
         transforms,
         stack_time_series,
@@ -137,9 +153,18 @@ def run(
     model = build_model(model_type.lower(), input_bands, include_coords,
                         patch_size, years=years)
 
+    # Learning rate scheduler
+    decay_steps = (epochs-1)*steps_per_epoch
+    warmup_steps = 1*steps_per_epoch
+    initial_learning_rate = 0.0
+    lr_schedule = keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate, decay_steps, warmup_target=learning_rate,
+        warmup_steps=warmup_steps
+    )
     # Compile and run
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
+        optimizer=keras.optimizers.AdamW(learning_rate=lr_schedule,
+                                         weight_decay=weight_decay),
         loss=loss_function,
         metrics=[
             keras.metrics.BinaryIoU(target_class_ids=[1]),
@@ -158,17 +183,26 @@ def run(
     early_stopping_callback = keras.callbacks.EarlyStopping(
         monitor='val_pr_auc',
         mode='max',
-        patience=5)
+        patience=8)
 
+    csv_logger_callback = keras.callbacks.CSVLogger(
+        './training.csv'
+    )
     model.fit(
         training_ds,
         validation_data=validation_ds,
         epochs=epochs,
-        class_weight=class_weight,
-        callbacks=[model_checkpoint_callback, early_stopping_callback]
+        callbacks=[model_checkpoint_callback, early_stopping_callback, csv_logger_callback]
     )
-
+    
+    # Load best checkpoint
+    model.load_weights(checkpoint_filepath)
     model.save(model_output_path)
+
+    # Copy logged data to gs
+    output_root, _ = os.path.splitext(model_output_path)
+    csv_output_path = output_root + '.csv'
+    upload_csv_to_gcs('./training.csv', csv_output_path)
 
     return model
 
@@ -181,10 +215,8 @@ if __name__ == "__main__":
 
     config = load_config(args.config_path)
 
-    # Clean class weight
-    class_weight = config.get('class_weight')
-    if class_weight is not None:
-        class_weight = clean_class_weight(class_weight)
+    # Get loss function
+    loss_function = losses.get_loss(config['loss_function'])
 
     # Note: config.get() options are the optional ones
     run(
@@ -203,11 +235,12 @@ if __name__ == "__main__":
         model_output_path=config['model_output_path'],
         transforms=config['transforms'],
         learning_rate=config['learning_rate'],
-        loss_function=config['loss_function'],
-        class_weight=class_weight,
+        steps_per_epoch=config.get('steps_per_epoch', 5000),
+        loss_function=loss_function,
+        weight_decay=config.get('weight_decay', None),
         stack_time_series=config['stack_time_series'],
         stack_inputs=config['stack_inputs'],
         years=config['years']
     )
 
-    print("Training complete, model saved to:", args.model_output_path)
+    print("Training complete, model saved to:", config['model_output_path'])

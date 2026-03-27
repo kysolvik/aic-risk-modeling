@@ -29,6 +29,12 @@ from .data_norm import (
     create_normalizer
 )
 
+from .losses import (
+    weighted_bce,
+    weighted_bce_dice,
+    get_loss
+)
+
 
 __all__ = [
     "load_schema_from_gcs",
@@ -48,4 +54,7 @@ __all__ = [
     "get_norm_stats",
     "create_normalizer",
     "build_merged_dataset",
+    "weighted_bce",
+    "weighted_bce_dice",
+    "get_loss"
 ]
