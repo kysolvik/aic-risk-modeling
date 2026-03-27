@@ -10,6 +10,8 @@ from .models import (
     get_multi_scale_mlp_head,
     get_convlstm,
     get_simple_convlstm,
+    get_lstm,
+    build_fusion
 )
 
 from .data_loader import (
@@ -56,5 +58,7 @@ __all__ = [
     "build_merged_dataset",
     "weighted_bce",
     "weighted_bce_dice",
-    "get_loss"
+    "get_loss",
+    "get_lstm",
+    "build_fusion"
 ]

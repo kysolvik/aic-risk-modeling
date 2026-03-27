@@ -1,7 +1,7 @@
 """Defines keras models used in training"""
 
 import keras
-from keras import layers
+from keras import layers, models
 
 def get_unet(input_shape):
     inputs = keras.Input(shape=input_shape)
@@ -126,57 +126,87 @@ def get_simple_convlstm(input_shape):
     model = keras.Model(inputs, outputs)
     return model
 
-def get_convlstm(image_shape, include_metadata=False, metadata_shape=None):
-    image_inputs = keras.Input(shape=image_shape, name='image')
+def get_convlstm(input_shape, input_name, for_fusion=False):
+    image_inputs = keras.Input(shape=input_shape, name=input_name)
 
     # Image
     c1 = layers.ConvLSTM2D(
-        filters=128,
+        filters=64,
         kernel_size=(5, 5),
         padding="same",
         return_sequences=True,
         activation="relu",
-        dropout=0.2
     )(image_inputs)
     b1 = layers.BatchNormalization()(c1)
     c2 = layers.ConvLSTM2D(
-        filters=128,
+        filters=64,
         kernel_size=(3, 3),
         padding="same",
         return_sequences=True,
         activation="relu",
-        dropout=0.2
     )(b1)
     b2 = layers.BatchNormalization()(c2)
     c3 = layers.ConvLSTM2D(
-        filters=128,
+        filters=64,
         kernel_size=(1, 1),
         padding="same",
         return_sequences=False,
         activation="relu",
-        dropout=0.2
     )(b2)
     b3 = layers.BatchNormalization()(c3)
 
-    if include_metadata:
-        metadata_inputs = keras.Input(shape=metadata_shape, name='metadata')
-        # metadata
-        m1 = layers.Dense(16, activation='relu')(metadata_inputs)
-        m2 = layers.Dense(8, activation='relu')(m1)
-        # Broadcast
-        h = b3.shape[1]
-        w = b3.shape[2]
-        m3 = keras.ops.expand_dims(keras.ops.expand_dims(m2, 1), 1)
-        m4 = keras.ops.tile(m3, [1, h, w, 1])
 
-        concat = layers.Concatenate()([b3, m4])
-        outputs = layers.Conv2D(filters=1, kernel_size=(3, 3),
-                                    activation="sigmoid", padding="same")(concat)
-        model = keras.Model([image_inputs, metadata_inputs], outputs)
-
-    else:
+    if not for_fusion:
         outputs = layers.Conv2D(filters=1, kernel_size=(3, 3),
                                     activation="sigmoid", padding="same")(b3)
         model = keras.Model(image_inputs, outputs)
+    else:
+        model = keras.Model(image_inputs, b3)
 
     return model
+
+def get_lstm(input_shape, input_name):
+        # Input shape should be (timesteps, features)
+    input = keras.Input(shape=input_shape, name=input_name)
+    truncated = layers.Lambda(lambda x: x[:, -60:, :])(input)
+    
+    l1 = layers.LSTM(32, return_sequences=True)(truncated)
+    d1 = layers.Dropout(0.2)(l1)
+    
+    l2 = layers.LSTM(16, return_sequences=False)(d1)
+    d2 = layers.Dropout(0.2)(l2)
+    
+    c1 = layers.Dense(16*16*input_shape[0], activation='relu')(d2)
+
+    r1 = layers.Reshape((16, 16, input_shape[0]))(c1)
+    conv1 = layers.Conv2DTranspose(64, kernel_size=3, strides=2, padding='same', activation='relu')(r1)
+    conv2 = layers.Conv2DTranspose(32, kernel_size=3, strides=2, padding='same', activation='relu')(conv1)
+    output = layers.Conv2DTranspose(32, kernel_size=3, strides=2, padding='same', activation='tanh')(conv2)
+
+    model = keras.Model(input, output)
+
+    return model
+
+
+def build_fusion(branch_models):
+    """
+    branch_models: List of Keras models (e.g., [lstm_branch1, lstm_branch2, cnn_branch])
+    image_shape: The spatial dimensions to match
+    """
+    
+    model_outputs = [m.output for m in branch_models]
+    model_inputs = [m.input for m in branch_models]
+
+    fused = layers.Concatenate(axis=-1)(model_outputs)
+
+    x = layers.Conv2D(64, (3, 3), padding='same', activation='relu')(fused)
+    x = layers.BatchNormalization()(x)
+    x = layers.Conv2D(32, (3, 3), padding='same', activation='relu')(x)
+    
+    mask_output = layers.Conv2D(1, (1, 1), padding='same', activation='sigmoid')(x)
+
+    # Define the final Multi-Input model
+    full_model = models.Model(inputs=model_inputs, outputs=mask_output)
+
+    return full_model
+    
