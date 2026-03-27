@@ -131,7 +131,7 @@ def get_convlstm(input_shape, input_name, for_fusion=False):
 
     # Image
     c1 = layers.ConvLSTM2D(
-        filters=64,
+        filters=128,
         kernel_size=(5, 5),
         padding="same",
         return_sequences=True,
@@ -139,7 +139,7 @@ def get_convlstm(input_shape, input_name, for_fusion=False):
     )(image_inputs)
     b1 = layers.BatchNormalization()(c1)
     c2 = layers.ConvLSTM2D(
-        filters=64,
+        filters=128,
         kernel_size=(3, 3),
         padding="same",
         return_sequences=True,
@@ -147,7 +147,7 @@ def get_convlstm(input_shape, input_name, for_fusion=False):
     )(b1)
     b2 = layers.BatchNormalization()(c2)
     c3 = layers.ConvLSTM2D(
-        filters=64,
+        filters=128,
         kernel_size=(1, 1),
         padding="same",
         return_sequences=False,
@@ -168,9 +168,8 @@ def get_convlstm(input_shape, input_name, for_fusion=False):
 def get_lstm(input_shape, input_name):
         # Input shape should be (timesteps, features)
     input = keras.Input(shape=input_shape, name=input_name)
-    truncated = layers.Lambda(lambda x: x[:, -60:, :])(input)
     
-    l1 = layers.LSTM(32, return_sequences=True)(truncated)
+    l1 = layers.LSTM(32, return_sequences=True)(input)
     d1 = layers.Dropout(0.2)(l1)
     
     l2 = layers.LSTM(16, return_sequences=False)(d1)
@@ -191,7 +190,6 @@ def get_lstm(input_shape, input_name):
 def build_fusion(branch_models):
     """
     branch_models: List of Keras models (e.g., [lstm_branch1, lstm_branch2, cnn_branch])
-    image_shape: The spatial dimensions to match
     """
     
     model_outputs = [m.output for m in branch_models]
