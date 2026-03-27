@@ -95,6 +95,20 @@ def normalize_classification(tensor):
 
     return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
 
+def normalize_lat(tensor):
+    """Normalize ndvi values using precomputed mean and stddev."""
+    mean = keras.ops.convert_to_tensor(-5, dtype='float32')
+    std = keras.ops.convert_to_tensor(10, dtype='float32')
+
+    return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
+
+def normalize_lon(tensor):
+    """Normalize ndvi values using precomputed mean and stddev."""
+    mean = keras.ops.convert_to_tensor(-50, dtype='float32')
+    std = keras.ops.convert_to_tensor(10, dtype='float32')
+
+    return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
+
 transform_registry = {
     "gt0": gt0,
     "gt0_bool": gt0_bool,
@@ -108,5 +122,7 @@ transform_registry = {
     "normalize_evi": normalize_evi,
     "normalize_ndvi": normalize_ndvi,
     "normalize_classification": normalize_classification,
+    "normalize_lat": normalize_lat,
+    "normalize_lon": normalize_lon,
     "none": lambda x: x
 }
