@@ -25,7 +25,8 @@ def get_norm_stats(stats_list, target_feature):
                     'mean': num_stats.mean,
                     'stddev': num_stats.std_dev,
                     'min': num_stats.min,
-                    'max': num_stats.max
+                    'max': num_stats.max,
+                    'median': num_stats.median,
                 }
     return None
 
