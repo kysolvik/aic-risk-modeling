@@ -129,72 +129,50 @@ def build_all_models(inputs_config):
 
     return all_models
 
-def run(
-        data_dirs,
-        tfrecord_pattern,
-        val_data_dirs,
-        val_tfrecord_pattern,
-        merge_axis,
-        patch_size,
-        input_bands,
-        output_band,
-        batch_size,
-        model_type,
-        include_coords,
-        epochs,
-        steps_per_epoch,
-        learning_rate,
-        loss_function,
-        weight_decay,
-        model_output_path,
-        transforms,
-        stack_time_series,
-        stack_inputs,
-        years
-):
+def run(config):
+    # Some options that have defaults
+    steps_per_epoch=config.get('steps_per_epoch', 5000),
+    weight_decay=config.get('weight_decay', None),
+
+    # Get loss function
+    loss_function = losses.get_loss(config['loss_function'])
+
     # Get datasets
     training_ds = data_loader.build_merged_dataset(
-        data_dirs=data_dirs,
-        tfrecord_pattern=tfrecord_pattern,
+        data_dirs=config['data_dirs'],
+        tfrecord_pattern=config['tfrecord_pattern'],
         shuffle=True,
-        axis=merge_axis,
-        patch_size=patch_size,
-        batch_size=batch_size,
+        axis=config['merge_axis'],
+        patch_size=config['patch_size'],
+        batch_size=config['batch_size'],
     )
-
     validation_ds = data_loader.build_merged_dataset(
-        data_dirs=val_data_dirs,
-        tfrecord_pattern=val_tfrecord_pattern,
-        axis=merge_axis,
+        data_dirs=config['val_data_dirs'],
+        tfrecord_pattern=config['tfrecord_pattern'],
         shuffle=False,
-        patch_size=patch_size,
-        batch_size=batch_size,
+        axis=config['merge_axis'],
+        patch_size=config['patch_size'],
+        batch_size=config['batch_size'],
     )
 
     # Normalize (uses first dir, hope that's representative-ish!)
     normalize_list = data_norm.get_normalize_list(config)
-    norm_func = data_norm.create_normalizer(data_dirs + '/stats.pbtxt', normalize_list)
+    norm_func = data_norm.create_normalizer(config['data_dirs'][0] + '/stats.pbtxt', normalize_list)
     training_ds = training_ds.map(norm_func)
     validation_ds = validation_ds.map(norm_func)
 
     # Select bands
+    # Select bands
     training_ds = data_loader.select_bands_transform(
         training_ds,
-        input_bands=input_bands,
-        output_bands=[output_band],
-        transforms=transforms,
-        stack_time_series=stack_time_series,
-        stack_inputs=stack_inputs,
-        years=years
+        input_feature_config=config['input_features'],
+        output_feature_config=config['output_features'],
+
     )
     validation_ds = data_loader.select_bands_transform(
         validation_ds,
-        input_bands=input_bands,
-        output_bands=[output_band],
-        transforms=transforms,
-        stack_time_series=stack_time_series,
-        stack_inputs=stack_inputs,
-        years=years
+        input_feature_config=config['input_features'],
+        output_feature_config=config['output_features'],
     )
 
     # Get model
@@ -204,11 +182,11 @@ def run(
     model = build_decoder(config['decoder'], all_models)
 
     # Learning rate scheduler
-    decay_steps = (epochs-1)*steps_per_epoch
+    decay_steps = (config['epochs']-1)*steps_per_epoch
     warmup_steps = 1*steps_per_epoch
     initial_learning_rate = 0.0
     lr_schedule = keras.optimizers.schedules.CosineDecay(
-        initial_learning_rate, decay_steps, warmup_target=learning_rate,
+        initial_learning_rate, decay_steps, warmup_target=config['learning_rate'],
         warmup_steps=warmup_steps
     )
     # Compile and run
@@ -241,20 +219,21 @@ def run(
     model.fit(
         training_ds,
         validation_data=validation_ds,
-        epochs=epochs,
+        epochs=config['epochs'],
         callbacks=[model_checkpoint_callback, early_stopping_callback, csv_logger_callback]
     )
 
     # Load best checkpoint
     model.load_weights(checkpoint_filepath)
-    model.save(model_output_path)
+    model.save(config['model_output_path'])
 
     # Copy logged data to gs
-    output_root, _ = os.path.splitext(model_output_path)
+    output_root, _ = os.path.splitext(config['model_output_path'])
     csv_output_path = output_root + '.csv'
     upload_csv_to_gcs('./training.csv', csv_output_path)
 
     return model
+
 
 if __name__ == "__main__":
     import argparse
@@ -266,32 +245,6 @@ if __name__ == "__main__":
     # Note: should add a schema verifier
     config = load_config(args.config_path)
 
-    # Get loss function
-    loss_function = losses.get_loss(config['loss_function'])
-
-    # Note: config.get() options are the optional ones
-    run(
-        model_type=config['model_type'],
-        data_dirs=config['data_dirs'],
-        tfrecord_pattern=config.get('tfrecord_pattern', 'train*tfrecord.gz'),
-        val_data_dirs=config.get('val_data_dirs', config['data_dirs']),
-        val_tfrecord_pattern=config.get('val_tfrecord_pattern', 'val*tfrecord.gz'),
-        merge_axis=config.get('merge_axis', 'examples'),
-        patch_size=config['patch_size'],
-        input_bands=config['input_bands'],
-        include_coords=config['include_coords'],
-        output_band=config['output_band'],
-        batch_size=config['batch_size'],
-        epochs=config['epochs'],
-        model_output_path=config['model_output_path'],
-        transforms=config['transforms'],
-        learning_rate=config['learning_rate'],
-        steps_per_epoch=config.get('steps_per_epoch', 5000),
-        loss_function=loss_function,
-        weight_decay=config.get('weight_decay', None),
-        stack_time_series=config['stack_time_series'],
-        stack_inputs=config['stack_inputs'],
-        years=config['years']
-    )
+    run(config)
 
     print("Training complete, model saved to:", config['model_output_path'])
