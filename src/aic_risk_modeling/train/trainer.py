@@ -58,14 +58,12 @@ def load_config(
     return config
 
 
-def build_model(model_type, input_bands, include_coords, patch_size, years):
+def build_model(model_type, input_shape, input_name):
     function_name = f"get_{model_type}"
-    # NOTE: ONLY ALLOWS FOR IMAGE TIME SERIES INPUTS
-    image_shape = [len(years), patch_size, patch_size, len(input_bands)]
     try:
         # Attempt to get the function dynamically
         model_fn = getattr(models, function_name)
-        model = model_fn(image_shape, include_metadata=include_coords, metadata_shape=(2,))
+        model = model_fn(input_shape=input_shape, input_name=input_name)
         print(f"Successfully initialized {model_type} model.")
 
     except AttributeError:
@@ -86,6 +84,22 @@ def build_model(model_type, input_bands, include_coords, patch_size, years):
         )
 
     return model
+
+def build_all_models(inputs_config):
+    all_models = []
+    for input_key, input_dict in inputs_config.items():
+        model_type = input_dict['model_type']
+        if len(input_dict['timesteps']) > 0:
+            time_dim = [len(input_dict['timesteps'])]
+        else:
+            time_dim = []
+        feature_dim = [len(input_dict['feature_names'])]
+        input_shape = time_dim + input_dict['shape'] + feature_dim
+        print(input_shape)
+        input_name = input_key
+        all_models.append(build_model(model_type, input_shape, input_name))
+
+    return all_models
 
 def run(
         data_dirs,
