@@ -30,7 +30,8 @@ def get_norm_stats(stats_list, target_feature):
                 }
     return None
 
-def create_normalizer(stats_txt_path, features_to_normalize):
+def create_normalizer(stats_txt_path, features_to_normalize,
+                      use_median=False, ignore_min=False, ignore_max=False):
     """Create a normalization function based on provided statistics."""
     norm_constants = {}
     stats_proto = load_stats_from_text(stats_txt_path)
@@ -39,13 +40,33 @@ def create_normalizer(stats_txt_path, features_to_normalize):
         if s:
             norm_constants[name] = s
 
+    @tf.autograph.experimental.do_not_convert
     def normalize_fn(features):
         for name, stats in norm_constants.items():
             if name in features:
-                mean = keras.ops.convert_to_tensor(stats['mean'], dtype='float32')
+                if use_median:
+                    center = keras.ops.convert_to_tensor(stats['median'], dtype='float32')
+                else:
+                    center = keras.ops.convert_to_tensor(stats['mean'], dtype='float32')
                 std = keras.ops.convert_to_tensor(stats['stddev'], dtype='float32')
+
+                if ignore_min:
+                    out_tensor = keras.ops.where(features[name] == stats['min'],
+                                                 center,
+                                                 features[name])
+                if ignore_max:
+                    out_tensor = keras.ops.where(features[name] == stats['max'],
+                                                 center,
+                                                 features[name])
+
+                if not ignore_min and not ignore_max:
+                    out_tensor = features[name]
+
                 
-                features[name] = (keras.ops.cast(features[name], 'float32') - mean) / (std + 1e-7)
+                if stats['stddev'] == 0:
+                    features[name] = (keras.ops.cast(out_tensor, 'float32') - center)
+                else:
+                    features[name] = (keras.ops.cast(out_tensor, 'float32') - center) / (std + 1e-7)
         
         return features
 
