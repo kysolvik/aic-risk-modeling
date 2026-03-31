@@ -58,6 +58,34 @@ def load_config(
     return config
 
 
+def build_decoder(decoder_type, branch_models):
+    function_name = f"decoder_{decoder_type}"
+    try:
+        # Attempt to get the function dynamically
+        model_fn = getattr(models, function_name)
+        model = model_fn(branch_models)
+        print(f"Successfully initialized {decoder_type} model.")
+
+    except AttributeError:
+        # 1. Get all members of the 'model' module
+        # 2. Filter for things that are functions AND start with 'get_'
+        available_funcs = [
+            name for name, obj in inspect.getmembers(model, inspect.isfunction)
+            if name.startswith("decoder_")
+        ]
+
+        # 3. Clean up the names for the error message (e.g., 'get_unet' -> 'unet')
+        valid_options = [n.replace("decoder_", "") for n in available_funcs]
+
+        raise ValueError(
+            f"Invalid model type '{decoder_type}'. \n"
+            f"Expected one of: {valid_options}\n"
+            f"Note: The script looks for functions named 'get_<type>' in model.py"
+        )
+
+    return model
+
+
 def build_model(model_type, input_shape, input_name):
     function_name = f"get_{model_type}"
     try:
@@ -164,8 +192,10 @@ def run(
     )
 
     # Get model
-    model = build_model(model_type.lower(), input_bands, include_coords,
-                        patch_size, years=years)
+    all_models = build_all_models(config['input_features'])
+
+    # Build decoder (note: can build an identity decoder, if desired)
+    model = build_decoder(config['decoder'], all_models)
 
     # Learning rate scheduler
     decay_steps = (epochs-1)*steps_per_epoch
@@ -208,7 +238,7 @@ def run(
         epochs=epochs,
         callbacks=[model_checkpoint_callback, early_stopping_callback, csv_logger_callback]
     )
-    
+
     # Load best checkpoint
     model.load_weights(checkpoint_filepath)
     model.save(model_output_path)
