@@ -178,7 +178,6 @@ def apply_transforms(
 
 def dataset_from_dir(
     dir: str,
-    patch_size: int,
     tfrecord_pattern: str = "*.tfrecord.gz",
     feature_spec: Optional[Dict[str, tf.io.FixedLenFeature] | None] = None,
     batch_size: int = 8,
@@ -438,7 +437,6 @@ def build_merged_dataset(
         tfrecord_pattern,
         axis='examples', # examples or features
         shuffle=True,
-        patch_size=128,
         cache=False,
         batch_size=4
         ):
@@ -447,7 +445,6 @@ def build_merged_dataset(
         ds = dataset_from_dir(
             data_dir,
             tfrecord_pattern=tfrecord_pattern,
-            patch_size=patch_size,
             cache=cache,
             batch_size=batch_size,
         )

@@ -131,8 +131,8 @@ def build_all_models(inputs_config):
 
 def run(config):
     # Some options that have defaults
-    steps_per_epoch=config.get('steps_per_epoch', 5000),
-    weight_decay=config.get('weight_decay', None),
+    steps_per_epoch=config.get('steps_per_epoch', 5000)
+    weight_decay=config.get('weight_decay', None)
 
     # Get loss function
     loss_function = losses.get_loss(config['loss_function'])
@@ -143,7 +143,6 @@ def run(config):
         tfrecord_pattern=config['tfrecord_pattern'],
         shuffle=True,
         axis=config['merge_axis'],
-        patch_size=config['patch_size'],
         batch_size=config['batch_size'],
     )
     validation_ds = data_loader.build_merged_dataset(
@@ -151,7 +150,6 @@ def run(config):
         tfrecord_pattern=config['tfrecord_pattern'],
         shuffle=False,
         axis=config['merge_axis'],
-        patch_size=config['patch_size'],
         batch_size=config['batch_size'],
     )
 
