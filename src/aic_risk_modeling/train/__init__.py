@@ -13,7 +13,7 @@ from .models import (
     get_lstm,
     get_identity,
     get_mlp_for_fusion,
-    build_fusion
+    decoder_fusion
 )
 
 from .data_loader import (
@@ -68,9 +68,10 @@ __all__ = [
     "weighted_bce_dice",
     "get_loss",
     "get_lstm",
-    "build_fusion",
+    "decoder_fusion",
+    "get_identity",
     "build_model",
     "build_all_models",
-    "get_identity",
+    "build_decoder",
     "run"
 ]
