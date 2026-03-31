@@ -30,6 +30,29 @@ def get_norm_stats(stats_list, target_feature):
                 }
     return None
 
+def get_normalize_list(config):
+    """Retrieve flat list of variable names to normalize."""
+    normalize_list = []
+    for k, f in config['input_features'].items():
+        if f['normalize']:
+            if len(f['timesteps']) > 0:
+                normalize_list.extend([
+                    fn + '_' + str(ts) for fn in f['feature_names'] for ts in f['timesteps']
+                ])
+            else:
+                normalize_list.extend(f['feature_names'])
+
+    # Output features
+    f = config['output_features']
+    if 'normalize' in f.keys() and f['normalize']:
+        if len(f['timesteps']) > 0:
+            normalize_list.extend([
+                fn + '_' + str(ts) for fn in f['feature_names'] for ts in f['timesteps']
+            ])
+        else:
+            normalize_list.extend(f['feature_names'])
+    return normalize_list
+
 def create_normalizer(stats_txt_path, features_to_normalize,
                       use_median=False, ignore_min=False, ignore_max=False):
     """Create a normalization function based on provided statistics."""

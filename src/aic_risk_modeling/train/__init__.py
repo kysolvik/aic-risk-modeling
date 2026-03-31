@@ -30,7 +30,8 @@ from .data_loader import (
 from .data_norm import (
     load_stats_from_text,
     get_norm_stats,
-    create_normalizer
+    create_normalizer,
+    get_normalize_list
 )
 
 from .losses import (
@@ -62,6 +63,7 @@ __all__ = [
     "get_simple_convlstm",
     "load_stats_from_text",
     "get_norm_stats",
+    "get_normalize_list",
     "create_normalizer",
     "build_merged_dataset",
     "weighted_bce",
