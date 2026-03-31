@@ -11,6 +11,8 @@ from .models import (
     get_convlstm,
     get_simple_convlstm,
     get_lstm,
+    get_identity,
+    get_mlp_for_fusion,
     build_fusion
 )
 
@@ -37,6 +39,11 @@ from .losses import (
     get_loss
 )
 
+from .trainer import (
+    build_model,
+    build_all_models,
+    run
+)
 
 __all__ = [
     "load_schema_from_gcs",
@@ -49,6 +56,7 @@ __all__ = [
     "get_unet",
     "get_unet_lite",
     "get_mlp",
+    "get_mlp_for_fusion",
     "get_multi_scale_mlp_head",
     "get_convlstm",
     "get_simple_convlstm",
@@ -60,5 +68,9 @@ __all__ = [
     "weighted_bce_dice",
     "get_loss",
     "get_lstm",
-    "build_fusion"
+    "build_fusion",
+    "build_model",
+    "build_all_models",
+    "get_identity",
+    "run"
 ]
