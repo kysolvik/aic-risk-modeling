@@ -15,7 +15,7 @@ import keras
 from google.cloud import storage
 from urllib.parse import urlparse
 
-from aic_risk_modeling.train import data_loader, models, losses
+from aic_risk_modeling.train import data_loader, models, losses, data_norm
 
 SEED = 54
 RNG = np.random.default_rng(SEED)
@@ -171,6 +171,12 @@ def run(
         batch_size=batch_size,
     )
 
+    # Normalize (uses first dir, hope that's representative-ish!)
+    normalize_list = data_norm.get_normalize_list(config)
+    norm_func = data_norm.create_normalizer(data_dirs + '/stats.pbtxt', normalize_list)
+    training_ds = training_ds.map(norm_func)
+    validation_ds = validation_ds.map(norm_func)
+
     # Select bands
     training_ds = data_loader.select_bands_transform(
         training_ds,
@@ -257,6 +263,7 @@ if __name__ == "__main__":
     parser.add_argument('--config_path', type=str, required=True)
     args = parser.parse_args()
 
+    # Note: should add a schema verifier
     config = load_config(args.config_path)
 
     # Get loss function
