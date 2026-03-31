@@ -214,7 +214,7 @@ def get_identity(input_shape, input_name):
 
     return model
 
-def build_fusion(branch_models):
+def fusion_decoder(branch_models):
     """
     branch_models: List of Keras models (e.g., [lstm_branch1, lstm_branch2, cnn_branch])
     """
