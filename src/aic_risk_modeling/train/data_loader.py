@@ -284,7 +284,7 @@ def _single_feature_group_prep(
         example,
         feature_config
 ):
-    # First apply transforms
+    # Apply transforms
     example = apply_transforms(example,
                                feature_config['transforms'],
                                feature_config['timesteps']
@@ -343,7 +343,7 @@ def _to_tuple_transform(
 def select_bands_transform(
     dataset: tf.data.Dataset,
     input_feature_config: dict,
-    output_feature_config: dict,
+    output_feature_config: dict
 ) -> tf.data.Dataset:
     """Select input and output bands from a dataset of feature dicts, with optional transforms.
 
@@ -438,15 +438,18 @@ def build_merged_dataset(
         tfrecord_pattern,
         axis='examples', # examples or features
         shuffle=True,
+        patch_size=128,
+        cache=False,
         batch_size=4
         ):
     datasets = []
     for data_dir in data_dirs:
         ds = dataset_from_dir(
             data_dir,
-            tfrecord_pattern,
+            tfrecord_pattern=tfrecord_pattern,
+            patch_size=patch_size,
+            cache=cache,
             batch_size=batch_size,
-            cache=False
         )
         datasets.append(ds)
 
