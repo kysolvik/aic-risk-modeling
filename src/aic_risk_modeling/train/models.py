@@ -48,21 +48,19 @@ def decoder_block(inputs, skip, num_filters):
 def get_unet_lite(input_shape, input_name):
     inputs = keras.Input(shape=input_shape,  name=input_name)
 
-    # --- Encoder (shallow + fewer filters) ---
-    s1, p1 = encoder_block(inputs, 32)
-    s2, p2 = encoder_block(p1, 64)
-    s3, p3 = encoder_block(p2, 128)
+    # --- Encoder ---
+    s1, p1 = encoder_block(inputs, 16)
+    s2, p2 = encoder_block(p1, 32)
 
     # --- Bottleneck ---
-    b = conv_block(p3, 256)
+    b = conv_block(p2, 64)
 
     # --- Decoder ---
-    d1 = decoder_block(b, s3, 128)
-    d2 = decoder_block(d1, s2, 64)
-    d3 = decoder_block(d2, s1, 32)
+    d1 = decoder_block(b, s2, 32)
+    d2 = decoder_block(d1, s1, 16)
 
     # --- Output ---
-    outputs = layers.Conv2D(1, 1, padding="same", activation="relu")(d3)
+    outputs = layers.Conv2D(1, 1, padding="same", activation="relu")(d2)
 
     return keras.Model(inputs, outputs, name="U-Net-Lite")
 
