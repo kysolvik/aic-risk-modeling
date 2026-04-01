@@ -33,7 +33,7 @@ job = aiplatform.CustomPythonPackageTrainingJob(
     container_uri="us-docker.pkg.dev/vertex-ai/training/tf-gpu.2-16.py310:latest",
 )
 job.run(
-    machine_type="n1-highmem-8",
+    machine_type="n1-highmem-4",
     scheduling_strategy=aiplatform.compat.types.custom_job.Scheduling.Strategy.SPOT,
     accelerator_type="NVIDIA_TESLA_T4",
     accelerator_count=1,
