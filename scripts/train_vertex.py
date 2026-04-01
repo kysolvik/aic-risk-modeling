@@ -14,7 +14,7 @@ parser.add_argument('display_name',
 args = parser.parse_args()
 
 # Basic parameters
-project = google.auth.default()[1]           
+project = google.auth.default()[1]
 location='us-east1'
 bucket='res-id'
 config_json=args.config_json
