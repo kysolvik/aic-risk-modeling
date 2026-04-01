@@ -87,16 +87,17 @@ def get_mlp_for_fusion(input_shape, input_name):
     inputs = keras.Input(shape=input_shape, name=input_name)
 
     # Entry block
-    x = layers.Dense(1024, activation='relu')(inputs)
+    x = layers.Dense(64, activation='relu')(inputs)
     x = layers.Dropout(0.3)(x)
-    x = layers.Dense(512, activation='relu')(x)
+    x = layers.Dense(32, activation='relu')(x)
     x = layers.Dropout(0.3)(x)
-    x = layers.Dense(128, activation='relu')(x)
+    x = layers.Dense(16, activation='relu')(x)
 
     # Add a per-pixel classification layer
-    x = layers.Dense(128*128*input_shape[0], activation='relu')(x)
 
-    outputs = layers.Reshape((128, 128, input_shape[0]))(x)
+    # Reshape and broadcast  to (128, 128, 16)
+    x = layers.Reshape((1, 1, 16))(x)
+    outputs = keras.ops.tile(x, [1, 128, 128, 1]) 
 
     # Define the model
     model = keras.Model(inputs, outputs)
@@ -153,7 +154,6 @@ def get_convlstm(input_shape, input_name, for_fusion=True):
         kernel_size=(5, 5),
         padding="same",
         return_sequences=True,
-        activation="relu",
     )(image_inputs)
     b1 = layers.BatchNormalization()(c1)
     c2 = layers.ConvLSTM2D(
@@ -161,15 +161,13 @@ def get_convlstm(input_shape, input_name, for_fusion=True):
         kernel_size=(3, 3),
         padding="same",
         return_sequences=True,
-        activation="relu",
     )(b1)
     b2 = layers.BatchNormalization()(c2)
     c3 = layers.ConvLSTM2D(
         filters=128,
         kernel_size=(1, 1),
         padding="same",
-        return_sequences=False,
-        activation="relu",
+        return_sequences=False
     )(b2)
     b3 = layers.BatchNormalization()(c3)
 
@@ -183,6 +181,42 @@ def get_convlstm(input_shape, input_name, for_fusion=True):
 
     return model
 
+
+def get_convlstm_bottleneck(input_shape, input_name, for_fusion=True):
+    image_inputs = keras.Input(shape=input_shape, name=input_name)
+
+    # --- ENCODER: Shrink spatially
+    # Downsample 128x128 -> 64x64
+    x = layers.TimeDistributed(layers.Conv2D(32, (3, 3), strides=2, padding="same", activation="relu"))(image_inputs)
+    # Downsample 64x64 -> 32x32
+    x = layers.TimeDistributed(layers.Conv2D(64, (3, 3), strides=2, padding="same", activation="relu"))(x)
+
+    # --- TEMPORAL CORE: ConvLSTM at lower res
+    x = layers.ConvLSTM2D(
+        filters=64,
+        kernel_size=(3, 3),
+        padding="same",
+        return_sequences=False, # We collapse time here
+        activation="tanh"       # Enables CuDNN optimization
+    )(x)
+    x = layers.BatchNormalization()(x)
+
+    # --- DECODER: Recover 128x128 resolution ---
+    # 32x32 -> 64x64
+    x = layers.Conv2DTranspose(64, (3, 3), strides=2, padding="same", activation="relu")(x)
+    # 64x64 -> 128x128
+    x = layers.Conv2DTranspose(64, (3, 3), strides=2, padding="same", activation="relu")(x)
+
+    if not for_fusion:
+        outputs = layers.Conv2D(filters=1, kernel_size=(3, 3),
+                                activation="sigmoid", padding="same")(x)
+        model = keras.Model(image_inputs, outputs)
+    else:
+        # Returns (Batch, 128, 128, 32) ready for fusion
+        model = keras.Model(image_inputs, x)
+
+    return model
+
 def get_lstm(input_shape, input_name):
         # Input shape should be (timesteps, features)
     input = keras.Input(shape=input_shape, name=input_name)
@@ -190,19 +224,69 @@ def get_lstm(input_shape, input_name):
     l1 = layers.LSTM(32, return_sequences=True)(input)
     d1 = layers.Dropout(0.2)(l1)
     
-    l2 = layers.LSTM(16, return_sequences=False)(d1)
+    l2 = layers.LSTM(32, return_sequences=False)(d1)
     d2 = layers.Dropout(0.2)(l2)
     
-    c1 = layers.Dense(16*16*input_shape[0], activation='relu')(d2)
-
-    r1 = layers.Reshape((16, 16, input_shape[0]))(c1)
-    conv1 = layers.Conv2DTranspose(64, kernel_size=3, strides=2, padding='same', activation='relu')(r1)
-    conv2 = layers.Conv2DTranspose(32, kernel_size=3, strides=2, padding='same', activation='relu')(conv1)
-    output = layers.Conv2DTranspose(32, kernel_size=3, strides=2, padding='same', activation='tanh')(conv2)
+    # Reshape and broadcast  to (128, 128, 16)
+    x = layers.Reshape((1, 1, 32))(d2)
+    output = keras.ops.tile(x, [1, 128, 128, 1]) 
 
     model = keras.Model(input, output)
 
     return model
+
+def transformer_encoder(inputs, head_size, num_heads, ff_dim, dropout=0):
+    # 1. Multi-Head Attention
+    x = layers.LayerNormalization(epsilon=1e-6)(inputs)
+    x = layers.MultiHeadAttention(
+        key_dim=head_size, num_heads=num_heads, dropout=dropout
+    )(x, x)
+    x = layers.Dropout(dropout)(x)
+    res = x + inputs
+
+    # 2. Feed Forward Part
+    x = layers.LayerNormalization(epsilon=1e-6)(res)
+    x = layers.Conv1D(filters=ff_dim, kernel_size=1, activation="relu")(x)
+    x = layers.Dropout(dropout)(x)
+    x = layers.Conv1D(filters=inputs.shape[-1], kernel_size=1)(x)
+    return x + res
+
+def get_transformer(input_shape, input_name):
+    inputs = keras.Input(shape=input_shape, name=input_name)
+
+    # Step 1: Project the 5 features up to 32 (to match your current capacity)
+    x = layers.Dense(32)(inputs)
+    
+    # Step 2: Add Positional Encoding
+    # Since Transformers don't know the "order" of time, we inject it.
+    positions = keras.ops.arange(start=0, stop=input_shape[0], step=1)
+    pos_encoding = layers.Embedding(input_dim=input_shape[0], output_dim=32)(positions)
+    x = x + pos_encoding
+
+    # Step 3: Transformer Block(s)
+    # head_size: dimension of queries/keys/values
+    # num_heads: number of attention "eyes"
+    # ff_dim: internal hidden layer size of the feed-forward network
+    x = transformer_encoder(x, head_size=16, num_heads=4, ff_dim=64, dropout=0.1)
+    
+    # Step 4: Reduction
+    # Instead of an LSTM with return_sequences=False, we use Global Average Pooling
+    # to turn the (60, 32) sequence into a single (32,) vector for fusion.
+    x = layers.GlobalAveragePooling1D()(x)
+    x = layers.Dropout(0.1)(x)
+
+    # Step 5: Spatial Expansion to 128x128
+    # First, turn (32,) into (1, 1, 32)
+    x = layers.Reshape((1, 1, 32))(x)
+    
+    # Second, project to the number of channels you want for fusion
+    x = layers.Conv2D(16, (1, 1), activation="relu")(x)
+    
+    # Third, UpSample to match image resolution (1, 1) -> (128, 128)
+    # This effectively "tiles" the data across the spatial grid
+    outputs = layers.UpSampling2D(size=(128, 128), interpolation="nearest")(x)
+    
+    return keras.Model(inputs, outputs)
 
 def get_identity(input_shape, input_name):
     # Input shape should be (timesteps, features)

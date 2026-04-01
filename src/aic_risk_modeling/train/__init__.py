@@ -9,10 +9,12 @@ from .models import (
     get_mlp,
     get_multi_scale_mlp_head,
     get_convlstm,
+    get_convlstm_bottleneck,
     get_simple_convlstm,
     get_lstm,
     get_identity,
     get_mlp_for_fusion,
+    get_transformer,
     decoder_fusion
 )
 
@@ -43,7 +45,8 @@ from .losses import (
 from .trainer import (
     build_model,
     build_all_models,
-    run
+    run,
+    build_decoder
 )
 
 __all__ = [
@@ -70,6 +73,8 @@ __all__ = [
     "weighted_bce_dice",
     "get_loss",
     "get_lstm",
+    "get_convlstm_bottleneck",
+    "get_transformer",
     "decoder_fusion",
     "get_identity",
     "build_model",
