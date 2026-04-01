@@ -44,7 +44,10 @@ def _normalize_single_features_dict(f, normalize_list):
     return normalize_list
 
 def get_normalize_list(config):
-    """Retrieve flat list of variable names to normalize."""
+    """Retrieve flat list of variable names to normalize.
+
+    IMPORTANT: if transform is defined for var, skips normalizing
+    """
     normalize_list = []
 
     # Input features
