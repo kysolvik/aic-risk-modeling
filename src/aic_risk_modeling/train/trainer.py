@@ -58,6 +58,9 @@ def load_config(
     return config
 
 
+def _gcs_join(base: str, name: str) -> str:
+    return base.rstrip("/") + "/" + name
+
 def build_decoder(decoder_type, branch_models):
     function_name = f"decoder_{decoder_type}"
     try:
@@ -155,7 +158,7 @@ def run(config):
 
     # Normalize (uses first dir, hope that's representative-ish!)
     normalize_list = data_norm.get_normalize_list(config)
-    norm_func = data_norm.create_normalizer(config['data_dirs'][0] + '/stats.pbtxt', normalize_list)
+    norm_func = data_norm.create_normalizer(_gcs_join(config['data_dirs'][0], 'stats.pbtxt'), normalize_list)
     training_ds = training_ds.map(norm_func)
     validation_ds = validation_ds.map(norm_func)
 
