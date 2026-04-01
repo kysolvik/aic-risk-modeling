@@ -182,6 +182,8 @@ def run(config):
     # Build decoder (note: can build an identity decoder, if desired)
     model = build_decoder(config['decoder'], all_models)
 
+    print(model.summary())
+
     # Learning rate scheduler
     decay_steps = (config['epochs']-1)*steps_per_epoch
     warmup_steps = 1*steps_per_epoch
@@ -231,7 +233,8 @@ def run(config):
     # Copy logged data to gs
     output_root, _ = os.path.splitext(config['model_output_path'])
     csv_output_path = output_root + '.csv'
-    upload_csv_to_gcs('./training.csv', csv_output_path)
+    if csv_output_path.startswith("gs://"):
+        upload_csv_to_gcs('./training.csv', csv_output_path)
 
     return model
 
