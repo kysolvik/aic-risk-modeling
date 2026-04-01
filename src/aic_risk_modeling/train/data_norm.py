@@ -30,27 +30,31 @@ def get_norm_stats(stats_list, target_feature):
                 }
     return None
 
+
+def _normalize_single_features_dict(f, normalize_list):
+    if 'normalize' in f.keys() and f['normalize']:
+        for fn in f['feature_names']:
+            if fn not in f['transforms'].keys():
+                if len(f['timesteps']) > 0:
+                    normalize_list.extend([
+                        fn + '_' + str(ts) for ts in f['timesteps']
+                    ])
+                else:
+                    normalize_list.append(fn)
+    return normalize_list
+
 def get_normalize_list(config):
     """Retrieve flat list of variable names to normalize."""
     normalize_list = []
+
+    # Input features
     for k, f in config['input_features'].items():
-        if f['normalize']:
-            if len(f['timesteps']) > 0:
-                normalize_list.extend([
-                    fn + '_' + str(ts) for fn in f['feature_names'] for ts in f['timesteps']
-                ])
-            else:
-                normalize_list.extend(f['feature_names'])
+        normalize_list = _normalize_single_features_dict(f, normalize_list)
 
     # Output features
     f = config['output_features']
-    if 'normalize' in f.keys() and f['normalize']:
-        if len(f['timesteps']) > 0:
-            normalize_list.extend([
-                fn + '_' + str(ts) for fn in f['feature_names'] for ts in f['timesteps']
-            ])
-        else:
-            normalize_list.extend(f['feature_names'])
+    normalize_list = _normalize_single_features_dict(f, normalize_list)
+
     return normalize_list
 
 def create_normalizer(stats_txt_path, features_to_normalize,
