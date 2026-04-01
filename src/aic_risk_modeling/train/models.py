@@ -220,7 +220,9 @@ def decoder_fusion(branch_models):
     """
     
     model_outputs = [m.output for m in branch_models]
-    model_inputs = [m.input for m in branch_models]
+    model_inputs = {m.input.name: m.input for m in branch_models}
+    print('Model inputs:', model_inputs)
+    print('Model outputs:', model_outputs)
 
     fused = layers.Concatenate(axis=-1)(model_outputs)
 
