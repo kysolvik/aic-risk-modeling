@@ -159,8 +159,8 @@ def run(config):
     # Normalize (uses first dir, hope that's representative-ish!)
     normalize_list = data_norm.get_normalize_list(config)
     norm_func = data_norm.create_normalizer(_gcs_join(config['data_dirs'][0], 'stats.pbtxt'), normalize_list)
-    training_ds = training_ds.map(norm_func)
-    validation_ds = validation_ds.map(norm_func)
+    training_ds = training_ds.map(norm_func, num_parallel_calls=tf.data.AUTOTUNE)
+    validation_ds = validation_ds.map(norm_func, num_parallel_calls=tf.data.AUTOTUNE)
 
     # Select bands
     # Select bands
