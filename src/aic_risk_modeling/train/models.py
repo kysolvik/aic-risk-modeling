@@ -21,7 +21,7 @@ def get_unet(input_shape):
     d4 = decoder_block(d3, s1, 64)
 
     # --- Output layer ---
-    outputs = layers.Conv2D(1, 1, padding="same", activation="sigmoid")(d4)
+    outputs = layers.Conv2D(1, 1, padding="same", activation="relu")(d4)
 
     return keras.Model(inputs, outputs, name="U-Net")
 
@@ -62,7 +62,7 @@ def get_unet_lite(input_shape, input_name):
     d3 = decoder_block(d2, s1, 32)
 
     # --- Output ---
-    outputs = layers.Conv2D(1, 1, activation="sigmoid")(d3)
+    outputs = layers.Conv2D(1, 1, padding="same", activation="relu")(d3)
 
     return keras.Model(inputs, outputs, name="U-Net-Lite")
 
@@ -97,7 +97,7 @@ def get_mlp_for_fusion(input_shape, input_name):
 
     # Reshape and broadcast  to (128, 128, 16)
     x = layers.Reshape((1, 1, 16))(x)
-    outputs = keras.ops.tile(x, [1, 128, 128, 1]) 
+    outputs = keras.ops.tile(x, [1, 128, 128, 1])
 
     # Define the model
     model = keras.Model(inputs, outputs)
@@ -220,16 +220,16 @@ def get_convlstm_bottleneck(input_shape, input_name, for_fusion=True):
 def get_lstm(input_shape, input_name):
         # Input shape should be (timesteps, features)
     input = keras.Input(shape=input_shape, name=input_name)
-    
+
     l1 = layers.LSTM(32, return_sequences=True)(input)
     d1 = layers.Dropout(0.2)(l1)
-    
+
     l2 = layers.LSTM(32, return_sequences=False)(d1)
     d2 = layers.Dropout(0.2)(l2)
-    
+
     # Reshape and broadcast  to (128, 128, 16)
     x = layers.Reshape((1, 1, 32))(d2)
-    output = keras.ops.tile(x, [1, 128, 128, 1]) 
+    output = keras.ops.tile(x, [1, 128, 128, 1])
 
     model = keras.Model(input, output)
 
@@ -256,7 +256,7 @@ def get_transformer(input_shape, input_name):
 
     # Step 1: Project the 5 features up to 32 (to match your current capacity)
     x = layers.Dense(32)(inputs)
-    
+
     # Step 2: Add Positional Encoding
     # Since Transformers don't know the "order" of time, we inject it.
     positions = keras.ops.arange(start=0, stop=input_shape[0], step=1)
@@ -268,7 +268,7 @@ def get_transformer(input_shape, input_name):
     # num_heads: number of attention "eyes"
     # ff_dim: internal hidden layer size of the feed-forward network
     x = transformer_encoder(x, head_size=16, num_heads=4, ff_dim=64, dropout=0.1)
-    
+
     # Step 4: Reduction
     # Instead of an LSTM with return_sequences=False, we use Global Average Pooling
     # to turn the (60, 32) sequence into a single (32,) vector for fusion.
@@ -278,20 +278,20 @@ def get_transformer(input_shape, input_name):
     # Step 5: Spatial Expansion to 128x128
     # First, turn (32,) into (1, 1, 32)
     x = layers.Reshape((1, 1, 32))(x)
-    
+
     # Second, project to the number of channels you want for fusion
     x = layers.Conv2D(16, (1, 1), activation="relu")(x)
-    
+
     # Third, UpSample to match image resolution (1, 1) -> (128, 128)
     # This effectively "tiles" the data across the spatial grid
     outputs = layers.UpSampling2D(size=(128, 128), interpolation="nearest")(x)
-    
+
     return keras.Model(inputs, outputs)
 
 def get_identity(input_shape, input_name):
     # Input shape should be (timesteps, features)
     input = keras.Input(shape=input_shape, name=input_name)
-    
+
     output = layers.Identity()(input)
 
     model = keras.Model(input, output)
@@ -302,7 +302,7 @@ def decoder_fusion(branch_models):
     """
     branch_models: List of Keras models (e.g., [lstm_branch1, lstm_branch2, cnn_branch])
     """
-    
+
     model_outputs = [m.output for m in branch_models]
     model_inputs = {m.input.name: m.input for m in branch_models}
     print('Model inputs:', model_inputs)
@@ -310,14 +310,15 @@ def decoder_fusion(branch_models):
 
     fused = layers.Concatenate(axis=-1)(model_outputs)
 
-    x = layers.Conv2D(64, (3, 3), padding='same', activation='relu')(fused)
+    x = layers.Conv2D(128, (3, 3), padding='same', activation='relu')(fused)
+    x = layers.BatchNormalization()(x)
+    x = layers.Conv2D(64, (3, 3), padding='same', activation='relu')(x)
     x = layers.BatchNormalization()(x)
     x = layers.Conv2D(32, (3, 3), padding='same', activation='relu')(x)
-    
+
     mask_output = layers.Conv2D(1, (1, 1), padding='same', activation='sigmoid')(x)
 
     # Define the final Multi-Input model
     full_model = models.Model(inputs=model_inputs, outputs=mask_output)
 
     return full_model
-    
