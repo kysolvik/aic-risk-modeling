@@ -314,7 +314,8 @@ def decoder_fusion(branch_models):
     x = layers.BatchNormalization()(x)
     x = layers.Conv2D(32, (3, 3), padding='same', activation='relu')(x)
 
-    mask_output = layers.Conv2D(1, (1, 1), padding='same', activation='sigmoid')(x)
+    mask_output = layers.Conv2D(1, (1, 1), padding='same',
+                                activation='sigmoid', dtype='float32')(x)
 
     # Define the final Multi-Input model
     full_model = models.Model(inputs=model_inputs, outputs=mask_output)

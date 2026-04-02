@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 
 from aic_risk_modeling.train import data_loader, models, losses, data_norm
 
+keras.mixed_precision.set_global_policy("mixed_float16")
+
 SEED = 54
 RNG = np.random.default_rng(SEED)
 
