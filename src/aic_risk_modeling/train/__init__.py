@@ -9,7 +9,13 @@ from .models import (
     get_mlp,
     get_multi_scale_mlp_head,
     get_convlstm,
+    get_convlstm_bottleneck,
     get_simple_convlstm,
+    get_lstm,
+    get_identity,
+    get_mlp_for_fusion,
+    get_transformer,
+    decoder_fusion
 )
 
 from .data_loader import (
@@ -26,7 +32,8 @@ from .data_loader import (
 from .data_norm import (
     load_stats_from_text,
     get_norm_stats,
-    create_normalizer
+    create_normalizer,
+    get_normalize_list
 )
 
 from .losses import (
@@ -35,6 +42,12 @@ from .losses import (
     get_loss
 )
 
+from .trainer import (
+    build_model,
+    build_all_models,
+    run,
+    build_decoder
+)
 
 __all__ = [
     "load_schema_from_gcs",
@@ -47,14 +60,25 @@ __all__ = [
     "get_unet",
     "get_unet_lite",
     "get_mlp",
+    "get_mlp_for_fusion",
     "get_multi_scale_mlp_head",
     "get_convlstm",
     "get_simple_convlstm",
     "load_stats_from_text",
     "get_norm_stats",
+    "get_normalize_list",
     "create_normalizer",
     "build_merged_dataset",
     "weighted_bce",
     "weighted_bce_dice",
-    "get_loss"
+    "get_loss",
+    "get_lstm",
+    "get_convlstm_bottleneck",
+    "get_transformer",
+    "decoder_fusion",
+    "get_identity",
+    "build_model",
+    "build_all_models",
+    "build_decoder",
+    "run"
 ]

@@ -1,23 +1,88 @@
 {
-    "model_type": "simple_convlstm",
+    "decoder": "fusion",
     "epochs": 25,
-    "learning_rate": 0.005,
-    "data_dirs": ["gs://aic-fire-amazon/data/allpreds/"],
-    "tfrecord_pattern": "training-*.tfrecord.gz",
-    "val_tfrecord_pattern": "validation-*.tfrecord.gz",
-    "input_bands":[
-        "BurnDate", "classification"
-    ],
-    "output_band": "BurnDate_2024",
-    "patch_size": 128,
-    "batch_size": 4,
-    "model_output_path": "gs://aic-fire-amazon/models/vertex_model_burndate_mb_smallconvlstm_10year.keras",
-    "transforms": {
-        "BurnDate_2024": "gt0_bool",
-        "BurnDate": "gt0"
+    "learning_rate": 0.0001,
+    "weight_decay":0.02,
+    "loss_function": "weighted_binary_crossentropy",
+    "data_dirs": ["gs://res-id/fire-amazon/data/fusion_data/allpreds_2019/",
+                  "gs://res-id/fire-amazon/data/fusion_data/allpreds_2020/", "gs://res-id/fire-amazon/data/fusion_data/allpreds_2021/",
+                  "gs://res-id/fire-amazon/data/fusion_data/allpreds_2022/", "gs://res-id/fire-amazon/data/fusion_data/allpreds_2023/"],
+    "tfrecord_pattern": "*.tfrecord.gz",
+    "val_data_dirs": ["gs://res-id/fire-amazon/data/fusion_data/allpreds_2024/"],
+    "val_tfrecord_pattern": "*.tfrecord.gz",
+    "merge_axis": "examples",
+    "input_features": {
+        "im_annual": {
+            "feature_names": ["im_classification", "im_BurnDate", "im_EVI", "im_NDVI",
+                              "im_pdsi", "im_tmmn","im_tmmx","im_vpd", "im_def"],
+            "transforms": {},
+            "timesteps": [-5, -4, -3, -2, -1],
+            "shape": [128, 128],
+            "normalize": true,
+            "stack_timesteps": true,
+            "stack_features": false,
+            "model_type": "convlstm_bottleneck"
+        },
+        "im_single":{
+            "feature_names": ["im_A00_-2", "im_A01_-2", "im_A02_-2", "im_A03_-2", "im_A04_-2",
+                              "im_A05_-2", "im_A06_-2", "im_A07_-2", "im_A08_-2", "im_A09_-2",
+                              "im_A10_-2", "im_A11_-2", "im_A12_-2", "im_A13_-2", "im_A14_-2",
+                              "im_A15_-2", "im_A16_-2", "im_A17_-2", "im_A18_-2", "im_A19_-2",
+                              "im_A20_-2", "im_A21_-2", "im_A22_-2", "im_A23_-2", "im_A24_-2",
+                              "im_A25_-2", "im_A26_-2", "im_A27_-2", "im_A28_-2", "im_A29_-2",
+                              "im_A30_-2", "im_A31_-2", "im_A32_-2", "im_A33_-2", "im_A34_-2",
+                              "im_A35_-2", "im_A36_-2", "im_A37_-2", "im_A38_-2", "im_A39_-2",
+                              "im_A40_-2", "im_A41_-2", "im_A42_-2", "im_A43_-2", "im_A44_-2",
+                              "im_A45_-2", "im_A46_-2", "im_A47_-2", "im_A48_-2", "im_A49_-2",
+                              "im_A50_-2", "im_A51_-2", "im_A52_-2", "im_A53_-2", "im_A54_-2",
+                              "im_A55_-2", "im_A56_-2", "im_A57_-2", "im_A58_-2", "im_A59_-2",
+                              "im_A60_-2", "im_A61_-2", "im_A62_-2", "im_A63_-2"],
+            "transforms": {},
+            "shape": [128, 128],
+            "timesteps": [],
+            "normalize": true,
+            "stack_timesteps": false,
+            "model_type": "identity"
+        },
+        "im_single_cnn":{
+            "feature_names": ["im_accessibility", "im_treecover2000", "im_loss",
+                              "im_lossyear", "im_constant"],
+            "shape": [128, 128],
+            "timesteps": [],
+            "normalize": true,
+            "stack_timesteps": false,
+            "model_type": "unet_lite",
+            "transforms":{"im_constant": "gt0"}
+        },
+        "md_single": {
+            "feature_names": ["md_x", "md_y", "md_year"],
+            "normalize": true,
+            "transforms": {},
+            "shape": [1],
+            "timesteps":[],
+            "stack_timesteps": false,
+            "model_type": "mlp_for_fusion"
+        },
+        "md_monthly": {
+            "feature_names": [ "md_mei", "md_oni", "md_soi", "md_tna", "md_amo"],
+            "normalize": true,
+            "transforms": {},
+            "shape": [60],
+            "timesteps":[],
+            "stack_timesteps": false,
+            "model_type": "transformer"
+        }
     },
-    "years": [2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023],
-    "stack_time_series": true,
-    "stack_inputs": false
-
+    "output_features": {
+        "feature_names": ["im_BurnDate_0"],
+        "transforms": {
+            "im_BurnDate_0": "gt0_bool"
+        },
+        "shape": [128, 128],
+        "timesteps": [],
+        "stack_timesteps": false,
+        "normalize": false
+    },
+    "batch_size": 4,
+    "model_output_path": "gs://res-id/fire-amazon/models/fusion_test_v5.keras"
 }

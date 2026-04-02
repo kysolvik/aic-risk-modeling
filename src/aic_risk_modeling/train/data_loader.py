@@ -72,7 +72,7 @@ def load_schema_from_gcs(gcs_dir: str) -> schema_pb2.Schema:
 def schema_to_feature_spec(
     schema: schema_pb2.Schema,
     non_img_features: Optional[List[str]] = None,
-    patch_size: int = 128,
+    patch_size: int = 128
 ) -> Dict[str, tf.io.FixedLenFeature]:
     """Convert a schema proto to a TensorFlow feature_spec dictionary.
 
@@ -90,9 +90,6 @@ def schema_to_feature_spec(
     Returns:
         Dict suitable for tf.io.parse_single_example
     """
-    if non_img_features is None:
-        non_img_features = []
-
     feature_spec = {}
     for feature in schema.feature:
         if feature.name.startswith('im_'):
@@ -117,11 +114,10 @@ def schema_to_feature_spec(
 
 def build_features_dict(
     schema: schema_pb2.Schema,
-    patch_size: int = 128,
-    non_img_features: Optional[List[str]] = None,
+    patch_size: int
 ) -> Dict[str, tf.io.FixedLenFeature]:
     """Convenience wrapper—returns feature_spec (same shape as schema_to_feature_spec)"""
-    return schema_to_feature_spec(schema, non_img_features=non_img_features, patch_size=patch_size)
+    return schema_to_feature_spec(schema, patch_size)
 
 def _apply_single_transform(result, feature_name, transform_fn):
     if callable(transform_fn):
@@ -143,7 +139,7 @@ def _apply_single_transform(result, feature_name, transform_fn):
 def apply_transforms(
     example: Dict,
     transform_dict: Optional[Dict[str, Callable]] = None,
-    years: Optional[List[int]] = None,
+    timesteps: Optional[List[int]] = None,
 ) -> Dict:
     """Apply custom transforms to specific fields in an example.
 
@@ -155,7 +151,7 @@ def apply_transforms(
     Returns:
         Dictionary with transforms applied to specified features
     """
-    if transform_dict is None:
+    if transform_dict is None or len(transform_dict)==0:
         return example
 
     result = example.copy()
@@ -167,13 +163,13 @@ def apply_transforms(
         if feature_name not in done_list and feature_name in result:
             result[feature_name] = _apply_single_transform(result, feature_name, transform_fn)
             done_list.append(feature_name)
-        if years is not None:
+        if timesteps is not None and len(timesteps) > 0:
             # Then check for transforms with years appended
             # If "BurnDate" transform is specified, it will be applied for all
             # years (e.g. BurnDate_2023, BurnDate_2022...), but NOT those which
             # had their own transform specified (e.g. BurnDate_2024, in the example above)
-            for year in years:
-                feature_name_wyear = f"{feature_name}_{year}"
+            for ts in timesteps:
+                feature_name_wyear = f"{feature_name}_{ts}"
                 if feature_name_wyear not in done_list and feature_name_wyear in result:
                     result[feature_name_wyear] = _apply_single_transform(
                         result, feature_name_wyear, transform_fn)
@@ -185,7 +181,6 @@ def dataset_from_dir(
     tfrecord_pattern: str = "*.tfrecord.gz",
     feature_spec: Optional[Dict[str, tf.io.FixedLenFeature] | None] = None,
     batch_size: int = 8,
-    patch_size: int = 128,
     shuffle: bool = False,
     cache: Optional[str | bool] = False,
     compression: Optional[str] = "GZIP",
@@ -222,7 +217,12 @@ def dataset_from_dir(
         raise FileNotFoundError(f"No TFRecord files found for pattern {full_path_pattern}")
 
     ds = tf.data.Dataset.list_files(full_path_pattern)
-    ds = ds.interleave(lambda x: tf.data.TFRecordDataset(x, compression_type=compression),
+
+    @tf.autograph.experimental.do_not_convert
+    def interleave_fn(x):
+        return tf.data.TFRecordDataset(x, compression_type=compression)
+
+    ds = ds.interleave(interleave_fn,
                        cycle_length=tf.data.AUTOTUNE,
                        num_parallel_calls=tf.data.AUTOTUNE)
 
@@ -231,8 +231,10 @@ def dataset_from_dir(
         schema = load_schema_from_gcs(dir)
         feature_spec = schema_to_feature_spec(schema)
 
+    @tf.autograph.experimental.do_not_convert
     def parse_fn(x):
         return tf.io.parse_single_example(x, feature_spec)
+
     ds = ds.map(parse_fn, num_parallel_calls=tf.data.AUTOTUNE)
 
     if isinstance(cache, str):
@@ -251,10 +253,10 @@ def _stack_time_series(features, input_keys, years):
     for year in years:
         year_keys = [k for k in input_keys if k.endswith(f"_{year}")]
         year_tensor = _stack_vars(features, year_keys)
-        grouped_tensors.append(year_tensor["image"])
+        grouped_tensors.append(year_tensor)
 
     timeseries_tensor = keras.ops.stack(grouped_tensors, axis=1)
-    return {"image": timeseries_tensor}
+    return timeseries_tensor
 
 
 def _stack_vars(features, input_keys, exclude_keys: Optional[List[str]] = None):
@@ -265,80 +267,82 @@ def _stack_vars(features, input_keys, exclude_keys: Optional[List[str]] = None):
 
     stacked_tensor = keras.ops.stack([features[k] for k in filter_keys], axis=-1)
 
-    if exclude_keys:
-        all_features = {k: features[k] for k in features if k in exclude_keys}
-        all_features["image"] = stacked_tensor
-        return all_features
-    else:
-        return {"image": stacked_tensor}
-
+    return stacked_tensor
 
 def _prep_metadata(example):
     """Just coords for now"""
-    return keras.ops.stack([example['md_lat'], example['md_lon']], axis=-1)
+    return keras.ops.stack([example['md_y'], example['md_x']], axis=-1)
+
+def _reshape_tensors(
+        example,
+        shape
+    ):
+    return {key: tf.reshape(example[key], [-1] + shape) for key in example.keys()}
+
+def _single_feature_group_prep(
+        example,
+        feature_config
+):
+    # Apply transforms
+    example = apply_transforms(example,
+                               feature_config['transforms'],
+                               feature_config['timesteps']
+                               )
+
+    # Append timesteps to input names, if necessary
+    if feature_config['timesteps'] is None or len(feature_config['timesteps']) == 0:
+        inputs_w_time = feature_config['feature_names']
+    else:
+        inputs_w_time = [f"{k}_{ts}" for k in feature_config['feature_names'] for ts in feature_config['timesteps']]
+    all_inputs = {name: example[name] for name in inputs_w_time}
+
+    # Stack (if neither, returns dict)
+    if feature_config['stack_timesteps']:
+        # Get groups of years
+        all_inputs = _stack_time_series(all_inputs, inputs_w_time, feature_config['timesteps'])
+    else:
+        all_inputs = _stack_vars(all_inputs, inputs_w_time)
+    
+    return all_inputs
 
 def _to_tuple_transform(
     example: Dict,
-    input_bands: List[str],
-    output_bands: List[str],
-    transforms: Optional[Dict[str, Callable]] = None,
-    stack_inputs: bool = True,
-    stack_time_series: bool = False,
-    years: Optional[List[int]] = None,
-    include_coords: bool = True,
+    input_feature_config: dict,
+    output_feature_config: dict
 ):
     """Transform a parsed example into (inputs, outputs) tuple.
-
-    Args:
-        example: Dictionary of parsed features
-        input_bands: List of feature names to use as inputs
-        output_bands: List of feature names to use as outputs
-        transforms: Optional dict of feature_name -> transform_fn for custom transforms
-        stack_inputs: If True, stack input bands into a single tensor along a new axis.
-        include_coords: If True, add feature "coords" with named lat/lon.
-
 
     Returns:
         Tuple of (inputs_dict, outputs_dict or outputs_tensor)
     """
-    # Apply transforms first
-    example = apply_transforms(example, transforms, years)
 
-    # Extract inputs and outputs
-    if years is None:
-        input_bands_wyears = input_bands
-    else:
-        input_bands_wyears = [f"{k}_{year}" for k in input_bands for year in years]
-    inputs = {name: example[name] for name in input_bands_wyears}
-
-    # Stack
-    if stack_time_series:
-        # Get groups of years
-        inputs = _stack_time_series(inputs, input_bands_wyears, years)
-    elif stack_inputs:
-        inputs = _stack_vars(inputs, input_bands_wyears)
-
-    # Add coords
-    if include_coords:
-        inputs["metadata"] = _prep_metadata(example)
+    # Input features first
+    inputs = {}
+    for feat_group in input_feature_config.keys():
+        inputs[feat_group] = _single_feature_group_prep(
+            example,
+            input_feature_config[feat_group]
+        )
 
     # Return outputs based on number of output bands
-    if len(output_bands) == 1:
+    if len(output_feature_config['feature_names']) == 1:
         # Single output: return as tensor
-        return inputs, example[output_bands[0]]
+        outputs = _single_feature_group_prep(
+            example,
+            output_feature_config
+        )[...,0]
     else:
         # Multiple outputs: return as dict
-        return inputs, {name: example[name] for name in output_bands}
+        outputs = _single_feature_group_prep(
+            example,
+            output_feature_config
+        )
+    return inputs, outputs
 
 def select_bands_transform(
     dataset: tf.data.Dataset,
-    input_bands: List[str],
-    output_bands: List[str],
-    transforms: Optional[Dict[str, Callable]] = None,
-    stack_inputs: bool = True,
-    stack_time_series: bool = False,
-    years: Optional[List[int]] = None,
-    include_coords: bool = True
+    input_feature_config: dict,
+    output_feature_config: dict
 ) -> tf.data.Dataset:
     """Select input and output bands from a dataset of feature dicts, with optional transforms.
 
@@ -346,28 +350,13 @@ def select_bands_transform(
 
     Args:
         dataset: A dataset yielding feature dicts (e.g., from dataset_from_dir or merge_datasets)
-        input_bands: List of feature names to use as inputs
-        output_bands: List of feature names to use as outputs
-        transforms: Optional dict mapping feature names to transform functions.
-                   E.g., {'BurnDate': lambda x: x > 0} converts BurnDate to binary.
-        include_coords: Adds lat/lon features
+        input_feature_config:
+        output_feature_config:
     Returns:
         A dataset yielding (inputs_dict, outputs_dict/tensor) tuples
-
-    Example:
-        >>> merged = merge_datasets([ds1, ds2])
-        >>> transforms = {'BurnDate': lambda x: x > 0}
-        >>> final = select_bands_transform(
-        ...     merged,
-        ...     input_bands=['A01', 'A02'],
-        ...     output_bands=['BurnDate'],
-        ...     transforms=transforms
-        ... )
     """
     def select_fn(example):
-        inputs, labels = _to_tuple_transform(example, input_bands, output_bands,
-                                             transforms, stack_inputs, stack_time_series, years,
-                                             include_coords)
+        inputs, labels = _to_tuple_transform(example, input_feature_config, output_feature_config)
         return inputs, labels
 
     return dataset.map(select_fn, num_parallel_calls=tf.data.AUTOTUNE)
@@ -446,19 +435,18 @@ def merge_datasets(
 def build_merged_dataset(
         data_dirs,
         tfrecord_pattern,
-        patch_size,
         axis='examples', # examples or features
         shuffle=True,
+        cache=False,
         batch_size=4
         ):
     datasets = []
     for data_dir in data_dirs:
         ds = dataset_from_dir(
             data_dir,
-            tfrecord_pattern,
-            patch_size=patch_size,
+            tfrecord_pattern=tfrecord_pattern,
+            cache=cache,
             batch_size=batch_size,
-            cache=False
         )
         datasets.append(ds)
 
@@ -472,64 +460,3 @@ def build_merged_dataset(
 
 # Alias for backward compatibility
 dataset_from_gcs = dataset_from_dir
-
-
-if __name__ == "__main__":
-    # Quick example demonstrating the load → merge → select workflow
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--gcs_dir",
-        required=True,
-        help="GCS directory containing schema or stats (e.g. gs://.../results)"
-        )
-    parser.add_argument(
-        "--tfrecord_pattern",
-        required=False,
-        help="TFRecord glob pattern (e.g. *.tfrecord.gz)",
-        default="*.tfrecord.gz")
-    parser.add_argument(
-        "--patch_size",
-        required=False,
-        type=int,
-        default=128)
-    args = parser.parse_args()
-
-    tfrecord_pattern_path = os.path.join(args.gcs_dir, args.tfrecord_pattern)
-
-    schema = load_schema_from_gcs(args.gcs_dir)
-    feature_spec = schema_to_feature_spec(schema, patch_size=args.patch_size)
-
-    print("Example features:")
-    for i, f in enumerate(list(feature_spec.keys())[:20]):
-        print(i + 1, f)
-
-    # Example workflow: load raw data → merge → select inputs/outputs
-    print("\n--- Loading raw dataset (all features) ---")
-    ds_raw = dataset_from_dir(
-        tfrecord_pattern_path,
-        feature_spec,
-        batch_size=2
-    )
-
-    for batch in ds_raw.take(1):
-        print(f"Raw batch keys: {list(batch.keys())}")
-        print("Sample feature shapes:")
-        for key, val in list(batch.items())[:3]:
-            print(f"  {key}: {val.shape}")
-
-    # Select inputs/outputs with transforms
-    print("\n--- After selecting inputs/outputs with transforms ---")
-    transform_dict = {'BurnDate': lambda x: x > 0}
-    ds_final = select_bands_transform(
-        ds_raw,
-        input_bands=[k for k in feature_spec.keys() if k not in ['lat', 'lon', 'id', 'BurnDate']],
-        output_bands=['BurnDate'],
-        transforms=transform_dict
-    )
-
-    for inputs, labels in ds_final.take(1):
-        print(f"Inputs keys: {list(inputs.keys())}")
-        print(f"Label shape: {labels.shape}")
-        print(f"Label dtype: {labels.dtype}")
