@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aic-risk-modeling"
-version = "0.1.0"
+version = "0.1.1"
 description = "Amazon fire risk modeling utilities"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -13,5 +13,7 @@ authors = [
     ]
 requires-python = ">=3.8"
 dependencies = [
+    "numpy>=1.24.4",
+    "tensorflow>=2.11.1",
     "tensorflow-metadata",
 ]
