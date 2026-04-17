@@ -447,6 +447,7 @@ def build_merged_dataset(
             tfrecord_pattern=tfrecord_pattern,
             cache=cache,
             batch_size=batch_size,
+            shuffle=shuffle,
         )
         datasets.append(ds)
 
