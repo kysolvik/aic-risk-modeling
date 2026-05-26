@@ -147,6 +147,7 @@ def run(config):
         data_dirs=config['data_dirs'],
         tfrecord_pattern=config['tfrecord_pattern'],
         shuffle=True,
+        rename_dict=config.get('rename_dict', None),
         axis=config['merge_axis'],
         batch_size=config['batch_size'],
     )
@@ -154,6 +155,7 @@ def run(config):
         data_dirs=config['val_data_dirs'],
         tfrecord_pattern=config['tfrecord_pattern'],
         shuffle=False,
+        rename_dict=config.get('rename_dict', None),
         axis=config['merge_axis'],
         batch_size=config['batch_size'],
     )
