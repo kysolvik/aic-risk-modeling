@@ -6,12 +6,12 @@ import keras
 def load_stats_from_text(path):
     """Load tfdv-generated DatasetFeatureStatisticsList from a text file."""
     stats_list = statistics_pb2.DatasetFeatureStatisticsList()
-    
+
     with tf.io.gfile.GFile(path, 'r') as f:
         stats_text = f.read()
-    
+
     text_format.Parse(stats_text, stats_list)
-    
+
     return stats_list
 
 def get_norm_stats(stats_list, target_feature):
@@ -74,6 +74,9 @@ def create_normalizer(stats_txt_path, features_to_normalize,
     def normalize_fn(features):
         for name, stats in norm_constants.items():
             if name in features:
+                if name in ['md_x_topleft','md_x', 'md_y_topleft',
+                            'md_y', 'md_id']:
+                    features[f'{name}_raw'] = features[name]
                 if use_median:
                     center = keras.ops.convert_to_tensor(stats['median'], dtype='float32')
                 else:
@@ -92,12 +95,12 @@ def create_normalizer(stats_txt_path, features_to_normalize,
                 if not ignore_min and not ignore_max:
                     out_tensor = features[name]
 
-                
+
                 if stats['stddev'] == 0:
                     features[name] = (keras.ops.cast(out_tensor, 'float32') - center)
                 else:
                     features[name] = (keras.ops.cast(out_tensor, 'float32') - center) / (std + 1e-7)
-        
+
         return features
 
     return normalize_fn
