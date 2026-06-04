@@ -308,7 +308,7 @@ def _single_feature_group_prep(
         all_inputs = _stack_time_series(all_inputs, inputs_w_time, feature_config['timesteps'])
     else:
         all_inputs = _stack_vars(all_inputs, inputs_w_time)
-    
+
     return all_inputs
 
 def _to_tuple_transform(
@@ -453,7 +453,7 @@ def build_merged_dataset(
             tfrecord_pattern=tfrecord_pattern,
             cache=cache,
             batch_size=batch_size,
-            shuffle=shuffle,
+            shuffle=False, # Shuffling will occur with overall dataset
             rename_dict=rename_dict,
         )
         datasets.append(ds)
