@@ -22,7 +22,7 @@ mapbiomas = ee.Image('projects/mapbiomas-public/assets/brazil/fire/collection4/m
 distancePreCalculee = ee.Image('projects/columbia-research-project/assets/distanceHumanActivities_Amazon_100m_2017-2023')
 distancePreCalculee2 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m_v2')
 distancePreCalculee3 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m')
-startYears = ee.List([2017, 2018, 2019, 2020, 2021])
+startYears = ee.List([2018, 2019, 2020, 2021, 2022]) #Delete 2022 to have the training set for predicting on 2023
 
 def extractPointsForYear(year):
     currentYear = ee.Number(year)
