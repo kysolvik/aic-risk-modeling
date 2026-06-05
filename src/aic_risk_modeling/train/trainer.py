@@ -216,7 +216,7 @@ def run(config):
     early_stopping_callback = keras.callbacks.EarlyStopping(
         monitor='val_pr_auc',
         mode='max',
-        patience=8)
+        patience=4)
 
     csv_logger_callback = keras.callbacks.CSVLogger(
         './training.csv'

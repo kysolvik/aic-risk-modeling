@@ -185,13 +185,13 @@ def get_convlstm_bottleneck(input_shape, input_name, for_fusion=True):
 
     # --- ENCODER: Shrink spatially
     # Downsample 128x128 -> 64x64
-    x = layers.TimeDistributed(layers.Conv2D(32, (3, 3), strides=2, padding="same", activation="relu"))(image_inputs)
+    x = layers.TimeDistributed(layers.Conv2D(32, (3, 3), strides=1, padding="same", activation="relu"))(image_inputs)
     # Downsample 64x64 -> 32x32
-    x = layers.TimeDistributed(layers.Conv2D(64, (3, 3), strides=2, padding="same", activation="relu"))(x)
+    x = layers.TimeDistributed(layers.Conv2D(64, (3, 3), strides=1, padding="same", activation="relu"))(x)
 
     # --- TEMPORAL CORE: ConvLSTM at lower res
     x = layers.ConvLSTM2D(
-        filters=64,
+        filters=128,
         kernel_size=(3, 3),
         padding="same",
         return_sequences=False, # We collapse time here
@@ -201,9 +201,9 @@ def get_convlstm_bottleneck(input_shape, input_name, for_fusion=True):
 
     # --- DECODER: Recover 128x128 resolution ---
     # 32x32 -> 64x64
-    x = layers.Conv2DTranspose(64, (3, 3), strides=2, padding="same", activation="relu")(x)
+    x = layers.Conv2DTranspose(64, (3, 3), strides=1, padding="same", activation="relu")(x)
     # 64x64 -> 128x128
-    x = layers.Conv2DTranspose(64, (3, 3), strides=2, padding="same", activation="relu")(x)
+    # x = layers.Conv2DTranspose(64, (3, 3), strides=1, padding="same", activation="relu")(x)
 
     if not for_fusion:
         outputs = layers.Conv2D(filters=1, kernel_size=(3, 3),
@@ -313,6 +313,8 @@ def decoder_fusion(branch_models):
     x = layers.Conv2D(64, (3, 3), padding='same', activation='relu')(x)
     x = layers.BatchNormalization()(x)
     x = layers.Conv2D(32, (3, 3), padding='same', activation='relu')(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Conv2D(16, (3, 3), padding='same', activation='relu')(x)
 
     mask_output = layers.Conv2D(1, (1, 1), padding='same',
                                 activation='sigmoid', dtype='float32')(x)
