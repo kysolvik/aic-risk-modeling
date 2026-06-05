@@ -160,7 +160,8 @@ def extractPointsForYear(year):
         .addBands(slope)
         .addBands(fireMemory))
 
-    finalPoints = imageFinale.stratifiedSample(
+#Stratify only on the modis binary map otherwise it is computationnaly too heavy
+    stratifiedPoints = target.stratifiedSample(
         numPoints=3750,
         classBand='class',
         region=amazonBounds,
@@ -169,7 +170,16 @@ def extractPointsForYear(year):
         geometries=True,
         tileScale=16
     )
+#Select these points and add on them all the other bands
+    finalPoints = imageFinale.sampleRegions(
+        collection=stratifiedPoints,
+        scale=500,
+        geometries=True,
+        tileScale=16
+    )
+
     return finalPoints.map(lambda f: f.set('year', currentYear))
+
 
 # Extraction loop
 listDeCollections = startYears.map(lambda year: extractPointsForYear(year))
