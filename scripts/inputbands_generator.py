@@ -124,8 +124,8 @@ def create_inputBands(target_year):
     slope = terrain.select('slope').rename('Slope')
 
     # Fire memory MODIS (I don't know if it's a good idea to keep MODIS here, I might have to change it to VIIRS Hot Spots too)
-    startMemoryDate = ee.Date.fromYMD(dataYear.subtract(5), 1, 1)
-    endMemoryDate = ee.Date.fromYMD(dataYear, 1, 1)
+    startMemoryDate = ee.Date.fromYMD(targetYear.subtract(5), 1, 1)
+    endMemoryDate = ee.Date.fromYMD(targetYear, 1, 1)
 
     modisMemoryCol = (ee.ImageCollection('MODIS/061/MCD64A1')
                       .filterDate(startMemoryDate, endMemoryDate)
