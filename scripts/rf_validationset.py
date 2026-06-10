@@ -23,24 +23,11 @@ def extractPointsForYear(year):
 
     imageFinale, target = create_inputBands(year)
 
-    #Stratify only on the modis binary map otherwise it is computationnaly too heavy
-    stratifiedPoints = target.stratifiedSample(
-        numPoints=10000, #There is a 30% point loss in the final exctract
-        classBand='class',
+    finalPoints = imageFinale.sample(
         region=amazonBounds,
         scale=500,
-        seed=currentYear,
-        classValues=[0, 1],
-        classPoints = [9600, 400],
-        geometries=True,
-        tileScale=16
-    )
-    #Select these points and add on them all the other bands
-    finalPoints = imageFinale.sampleRegions(
-        collection=stratifiedPoints,
-        scale=500,
-        geometries=True,
-        tileScale=16
+        numPixels=10000,
+        geometries=True
     )
 
     return finalPoints.map(lambda f: f.set('year', currentYear))
