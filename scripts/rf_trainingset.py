@@ -16,10 +16,10 @@ ee.Initialize(project='macedo-lab-general-9051')
 area = ee.FeatureCollection('projects/ksolvik-misc/assets/Lim_Raisg')
 amazonBounds = area.geometry().simplify(1000) #I had to simplify the area because stratified sampling was failing on the initial complex area
 
-startYears = ee.List([2018, 2019, 2020, 2021, 2022, 2023])
+startYears = ee.List([2019, 2020, 2021, 2022, 2023]) #We have to select the correct years when training the model to avoid data leackage
 
 def extractPointsForYear(year):
-    currentYear = ee.Number(year)
+    targetYear = ee.Number(year)
 
     imageFinale, target = create_inputBands(year)
 
@@ -29,7 +29,7 @@ def extractPointsForYear(year):
         classBand='class',
         region=amazonBounds,
         scale=500,
-        seed=currentYear,
+        seed=targetYear,
         geometries=True,
         tileScale=16
     )
@@ -41,7 +41,7 @@ def extractPointsForYear(year):
         tileScale=16
     )
 
-    return finalPoints.map(lambda f: f.set('year', currentYear))
+    return finalPoints.map(lambda f: f.set('year', targetYear))
 
 
 # Extraction loop

@@ -23,24 +23,21 @@ viirs_all_years = ee.Image('projects/columbia-research-project/assets/VIIRS_Targ
 
 startYears = ee.List([2019, 2020, 2021, 2022, 2023]) #Delete 2022 to have the training set for predicting on 2023, etc...
 
-def create_inputBands(year):
-    currentYear = ee.Number(year)
-    nextYear = currentYear.add(1)
-    previousYear = currentYear.subtract(1)
+def create_inputBands(target_year):
+    targetYear = ee.Number(target_year)
+    dataYear = targetYear.subtract(1)
+    prevDataYear = currentYear.subtract(2)
 
     ### Input Bands ###
 
     #Embeddings from 2Y ago
     inputs = (embeddingsCol
-              .filterDate(ee.Date.fromYMD(previousYear, 1, 1), ee.Date.fromYMD(currentYear, 1, 1))
+              .filterDate(ee.Date.fromYMD(prevDataYear, 1, 1), ee.Date.fromYMD(dataYear, 1, 1))
               .filterBounds(amazonBounds)
               .mosaic())
 
-    startDate = ee.Date.fromYMD(nextYear, 1, 1)
-    endDate = ee.Date.fromYMD(nextYear.add(1), 1, 1)
-
     # Target VIIRS Hot Spots
-    band_name = ee.String('year_').cat(currentYear.format('%d'))
+    band_name = ee.String('year_').cat(targetYear.format('%d'))
     target = viirs_all_years.select([band_name], ['class'])
 
     # ONI (El Nino pattern)
@@ -56,8 +53,8 @@ def create_inputBands(year):
 
     oniQuarters = ee.Dictionary(oni_dict_python)
 
-    currentOniValues = ee.List(oniQuarters.get(currentYear.format('%d')))
-    prevOniValues = ee.List(oniQuarters.get(previousYear.format('%d')))
+    currentOniValues = ee.List(oniQuarters.get(dataYear.format('%d')))
+    prevOniValues = ee.List(oniQuarters.get(prevDataYear.format('%d')))
 
     oniImageCurrentYear = (ee.Image.constant(currentOniValues)
         .rename(['ONI_Q1_curr', 'ONI_Q2_curr', 'ONI_Q3_curr', 'ONI_Q4_curr']))
@@ -66,15 +63,15 @@ def create_inputBands(year):
         .rename(['ONI_Q1_prev', 'ONI_Q2_prev', 'ONI_Q3_prev', 'ONI_Q4_prev']))
 
     #Distances
-    distanceBandName = ee.String('distance_').cat(currentYear.format('%d'))
+    distanceBandName = ee.String('distance_').cat(dataYear.format('%d'))
     distanceAuxZonesHumaines = distancePreCalculee.select(distanceBandName).rename('DistanceHumanActivities')
     distanceStrictProtectedAreas = distancePreCalculee2.select('Distance_StrictProtected').rename('DistanceStrictProtectedAreas')
     distanceSustainableUseProtectedAreas = distancePreCalculee2.select('Distance_SustainableUse').rename('DistanceSustainableUseProtectedAreas')
     distanceAllProtectedAreas = distancePreCalculee3.select('distance_wdpa').rename('DistanceAllProtectedAreas')
 
     # WIND
-    startDry = ee.Date.fromYMD(currentYear, 8, 1)
-    endDry = ee.Date.fromYMD(currentYear, 10, 31)
+    startDry = ee.Date.fromYMD(dataYear, 8, 1)
+    endDry = ee.Date.fromYMD(dataYear, 10, 31)
 
     era5Wind = (ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY_AGGR')
         .filterDate(startDry, endDry)
@@ -89,7 +86,7 @@ def create_inputBands(year):
 
     # Deforestation
     hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
-    yearHansen = currentYear.subtract(2000)
+    yearHansen = dataYear.subtract(2000)
 
     recentDeforestation = (hansen.select('lossyear')
         .gte(yearHansen.subtract(1))
@@ -107,7 +104,7 @@ def create_inputBands(year):
 
     # World Population
     landscanCol = ee.ImageCollection("projects/sat-io/open-datasets/ORNL/LANDSCAN_GLOBAL")
-    population = (landscanCol.filterDate(ee.Date.fromYMD(currentYear, 1, 1), ee.Date.fromYMD(nextYear, 1, 1))
+    population = (landscanCol.filterDate(ee.Date.fromYMD(datatYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
                   .select('b1')
                   .mosaic()
                   .unmask(0)
@@ -115,7 +112,7 @@ def create_inputBands(year):
 
     # Night Lights
     nightLightsCol = ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG")
-    nightLights = (nightLightsCol.filterDate(ee.Date.fromYMD(currentYear, 1, 1), ee.Date.fromYMD(nextYear, 1, 1))
+    nightLights = (nightLightsCol.filterDate(ee.Date.fromYMD(dataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
                    .select('avg_rad')
                    .mean()
                    .unmask(0)
@@ -126,9 +123,9 @@ def create_inputBands(year):
     elevation = terrain.select('elevation').rename('Elevation')
     slope = terrain.select('slope').rename('Slope')
 
-    # Fire memory MODIS
-    startMemoryDate = ee.Date.fromYMD(currentYear.subtract(5), 1, 1)
-    endMemoryDate = ee.Date.fromYMD(currentYear, 1, 1)
+    # Fire memory MODIS (I don't know if it's a good idea to keep MODIS here, I might have to change it to VIIRS Hot Spots too)
+    startMemoryDate = ee.Date.fromYMD(dataYear.subtract(5), 1, 1)
+    endMemoryDate = ee.Date.fromYMD(dataYear, 1, 1)
 
     modisMemoryCol = (ee.ImageCollection('MODIS/061/MCD64A1')
                       .filterDate(startMemoryDate, endMemoryDate)

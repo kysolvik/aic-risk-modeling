@@ -14,12 +14,12 @@ from inputBands_Generator import create_inputBands
 ee.Authenticate()
 ee.Initialize(project='macedo-lab-general-9051')
 area = ee.FeatureCollection('projects/ksolvik-misc/assets/Lim_Raisg')
-amazonBounds = area.geometry().simplify(1000) #I had to simplify the area because stratified sampling was failing on the initial complex area
+amazonBounds = area.geometry().simplify(1000)
 
-startYears = ee.List([2018, 2019, 2020, 2021, 2022, 2023])
+startYears = ee.List([2019, 2020, 2021, 2022, 2023, 2024)
 
 def extractPointsForYear(year):
-    currentYear = ee.Number(year)
+    targetYear = ee.Number(year)
 
     imageFinale, target = create_inputBands(year)
 
@@ -30,7 +30,7 @@ def extractPointsForYear(year):
         geometries=True
     )
 
-    return finalPoints.map(lambda f: f.set('year', currentYear))
+    return finalPoints.map(lambda f: f.set('year', targetYear))
 
 
 # Extraction loop
