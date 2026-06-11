@@ -18,28 +18,22 @@ amazonBounds = area.geometry().simplify(1000) #I had to simplify the area becaus
 
 startYears = ee.List([2019, 2020, 2021, 2022, 2023]) #We have to select the correct years when training the model to avoid data leackage
 
+# I changed the two sampling methods to one unique stratified sampling, it worked for 100 & 1000 points per year
 def extractPointsForYear(year):
     targetYear = ee.Number(year)
 
     imageFinale, target = create_inputBands(year)
 
     #Stratify only on the modis binary map otherwise it is computationnaly too heavy
-    stratifiedPoints = target.stratifiedSample(
-        numPoints=4500,
+    finalPoints = imageFinale.stratifiedSample(
+        numPoints=100,
         classBand='class',
         region=amazonBounds,
         scale=500,
         seed=targetYear,
         geometries=True,
-        tileScale=16
-    )
-    #Select these points and add on them all the other bands
-    finalPoints = imageFinale.sampleRegions(
-        collection=stratifiedPoints,
-        scale=500,
-        geometries=True,
-        tileScale=16
-    )
+        tileScale=16)
+
 
     return finalPoints.map(lambda f: f.set('year', targetYear))
 

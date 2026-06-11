@@ -15,7 +15,6 @@ ee.Initialize(project='macedo-lab-general-9051')
 area = ee.FeatureCollection('projects/ksolvik-misc/assets/Lim_Raisg')
 amazonBounds = area.geometry().simplify(1000) #I had to simplify the area because stratified sampling was failing on the initial complex area
 embeddingsCol = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
-mapbiomas = ee.Image('projects/mapbiomas-public/assets/brazil/fire/collection4/mapbiomas_fire_collection4_annual_burned_v1')
 distancePreCalculee = ee.Image('projects/columbia-research-project/assets/distanceHumanActivities_Amazon_100m_2017-2023')
 distancePreCalculee2 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m_v2')
 distancePreCalculee3 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m')
@@ -26,7 +25,7 @@ startYears = ee.List([2019, 2020, 2021, 2022, 2023]) #Delete 2022 to have the tr
 def create_inputBands(target_year):
     targetYear = ee.Number(target_year)
     dataYear = targetYear.subtract(1)
-    prevDataYear = currentYear.subtract(2)
+    prevDataYear = targetYear.subtract(2)
 
     ### Input Bands ###
 
@@ -69,21 +68,6 @@ def create_inputBands(target_year):
     distanceSustainableUseProtectedAreas = distancePreCalculee2.select('Distance_SustainableUse').rename('DistanceSustainableUseProtectedAreas')
     distanceAllProtectedAreas = distancePreCalculee3.select('distance_wdpa').rename('DistanceAllProtectedAreas')
 
-    # WIND
-    startDry = ee.Date.fromYMD(dataYear, 8, 1)
-    endDry = ee.Date.fromYMD(dataYear, 10, 31)
-
-    era5Wind = (ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY_AGGR')
-        .filterDate(startDry, endDry)
-        .mean())
-
-    windSpeed = era5Wind.expression(
-        'sqrt(u**2 + v**2)', {
-            'u': era5Wind.select('u_component_of_wind_10m'),
-            'v': era5Wind.select('v_component_of_wind_10m')
-        }
-    ).unmask(2).rename('Wind_Speed_DrySeason')
-
     # Deforestation
     hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
     yearHansen = dataYear.subtract(2000)
@@ -95,16 +79,21 @@ def create_inputBands(target_year):
         .rename('Recent_Deforestation'))
 
     # Evapotranspiration
-    terraClimate = (ee.ImageCollection('IDAHO_EPSCOR/TERRACLIMATE')
-        .filterDate(startDry, endDry)
-        .select('aet')
-        .mean())
+    startMeteo = ee.Date.fromYMD(dataYear, 1, 1)
+    endMeteo = ee.Date.fromYMD(targetYear, 1, 1)
 
-    etSafe = terraClimate.multiply(0.1).unmask(0).rename('Evapotranspiration')
+    era5Land = (ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY_AGGR') #Replaces terraClimate
+                .filterDate(startMeteo, endMeteo))
+
+    Evapotranspiration = (era5Land.select('total_evaporation_sum')
+                               .sum()
+                               .multiply(-1) #To keep positive values, don't know if useful
+                               .unmask(0)
+                               .rename('Evapotranspiration'))
 
     # World Population
     landscanCol = ee.ImageCollection("projects/sat-io/open-datasets/ORNL/LANDSCAN_GLOBAL")
-    population = (landscanCol.filterDate(ee.Date.fromYMD(datatYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
+    population = (landscanCol.filterDate(ee.Date.fromYMD(dataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
                   .select('b1')
                   .mosaic()
                   .unmask(0)
@@ -142,9 +131,8 @@ def create_inputBands(target_year):
         .addBands(distanceSustainableUseProtectedAreas)
         .addBands(distanceAllProtectedAreas)
         .addBands(distanceAuxZonesHumaines)
-        .addBands(etSafe)
+        .addBands(Evapotranspiration)
         .addBands(recentDeforestation)
-        .addBands(windSpeed)
         .addBands(population)
         .addBands(nightLights)
         .addBands(elevation)
