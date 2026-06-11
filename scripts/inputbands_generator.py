@@ -18,16 +18,14 @@ embeddingsCol = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
 distancePreCalculee = ee.Image('projects/columbia-research-project/assets/distanceHumanActivities_Amazon_100m_2017-2023')
 distancePreCalculee2 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m_v2')
 distancePreCalculee3 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m')
-viirs_all_years = ee.Image('projects/columbia-research-project/assets/VIIRS_Target_2019-2024')
-
-startYears = ee.List([2019, 2020, 2021, 2022, 2023]) #Delete 2022 to have the training set for predicting on 2023, etc...
+viirs_burnedYears = ee.Image('projects/columbia-research-project/assets/VIIRS_Target_2019-2024')
 
 def create_inputBands(target_year):
     targetYear = ee.Number(target_year)
     dataYear = targetYear.subtract(1)
     prevDataYear = targetYear.subtract(2)
 
-    ### Input Bands ###
+    ### Input Bands
 
     #Embeddings from 2Y ago
     inputs = (embeddingsCol
@@ -36,8 +34,14 @@ def create_inputBands(target_year):
               .mosaic())
 
     # Target VIIRS Hot Spots
-    band_name = ee.String('year_').cat(targetYear.format('%d'))
-    target = viirs_all_years.select([band_name], ['class'])
+    class_band = ee.String('class_').cat(targetYear.format('%d'))
+    conf_band = ee.String('conf_').cat(targetYear.format('%d'))
+    type_band = ee.String('type_').cat(targetYear.format('%d'))
+
+    target = viirs_burnedYears.select(
+        [class_band, conf_band, type_band],
+        ['class', 'confidence', 'fire_type']
+    )
 
     # ONI (El Nino pattern)
     df_oni = download_clim_indices("oni", year_start=2015, year_end=2024)
@@ -123,6 +127,9 @@ def create_inputBands(target_year):
 
     fireMemory = modisMemoryCol.max().gt(0).unmask(0).rename('Fire_Memory_5y')
 
+    #TargetYear
+    yearBand = ee.Image.constant(targetYear).rename('Target_Year')
+
     # Fusion
     imageFinale = (inputs.addBands(target)
         .addBands(oniImagePrevYear)
@@ -137,6 +144,7 @@ def create_inputBands(target_year):
         .addBands(nightLights)
         .addBands(elevation)
         .addBands(slope)
-        .addBands(fireMemory))
+        .addBands(fireMemory)
+        .addBands(yearBand))
 
     return imageFinale, target

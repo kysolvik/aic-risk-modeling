@@ -16,7 +16,7 @@ ee.Initialize(project='macedo-lab-general-9051')
 area = ee.FeatureCollection('projects/ksolvik-misc/assets/Lim_Raisg')
 amazonBounds = area.geometry().simplify(1000)
 
-startYears = ee.List([2019, 2020, 2021, 2022, 2023, 2024)
+targetYears = ee.List([2019, 2020, 2021, 2022, 2023, 2024)
 
 def extractPointsForYear(year):
     targetYear = ee.Number(year)
@@ -34,7 +34,7 @@ def extractPointsForYear(year):
 
 
 # Extraction loop
-listDeCollections = startYears.map(lambda year: extractPointsForYear(year))
+listDeCollections = targetYears.map(lambda year: extractPointsForYear(year))
 allTrainingPoints = ee.FeatureCollection(listDeCollections).flatten()
 
 # EXPORT

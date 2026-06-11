@@ -16,7 +16,7 @@ ee.Initialize(project='macedo-lab-general-9051')
 area = ee.FeatureCollection('projects/ksolvik-misc/assets/Lim_Raisg')
 amazonBounds = area.geometry().simplify(1000) #I had to simplify the area because stratified sampling was failing on the initial complex area
 
-startYears = ee.List([2019, 2020, 2021, 2022, 2023]) #We have to select the correct years when training the model to avoid data leackage
+targetYears = ee.List([2019, 2020, 2021, 2022, 2023]) #We have to select the correct years when training the model to avoid data leackage
 
 # I changed the two sampling methods to one unique stratified sampling, it worked for 100 & 1000 points per year
 def extractPointsForYear(year):
@@ -44,7 +44,7 @@ def extractPointsForYear(year):
 
 
 # Extraction loop
-listDeCollections = startYears.map(lambda year: extractPointsForYear(year))
+listDeCollections = targetYears.map(lambda year: extractPointsForYear(year))
 allTrainingPoints = ee.FeatureCollection(listDeCollections).flatten()
 
 # EXPORT
