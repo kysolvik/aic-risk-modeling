@@ -30,7 +30,6 @@ import logging
 from typing import List, Dict,  Optional, Callable
 
 import tensorflow as tf
-import keras
 from tensorflow_metadata.proto.v0 import schema_pb2
 from google.protobuf import text_format
 from google.protobuf.json_format import MessageToDict
@@ -255,7 +254,7 @@ def _stack_time_series(features, input_keys, years):
         year_tensor = _stack_vars(features, year_keys)
         grouped_tensors.append(year_tensor)
 
-    timeseries_tensor = keras.ops.stack(grouped_tensors, axis=1)
+    timeseries_tensor = tf.stack(grouped_tensors, axis=1)
     return timeseries_tensor
 
 
@@ -265,13 +264,13 @@ def _stack_vars(features, input_keys, exclude_keys: Optional[List[str]] = None):
     else:
         filter_keys = input_keys
 
-    stacked_tensor = keras.ops.stack([features[k] for k in filter_keys], axis=-1)
+    stacked_tensor = tf.stack([features[k] for k in filter_keys], axis=-1)
 
     return stacked_tensor
 
 def _prep_metadata(example):
     """Just coords for now"""
-    return keras.ops.stack([example['md_y'], example['md_x']], axis=-1)
+    return tf.stack([example['md_y'], example['md_x']], axis=-1)
 
 def _reshape_tensors(
         example,
@@ -302,7 +301,7 @@ def _single_feature_group_prep(
         all_inputs = _stack_time_series(all_inputs, inputs_w_time, feature_config['timesteps'])
     else:
         all_inputs = _stack_vars(all_inputs, inputs_w_time)
-    
+
     return all_inputs
 
 def _to_tuple_transform(
@@ -447,7 +446,7 @@ def build_merged_dataset(
             tfrecord_pattern=tfrecord_pattern,
             cache=cache,
             batch_size=batch_size,
-            shuffle=shuffle,
+            shuffle=False,
         )
         datasets.append(ds)
 
