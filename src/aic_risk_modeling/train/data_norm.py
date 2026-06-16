@@ -1,7 +1,8 @@
+import json
+
 from google.protobuf import text_format
 from tensorflow_metadata.proto.v0 import statistics_pb2
 import tensorflow as tf
-import keras
 
 def load_stats_from_text(path):
     """Load tfdv-generated DatasetFeatureStatisticsList from a text file."""
@@ -14,8 +15,19 @@ def load_stats_from_text(path):
 
     return stats_list
 
+def load_stats_json(path):
+    """Load stats written by data_stats.write_stats (local or gs://)."""
+    with tf.io.gfile.GFile(path, 'r') as f:
+        return json.load(f)
+
 def get_norm_stats(stats_list, target_feature):
-    """Extract normalization statistics for a given feature."""
+    """Extract normalization statistics for a given feature.
+
+    Accepts either a tfdv DatasetFeatureStatisticsList proto or the dict
+    loaded from a data_stats JSON file.
+    """
+    if isinstance(stats_list, dict):
+        return stats_list.get('features', stats_list).get(target_feature)
     for dataset in stats_list.datasets:
         for feature in dataset.features:
             feat_name = feature.path.step[0]
@@ -60,13 +72,19 @@ def get_normalize_list(config):
 
     return normalize_list
 
-def create_normalizer(stats_txt_path, features_to_normalize,
+def create_normalizer(stats_path, features_to_normalize,
                       use_median=False, ignore_min=False, ignore_max=False):
-    """Create a normalization function based on provided statistics."""
+    """Create a normalization function based on provided statistics.
+
+    `stats_path` may be a data_stats JSON file (*.json) or a tfdv stats.pbtxt.
+    """
     norm_constants = {}
-    stats_proto = load_stats_from_text(stats_txt_path)
+    if stats_path.endswith('.json'):
+        stats = load_stats_json(stats_path)
+    else:
+        stats = load_stats_from_text(stats_path)
     for name in features_to_normalize:
-        s = get_norm_stats(stats_proto, name)
+        s = get_norm_stats(stats, name)
         if s:
             norm_constants[name] = s
 
@@ -78,28 +96,28 @@ def create_normalizer(stats_txt_path, features_to_normalize,
                             'md_y', 'md_id']:
                     features[f'{name}_raw'] = features[name]
                 if use_median:
-                    center = keras.ops.convert_to_tensor(stats['median'], dtype='float32')
+                    center = tf.constant(stats['median'], dtype=tf.float32)
                 else:
-                    center = keras.ops.convert_to_tensor(stats['mean'], dtype='float32')
-                std = keras.ops.convert_to_tensor(stats['stddev'], dtype='float32')
+                    center = tf.constant(stats['mean'], dtype=tf.float32)
+                std = tf.constant(stats['stddev'], dtype=tf.float32)
 
                 if ignore_min:
-                    out_tensor = keras.ops.where(features[name] == stats['min'],
-                                                 center,
-                                                 features[name])
+                    out_tensor = tf.where(features[name] == stats['min'],
+                                          center,
+                                          features[name])
                 if ignore_max:
-                    out_tensor = keras.ops.where(features[name] == stats['max'],
-                                                 center,
-                                                 features[name])
+                    out_tensor = tf.where(features[name] == stats['max'],
+                                          center,
+                                          features[name])
 
                 if not ignore_min and not ignore_max:
                     out_tensor = features[name]
 
 
                 if stats['stddev'] == 0:
-                    features[name] = (keras.ops.cast(out_tensor, 'float32') - center)
+                    features[name] = (tf.cast(out_tensor, tf.float32) - center)
                 else:
-                    features[name] = (keras.ops.cast(out_tensor, 'float32') - center) / (std + 1e-7)
+                    features[name] = (tf.cast(out_tensor, tf.float32) - center) / (std + 1e-7)
 
         return features
 

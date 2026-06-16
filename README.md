@@ -5,15 +5,20 @@ Amazon basin fire risk modeling utilities.
 The package is organized into three subpackages:
 
 - **`preprocess`** — preprocessing utilities (e.g. downloading climate indices)
-- **`train`** — training utilities, data loaders, and models (requires the optional `train` dependency group)
+- **`train`** — PyTorch models and training loop, plus tf.data-based TFRecord loaders
+  (PyTorch itself comes from the optional `train` dependency group)
 - **`eval`** — evaluation utilities for comparing model predictions against ground truth
 
-Subpackages are imported lazily (PEP 562), so `import aic_risk_modeling` does not pull in heavy
-optional dependencies like TensorFlow until you actually access `aic_risk_modeling.train`.
+Models and the training loop are PyTorch. Data loading still uses tf.data TFRecord
+pipelines, so `tensorflow-cpu` is a core dependency (it stays off the GPU); `torch` is
+not — on Vertex AI it comes from the prebuilt PyTorch training containers.
+
+Subpackages are imported lazily (PEP 562), so `import aic_risk_modeling` does not import
+heavy dependencies until you actually access `aic_risk_modeling.train`.
 
 ## Installation
 
-Requires Python >= 3.8 (developed against 3.11).
+Requires Python >= 3.10 (developed against 3.11).
 
 ### With uv (recommended)
 
@@ -21,7 +26,7 @@ Requires Python >= 3.8 (developed against 3.11).
 uv sync
 ```
 
-To include the optional training dependencies (Keras / TensorFlow):
+To include PyTorch for training:
 
 ```bash
 uv sync --group train
@@ -33,10 +38,10 @@ uv sync --group train
 pip install .
 ```
 
-To include the optional training dependencies:
+For training, also install PyTorch (any build >= 2.3):
 
 ```bash
-pip install ".[train]"
+pip install torch
 ```
 
 ## Usage
@@ -58,6 +63,36 @@ Arguments:
 - `index_name` — one of `amo`, `soi`, `oni`, `mei`, `tna`
 - `year_start` — first year to include (samples are monthly)
 - `year_end` — last year to include
+
+### `train`
+
+Training is config-driven (see `configs/example_config.json`): the config declares the
+TFRecord data dirs, input feature groups (each with its own branch model, e.g.
+`convlstm_bottleneck`, `unet_lite`, `mlp_for_fusion`, `transformer`, `identity`), the
+decoder (`fusion`, or the TSViT/MTSViT-inspired `mtsvit` — see
+`configs/mtsvit_test_v1.json`), loss, and optimizer settings.
+
+```bash
+python -m aic_risk_modeling.train.trainer --config_path configs/example_config.json
+```
+
+The trainer checkpoints on best `val_pr_auc` with early stopping, logs per-epoch metrics
+to `training.csv`, and saves the best model to `model_output_path` (local or `gs://`).
+Models are saved as a `torch.save` payload containing the config and the `state_dict`,
+so they can be rebuilt without the original config file:
+
+```python
+from aic_risk_modeling.train import load_model
+
+model = load_model("gs://bucket/models/fusion_test.pt")  # returns an eval-mode nn.Module
+```
+
+To launch on Vertex AI (uses the prebuilt PyTorch GPU container; the package sdist on
+GCS provides the data-loading deps):
+
+```bash
+python scripts/train_vertex_new.py gs://bucket/path/to/config.json my-job-name
+```
 
 ### `eval`
 

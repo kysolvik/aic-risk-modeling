@@ -1,113 +1,114 @@
+"""Per-feature transforms applied inside the tf.data pipeline."""
 
-import keras
+import tensorflow as tf
 
 def gt0(tensor):
-    return keras.ops.cast(tensor > 0, 'float32')
+    return tf.cast(tensor > 0, tf.float32)
 
 def gt0_bool(tensor):
-    return keras.ops.cast(tensor > 0, 'bool')
+    return tf.cast(tensor > 0, tf.bool)
 
 def eq2(tensor):
-    return keras.ops.cast(tensor == 2, 'float32')
+    return tf.cast(tensor == 2, tf.float32)
 
 def normalize_mcwd(tensor):
     """Normalize MCWD values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(650.0, dtype='float32')
-    std = keras.ops.convert_to_tensor(425.0, dtype='float32')
+    mean = tf.constant(650.0, dtype=tf.float32)
+    std = tf.constant(425.0, dtype=tf.float32)
 
-    return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
+    return (tf.cast(tensor, tf.float32) - mean) / (std + 1e-7)
 
 def normalize_def(tensor):
     """Normalize MCWD values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(200.0, dtype='float32')
-    std = keras.ops.convert_to_tensor(50.0, dtype='float32')
+    mean = tf.constant(200.0, dtype=tf.float32)
+    std = tf.constant(50.0, dtype=tf.float32)
 
-    out_tensor = keras.ops.where(tensor < -10000.0,
-                                  mean,
-                                  tensor)
-    return (keras.ops.cast(out_tensor, 'float32') - mean) / (std + 1e-7)
+    out_tensor = tf.where(tensor < -10000.0,
+                          mean,
+                          tensor)
+    return (tf.cast(out_tensor, tf.float32) - mean) / (std + 1e-7)
 
 def normalize_pdsi(tensor):
     """Normalize PDSI values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(-100.0, dtype='float32')
-    std = keras.ops.convert_to_tensor(50.0, dtype='float32')
+    mean = tf.constant(-100.0, dtype=tf.float32)
+    std = tf.constant(50.0, dtype=tf.float32)
 
-    out_tensor = keras.ops.where(tensor < -10000.0,
-                                  mean,
-                                  tensor)
+    out_tensor = tf.where(tensor < -10000.0,
+                          mean,
+                          tensor)
 
-    return (keras.ops.cast(out_tensor, 'float32') - mean) / (std + 1e-7)
+    return (tf.cast(out_tensor, tf.float32) - mean) / (std + 1e-7)
 
 def normalize_tmmn(tensor):
     """Normalize TMMN values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(165.0, dtype='float32')
-    std = keras.ops.convert_to_tensor(50.0, dtype='float32')
+    mean = tf.constant(165.0, dtype=tf.float32)
+    std = tf.constant(50.0, dtype=tf.float32)
 
-    out_tensor = keras.ops.where(tensor < -10000.0,
-                                  mean,
-                                  tensor)
-    return (keras.ops.cast(out_tensor, 'float32') - mean) / (std + 1e-7)
+    out_tensor = tf.where(tensor < -10000.0,
+                          mean,
+                          tensor)
+    return (tf.cast(out_tensor, tf.float32) - mean) / (std + 1e-7)
 
 def normalize_tmmx(tensor):
     """Normalize TMMX values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(276.0, dtype='float32')
-    std = keras.ops.convert_to_tensor(50.0, dtype='float32')
+    mean = tf.constant(276.0, dtype=tf.float32)
+    std = tf.constant(50.0, dtype=tf.float32)
 
-    out_tensor = keras.ops.where(tensor < -10000.0,
-                                  mean,
-                                  tensor)
-    return (keras.ops.cast(out_tensor, 'float32') - mean) / (std + 1e-7)
+    out_tensor = tf.where(tensor < -10000.0,
+                          mean,
+                          tensor)
+    return (tf.cast(out_tensor, tf.float32) - mean) / (std + 1e-7)
 
 def normalize_evi(tensor):
     """Normalize evi values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(4000.0, dtype='float32')
-    std = keras.ops.convert_to_tensor(1200.0, dtype='float32')
+    mean = tf.constant(4000.0, dtype=tf.float32)
+    std = tf.constant(1200.0, dtype=tf.float32)
 
-    out_tensor = keras.ops.where(tensor < 0.0,
-                                  mean,
-                                  tensor)
-    return (keras.ops.cast(out_tensor, 'float32') - mean) / (std + 1e-7)
+    out_tensor = tf.where(tensor < 0.0,
+                          mean,
+                          tensor)
+    return (tf.cast(out_tensor, tf.float32) - mean) / (std + 1e-7)
 
 def normalize_vpd(tensor):
     """Normalize vpd values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(60.0, dtype='float32')
-    std = keras.ops.convert_to_tensor(50.0, dtype='float32')
+    mean = tf.constant(60.0, dtype=tf.float32)
+    std = tf.constant(50.0, dtype=tf.float32)
 
-    out_tensor = keras.ops.where(tensor < -10000.0,
-                                  mean,
-                                  tensor)
-    return (keras.ops.cast(out_tensor, 'float32') - mean) / (std + 1e-7)
+    out_tensor = tf.where(tensor < -10000.0,
+                          mean,
+                          tensor)
+    return (tf.cast(out_tensor, tf.float32) - mean) / (std + 1e-7)
 
 def normalize_ndvi(tensor):
     """Normalize ndvi values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(6750.0, dtype='float32')
-    std = keras.ops.convert_to_tensor(1500.0, dtype='float32')
+    mean = tf.constant(6750.0, dtype=tf.float32)
+    std = tf.constant(1500.0, dtype=tf.float32)
 
-    out_tensor = keras.ops.where(tensor < 0.0,
-                                  mean,
-                                  tensor)
-    return (keras.ops.cast(out_tensor, 'float32') - mean) / (std + 1e-7)
+    out_tensor = tf.where(tensor < 0.0,
+                          mean,
+                          tensor)
+    return (tf.cast(out_tensor, tf.float32) - mean) / (std + 1e-7)
 
 def normalize_classification(tensor):
-    """Normalize ndvi values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(0.85, dtype='float32')
-    std = keras.ops.convert_to_tensor(0.3, dtype='float32')
+    """Normalize classification values using precomputed mean and stddev."""
+    mean = tf.constant(0.85, dtype=tf.float32)
+    std = tf.constant(0.3, dtype=tf.float32)
 
-    return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
+    return (tf.cast(tensor, tf.float32) - mean) / (std + 1e-7)
 
 def normalize_lat(tensor):
-    """Normalize ndvi values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(-5, dtype='float32')
-    std = keras.ops.convert_to_tensor(10, dtype='float32')
+    """Normalize latitude values using precomputed mean and stddev."""
+    mean = tf.constant(-5.0, dtype=tf.float32)
+    std = tf.constant(10.0, dtype=tf.float32)
 
-    return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
+    return (tf.cast(tensor, tf.float32) - mean) / (std + 1e-7)
 
 def normalize_lon(tensor):
-    """Normalize ndvi values using precomputed mean and stddev."""
-    mean = keras.ops.convert_to_tensor(-50, dtype='float32')
-    std = keras.ops.convert_to_tensor(10, dtype='float32')
+    """Normalize longitude values using precomputed mean and stddev."""
+    mean = tf.constant(-50.0, dtype=tf.float32)
+    std = tf.constant(10.0, dtype=tf.float32)
 
-    return (keras.ops.cast(tensor, 'float32') - mean) / (std + 1e-7)
+    return (tf.cast(tensor, tf.float32) - mean) / (std + 1e-7)
 
 transform_registry = {
     "gt0": gt0,
