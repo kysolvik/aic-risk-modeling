@@ -20,18 +20,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-vertex = [
-    "google-cloud-storage>=3.12.0",
-    "google-cloud-aiplatform>=1.157.0",
+tensorflow = [
     "tensorflow-metadata>=1.17.3",
     "tensorflow-cpu>=2.21.0",
     "protobuf>=6.30,<7",
 ]
+vertex = [
+    "google-cloud-storage>=3.12.0",
+    "google-cloud-aiplatform>=1.157.0",
+    "aic-risk-modeling[tensorflow]"
+]
 local_train = [
     "torch>=2.3",
-    "tensorflow-metadata>=1.17.3",
-    "tensorflow-cpu>=2.21.0",
-    "protobuf>=6.30,<7",
+    "aic-risk-modeling[tensorflow]"
 ]
 
 # CPU-only local installs: pull torch from the CPU index, not the default CUDA wheel.
