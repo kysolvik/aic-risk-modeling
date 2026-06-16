@@ -1,34 +1,41 @@
 """Entry point for training risk model on Vertex AI.
 
 This module provides functionality to train a segmentation model for predicting burned areas.
-It handles data loading from GCS, model building based on specified architecture, and training
-with checkpointing and early stopping.
+Models and the training loop are PyTorch; data loading runs via tf.data TFRecord
+pipeline in `data_loader`.
+Training includes checkpointing on best validation PR AUC and early stopping.
 """
 
-import os
-import json
+import csv
 import inspect
+import json
+import math
+import os
+import tempfile
 
 import numpy as np
 import tensorflow as tf
-import keras
+import torch
 from google.cloud import storage
 from urllib.parse import urlparse
 
 from aic_risk_modeling.train import data_loader, models, losses, data_norm
+from aic_risk_modeling.train.metrics import SegmentationMetrics
 
-keras.mixed_precision.set_global_policy("mixed_float16")
+# TensorFlow is only used for data loading; keep it off the GPU.
+tf.config.set_visible_devices([], "GPU")
 
 SEED = 54
 RNG = np.random.default_rng(SEED)
+torch.manual_seed(SEED)
 
 
-def upload_csv_to_gcs(local_path, gcs_uri):
+def upload_file_to_gcs(local_path, gcs_uri):
     """
-    Upload a CSV file to Google Cloud Storage.
+    Upload a local file to Google Cloud Storage.
 
     Args:
-        local_path (str): Path to local CSV file.
+        local_path (str): Path to local file.
         gcs_uri (str): Full GCS URI (e.g. "gs://my-bucket/path/to/file.csv")
     """
     if not gcs_uri.startswith("gs://"):
@@ -63,29 +70,25 @@ def load_config(
 def _gcs_join(base: str, name: str) -> str:
     return base.rstrip("/") + "/" + name
 
-def build_decoder(decoder_type, branch_models):
+def build_decoder(decoder_type, branch_models, decoder_config=None):
     function_name = f"decoder_{decoder_type}"
     try:
         # Attempt to get the function dynamically
         model_fn = getattr(models, function_name)
-        model = model_fn(branch_models)
+        model = model_fn(branch_models, **(decoder_config or {}))
         print(f"Successfully initialized {decoder_type} model.")
 
     except AttributeError:
-        # 1. Get all members of the 'model' module
-        # 2. Filter for things that are functions AND start with 'get_'
         available_funcs = [
-            name for name, obj in inspect.getmembers(model, inspect.isfunction)
+            name for name, obj in inspect.getmembers(models, inspect.isfunction)
             if name.startswith("decoder_")
         ]
-
-        # 3. Clean up the names for the error message (e.g., 'get_unet' -> 'unet')
         valid_options = [n.replace("decoder_", "") for n in available_funcs]
 
         raise ValueError(
-            f"Invalid model type '{decoder_type}'. \n"
+            f"Invalid decoder type '{decoder_type}'. \n"
             f"Expected one of: {valid_options}\n"
-            f"Note: The script looks for functions named 'get_<type>' in model.py"
+            f"Note: The script looks for functions named 'decoder_<type>' in models.py"
         )
 
     return model
@@ -100,20 +103,16 @@ def build_model(model_type, input_shape, input_name):
         print(f"Successfully initialized {model_type} model.")
 
     except AttributeError:
-        # 1. Get all members of the 'model' module
-        # 2. Filter for things that are functions AND start with 'get_'
         available_funcs = [
-            name for name, obj in inspect.getmembers(model, inspect.isfunction)
+            name for name, obj in inspect.getmembers(models, inspect.isfunction)
             if name.startswith("get_")
         ]
-
-        # 3. Clean up the names for the error message (e.g., 'get_unet' -> 'unet')
         valid_options = [n.replace("get_", "") for n in available_funcs]
 
         raise ValueError(
             f"Invalid model type '{model_type}'. \n"
             f"Expected one of: {valid_options}\n"
-            f"Note: The script looks for functions named 'get_<type>' in model.py"
+            f"Note: The script looks for functions named 'get_<type>' in models.py"
         )
 
     return model
@@ -134,10 +133,101 @@ def build_all_models(inputs_config):
 
     return all_models
 
+
+def save_model(model, config, output_path):
+    """Save model weights (with the config needed to rebuild it); supports gs:// paths."""
+    payload = {'config': config, 'model_state_dict': model.state_dict()}
+    if output_path.startswith('gs://'):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_path = os.path.join(tmpdir, os.path.basename(output_path))
+            torch.save(payload, local_path)
+            upload_file_to_gcs(local_path, output_path)
+    else:
+        torch.save(payload, output_path)
+
+
+def load_model(model_path, map_location='cpu'):
+    """Rebuild a model from a checkpoint saved by `save_model`/`run`."""
+    if model_path.startswith('gs://'):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_path = os.path.join(tmpdir, os.path.basename(model_path))
+            tf.io.gfile.copy(model_path, local_path)
+            checkpoint = torch.load(local_path, map_location=map_location)
+    else:
+        checkpoint = torch.load(model_path, map_location=map_location)
+
+    config = checkpoint['config']
+    model = build_decoder(config['decoder'],
+                          build_all_models(config['input_features']),
+                          config.get('decoder_config'))
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+    return model
+
+
+def _torch_batches(dataset, device):
+    """Yield (inputs, labels) from a tf.data dataset as torch tensors."""
+    for inputs, labels in dataset.as_numpy_iterator():
+        inputs = {k: torch.as_tensor(v).to(device) for k, v in inputs.items()}
+        labels = torch.as_tensor(labels).float().to(device)
+        yield inputs, labels
+
+
+def _cosine_warmup_schedule(optimizer, warmup_steps, decay_steps):
+    """Per-step linear warmup from 0, then cosine decay to 0
+    (keras CosineDecay with warmup_target equivalent)."""
+    def factor(step):
+        if step < warmup_steps:
+            return step / max(warmup_steps, 1)
+        progress = min(step - warmup_steps, decay_steps) / max(decay_steps, 1)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
+
+
+def _run_epoch(model, dataset, loss_function, device, metrics,
+               optimizer=None, scaler=None, scheduler=None, log_every=500):
+    """One pass over `dataset`; trains if an optimizer is given, else evaluates."""
+    training = optimizer is not None
+    model.train(training)
+    metrics.reset()
+    total_loss = 0.0
+    num_batches = 0
+    amp_enabled = device.type == 'cuda'
+    amp_dtype = torch.float16 if amp_enabled else torch.bfloat16
+
+    with torch.set_grad_enabled(training):
+        for inputs, labels in _torch_batches(dataset, device):
+            with torch.autocast(device_type=device.type, dtype=amp_dtype,
+                                enabled=amp_enabled):
+                preds = model(inputs)
+            # preds are float32 (the fusion head opts out of autocast)
+            loss = loss_function(labels, preds)
+
+            if training:
+                optimizer.zero_grad(set_to_none=True)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+
+            metrics.update(labels, preds)
+            total_loss += loss.item()
+            num_batches += 1
+            if training and num_batches % log_every == 0:
+                print(f"  step {num_batches}: loss={total_loss / num_batches:.4f}",
+                      flush=True)
+
+    results = metrics.compute()
+    results['loss'] = total_loss / max(num_batches, 1)
+    return results
+
+
 def run(config):
     # Some options that have defaults
-    steps_per_epoch=config.get('steps_per_epoch', 5000)
-    weight_decay=config.get('weight_decay', None)
+    steps_per_epoch = config.get('steps_per_epoch', 5000)
+    weight_decay = config.get('weight_decay', 0.01)
+    patience = config.get('early_stopping_patience', 4)
 
     # Get loss function
     loss_function = losses.get_loss(config['loss_function'])
@@ -158,19 +248,20 @@ def run(config):
         batch_size=config['batch_size'],
     )
 
-    # Normalize (uses first dir, hope that's representative-ish!)
+    # Normalize. Prefer an explicit stats file (e.g. pooled stats.json from
+    # data_stats); fall back to the first dir's stats.pbtxt.
+    stats_path = config.get(
+        'stats_path', _gcs_join(config['data_dirs'][0], 'stats.pbtxt'))
     normalize_list = data_norm.get_normalize_list(config)
-    norm_func = data_norm.create_normalizer(_gcs_join(config['data_dirs'][0], 'stats.pbtxt'), normalize_list)
+    norm_func = data_norm.create_normalizer(stats_path, normalize_list)
     training_ds = training_ds.map(norm_func, num_parallel_calls=tf.data.AUTOTUNE)
     validation_ds = validation_ds.map(norm_func, num_parallel_calls=tf.data.AUTOTUNE)
 
-    # Select bands
     # Select bands
     training_ds = data_loader.select_bands_transform(
         training_ds,
         input_feature_config=config['input_features'],
         output_feature_config=config['output_features'],
-
     )
     validation_ds = data_loader.select_bands_transform(
         validation_ds,
@@ -178,65 +269,81 @@ def run(config):
         output_feature_config=config['output_features'],
     )
 
-    # Get model
+    # Get branch models
     all_models = build_all_models(config['input_features'])
 
     # Build decoder (note: can build an identity decoder, if desired)
-    model = build_decoder(config['decoder'], all_models)
+    model = build_decoder(config['decoder'], all_models,
+                          config.get('decoder_config'))
 
-    print(model.summary())
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    print(model)
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Trainable parameters: {n_params:,}")
+    print(f"Training on device: {device}")
 
-    # Learning rate scheduler
-    decay_steps = (config['epochs']-1)*steps_per_epoch
-    warmup_steps = 1*steps_per_epoch
-    initial_learning_rate = 0.0
-    lr_schedule = keras.optimizers.schedules.CosineDecay(
-        initial_learning_rate, decay_steps, warmup_target=config['learning_rate'],
-        warmup_steps=warmup_steps
-    )
-    # Compile and run
-    model.compile(
-        optimizer=keras.optimizers.AdamW(learning_rate=lr_schedule,
-                                         weight_decay=weight_decay),
-        loss=loss_function,
-        metrics=[
-            keras.metrics.BinaryIoU(target_class_ids=[1]),
-            keras.metrics.AUC(curve="ROC", name="roc_auc"),
-            keras.metrics.AUC(curve="PR", name="pr_auc")
-            ]
-        )
-    checkpoint_filepath = './checkpoint.model.keras'
+    # Optimizer and learning rate scheduler
+    optimizer = torch.optim.AdamW(model.parameters(),
+                                  lr=config['learning_rate'],
+                                  weight_decay=weight_decay)
+    decay_steps = (config['epochs'] - 1) * steps_per_epoch
+    warmup_steps = 1 * steps_per_epoch
+    scheduler = _cosine_warmup_schedule(optimizer, warmup_steps, decay_steps)
+    # Mixed precision (mirrors the old keras mixed_float16 policy)
+    scaler = torch.amp.GradScaler(enabled=device.type == 'cuda')
 
-    model_checkpoint_callback = keras.callbacks.ModelCheckpoint(
-        filepath=checkpoint_filepath,
-        monitor='val_pr_auc',
-        mode='max',
-        save_best_only=True)
+    train_metrics = SegmentationMetrics()
+    val_metrics = SegmentationMetrics()
 
-    early_stopping_callback = keras.callbacks.EarlyStopping(
-        monitor='val_pr_auc',
-        mode='max',
-        patience=4)
+    checkpoint_filepath = './checkpoint.model.pt'
+    csv_path = './training.csv'
+    history = []
+    best_val_pr_auc = float('-inf')
+    epochs_since_improvement = 0
 
-    csv_logger_callback = keras.callbacks.CSVLogger(
-        './training.csv'
-    )
-    model.fit(
-        training_ds,
-        validation_data=validation_ds,
-        epochs=config['epochs'],
-        callbacks=[model_checkpoint_callback, early_stopping_callback, csv_logger_callback]
-    )
+    for epoch in range(config['epochs']):
+        train_results = _run_epoch(
+            model, training_ds, loss_function, device, train_metrics,
+            optimizer=optimizer, scaler=scaler, scheduler=scheduler)
+        val_results = _run_epoch(
+            model, validation_ds, loss_function, device, val_metrics)
+
+        row = {'epoch': epoch, 'learning_rate': scheduler.get_last_lr()[0]}
+        row.update(train_results)
+        row.update({f'val_{k}': v for k, v in val_results.items()})
+        history.append(row)
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=list(history[0].keys()))
+            writer.writeheader()
+            writer.writerows(history)
+
+        print(f"Epoch {epoch + 1}/{config['epochs']}: " +
+              " - ".join(f"{k}={v:.6f}" for k, v in row.items() if k != 'epoch'),
+              flush=True)
+
+        # Checkpoint on best val PR AUC, with early stopping
+        if val_results['pr_auc'] > best_val_pr_auc:
+            best_val_pr_auc = val_results['pr_auc']
+            epochs_since_improvement = 0
+            torch.save({'config': config, 'model_state_dict': model.state_dict()},
+                       checkpoint_filepath)
+        else:
+            epochs_since_improvement += 1
+            if epochs_since_improvement >= patience:
+                print(f"Early stopping: no val_pr_auc improvement in {patience} epochs.")
+                break
 
     # Load best checkpoint
-    model.load_weights(checkpoint_filepath)
-    model.save(config['model_output_path'])
+    checkpoint = torch.load(checkpoint_filepath, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    save_model(model, config, config['model_output_path'])
 
     # Copy logged data to gs
     output_root, _ = os.path.splitext(config['model_output_path'])
     csv_output_path = output_root + '.csv'
     if csv_output_path.startswith("gs://"):
-        upload_csv_to_gcs('./training.csv', csv_output_path)
+        upload_file_to_gcs(csv_path, csv_output_path)
 
     return model
 
