@@ -482,36 +482,41 @@ class MTSViTFusion(nn.Module):
         self.embed_dim = embed_dim
         self.patch_size = patch_size
 
+        spatiotemporal_branches = []
         temporal_branches = []
-        context_branches = []
         spatial_branches = []
         for branch in branch_models:
             shape = getattr(branch, "input_shape", None)
-            if isinstance(branch, IdentityModel) and len(shape) == 4:
+            # Spatial-temporal
+            if len(shape) == 4:
+                spatiotemporal_branches.append(branch)
+            # Temporal context only
+            elif len(shape) == 2:
                 temporal_branches.append(branch)
-            elif isinstance(branch, IdentityModel) and len(shape) == 2:
-                context_branches.append(branch)
-            else:
+            # Spatial only
+            elif len(shape) == 3:
                 spatial_branches.append(branch)
-        if not temporal_branches:
+            else:
+                raise ValueError(f'Cannot determine type of branch model {branch}')
+        if not spatiotemporal_branches:
             raise ValueError(
                 "decoder_mtsvit needs at least one spatio-temporal input: an "
                 "identity branch with timesteps and shape [H, W]")
         self.spatial_branches = nn.ModuleList(spatial_branches)
-        self.temporal_names = [b.input_name for b in temporal_branches]
-        self.context_names = [b.input_name for b in context_branches]
+        self.temporal_names = [b.input_name for b in spatiotemporal_branches]
+        self.context_names = [b.input_name for b in temporal_branches]
 
         # Per-modality patch embedding, temporal position embedding, cls token
         self.patch_embeds = nn.ModuleDict()
         self.temporal_pos = nn.ParameterDict()
         self.cls_tokens = nn.ParameterDict()
-        height, width = temporal_branches[0].input_shape[1:3]
+        height, width = spatiotemporal_branches[0].input_shape[1:3]
         if height % patch_size or width % patch_size:
             raise ValueError(f"patch_size {patch_size} must divide H, W "
                              f"({height}, {width})")
         self.grid = (height // patch_size, width // patch_size)
         num_patches = self.grid[0] * self.grid[1]
-        for branch in temporal_branches:
+        for branch in spatiotemporal_branches:
             steps, h, w, channels = branch.input_shape
             if (h, w) != (height, width):
                 raise ValueError("All spatio-temporal inputs must share H, W")
@@ -526,7 +531,7 @@ class MTSViTFusion(nn.Module):
         # Temporal context (climate indices): project + position embedding
         self.context_projs = nn.ModuleDict()
         self.context_pos = nn.ParameterDict()
-        for branch in context_branches:
+        for branch in temporal_branches:
             steps, features = branch.input_shape
             name = branch.input_name
             self.context_projs[name] = nn.Linear(features, embed_dim)
@@ -534,7 +539,7 @@ class MTSViTFusion(nn.Module):
                 torch.zeros(steps, embed_dim))
 
         # Stage 1: temporal encoder (cross-attends to context when present)
-        if context_branches:
+        if temporal_branches:
             self.temporal_layers = nn.ModuleList([
                 CrossAttnTemporalLayer(embed_dim, num_heads, mlp_ratio, dropout)
                 for _ in range(temporal_depth)])
@@ -544,7 +549,7 @@ class MTSViTFusion(nn.Module):
                 for _ in range(temporal_depth)])
 
         # Stage 2: fuse modalities per patch location, then spatial encoder
-        self.modality_fuse = nn.Linear(len(temporal_branches) * embed_dim,
+        self.modality_fuse = nn.Linear(len(spatiotemporal_branches) * embed_dim,
                                        embed_dim)
         self.spatial_pos = nn.Parameter(torch.zeros(num_patches, embed_dim))
         self.spatial_layers = nn.ModuleList([
