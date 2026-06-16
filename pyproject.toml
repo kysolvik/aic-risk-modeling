@@ -13,20 +13,25 @@ authors = [
     ]
 requires-python = ">=3.10"
 dependencies = [
-    "google-cloud-storage>=3.12.0",
     "numpy>=2.2.6",
     "pandas>=2.3.3",
     "rasterio>=1.4.4",
     "scikit-learn>=1.7.2",
-    "tensorflow-cpu>=2.21.0",
-    "tensorflow-metadata>=1.17.3",
-    "google-cloud-aiplatform>=1.157.0",
-    "protobuf>=6.30,<7",
 ]
 
-[dependency-groups]
-train = [
+[project.optional-dependencies]
+vertex = [
+    "google-cloud-storage>=3.12.0",
+    "google-cloud-aiplatform>=1.157.0",
+    "tensorflow-metadata>=1.17.3",
+    "tensorflow-cpu>=2.21.0",
+    "protobuf>=6.30,<7",
+]
+local_train = [
     "torch>=2.3",
+    "tensorflow-metadata>=1.17.3",
+    "tensorflow-cpu>=2.21.0",
+    "protobuf>=6.30,<7",
 ]
 
 # CPU-only local installs: pull torch from the CPU index, not the default CUDA wheel.
