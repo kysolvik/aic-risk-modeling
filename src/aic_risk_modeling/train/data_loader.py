@@ -184,6 +184,7 @@ def dataset_from_dir(
     cache: Optional[str | bool] = False,
     compression: Optional[str] = "GZIP",
     shuffle_buffer: int = 512,
+    seed: Optional[int] = None,
 ) -> tf.data.Dataset:
     """Builds a tf.data.Dataset from TFRecord files, returning all features as a dict.
 
@@ -200,6 +201,10 @@ def dataset_from_dir(
         cache: False (no caching), True (in memory caching), or str (cache to disk at path).
         compression: e.g., 'GZIP' or None
         shuffle_buffer: buffer size for shuffling
+        seed: optional RNG seed. When set, file listing and shuffling are
+            reproducible and interleave is forced deterministic, so repeated
+            runs see the identical data order. When None (default), order is
+            random as before.
 
     Returns:
         A batched tf.data.Dataset yielding all features as a dict
@@ -215,7 +220,7 @@ def dataset_from_dir(
     if not files:
         raise FileNotFoundError(f"No TFRecord files found for pattern {full_path_pattern}")
 
-    ds = tf.data.Dataset.list_files(full_path_pattern)
+    ds = tf.data.Dataset.list_files(full_path_pattern, seed=seed)
 
     @tf.autograph.experimental.do_not_convert
     def interleave_fn(x):
@@ -223,7 +228,8 @@ def dataset_from_dir(
 
     ds = ds.interleave(interleave_fn,
                        cycle_length=tf.data.AUTOTUNE,
-                       num_parallel_calls=tf.data.AUTOTUNE)
+                       num_parallel_calls=tf.data.AUTOTUNE,
+                       deterministic=True if seed is not None else None)
 
     # Get feature spec
     if feature_spec is None:
@@ -241,7 +247,7 @@ def dataset_from_dir(
     elif cache is True:
         ds = ds.cache()
     if shuffle:
-        ds = ds.shuffle(shuffle_buffer)
+        ds = ds.shuffle(shuffle_buffer, seed=seed)
 
     ds = ds.batch(batch_size)
     ds = ds.prefetch(tf.data.AUTOTUNE)
@@ -405,13 +411,17 @@ def _remove_unshared_features(datasets):
 
 def merge_datasets(
     datasets: List[tf.data.Dataset],
-    axis: str
+    axis: str,
+    seed: Optional[int] = None,
 ) -> tf.data.Dataset:
     """Merge multiple datasets by zipping them along the feature axis.
 
     Args:
         datasets: List of tf.data.Datasets to merge. Each should yield inputs_dict.
         axis: "examples" or "features".
+        seed: optional RNG seed for the "examples" sampling, so the order in
+            which datasets are interleaved is reproducible. None (default) keeps
+            the previous random behavior.
 
     Returns:
         A merged tf.data.Dataset
@@ -425,7 +435,7 @@ def merge_datasets(
         return zipped.map(_merged_zipped_ds, num_parallel_calls=tf.data.AUTOTUNE)
     elif axis == "examples":
         datasets = _remove_unshared_features(datasets)
-        return tf.data.Dataset.sample_from_datasets(datasets)
+        return tf.data.Dataset.sample_from_datasets(datasets, seed=seed)
     else:
         raise ValueError('merge_datasets axis must be either "examples" or "features".'
                          'Got {}'.format(axis))
@@ -437,7 +447,8 @@ def build_merged_dataset(
         axis='examples', # examples or features
         shuffle=True,
         cache=False,
-        batch_size=4
+        batch_size=4,
+        seed=None,
         ):
     datasets = []
     for data_dir in data_dirs:
@@ -447,13 +458,14 @@ def build_merged_dataset(
             cache=cache,
             batch_size=batch_size,
             shuffle=False,
+            seed=seed,
         )
         datasets.append(ds)
 
-    merged = merge_datasets(datasets, axis=axis)
+    merged = merge_datasets(datasets, axis=axis, seed=seed)
 
     if shuffle:
-        merged = merged.shuffle(buffer_size=64)
+        merged = merged.shuffle(buffer_size=128, seed=seed)
 
     return merged
 

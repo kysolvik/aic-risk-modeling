@@ -29,6 +29,7 @@ tf.config.set_visible_devices([], "GPU")
 SEED = 54
 RNG = np.random.default_rng(SEED)
 torch.manual_seed(SEED)
+tf.random.set_seed(SEED)
 
 
 def upload_file_to_gcs(local_path, gcs_uri):
@@ -248,6 +249,7 @@ def run(config):
         shuffle=True,
         axis=config['merge_axis'],
         batch_size=config['batch_size'],
+        seed=SEED,
     )
     validation_ds = data_loader.build_merged_dataset(
         data_dirs=config['val_data_dirs'],
@@ -255,6 +257,7 @@ def run(config):
         shuffle=False,
         axis=config['merge_axis'],
         batch_size=config['batch_size'],
+        seed=SEED,
     )
 
     # Normalize. Prefer an explicit stats file (e.g. pooled stats.json from
