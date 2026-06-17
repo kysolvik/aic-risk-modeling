@@ -1,66 +1,144 @@
-"""Helpers for evaluating fire model outputs"""
+"""Helpers for evaluating fire model outputs.
+
+Predictions can be binary (single band of scores) or multiclass. For
+multiclass, the prediction raster follows the layout written by
+``scripts/predict/predict.py``: band 1 is the argmax (hard predicted class),
+and the remaining bands are the per-class scores (softmax probabilities), so
+band ``2 + c`` holds the score for class ``c``. Ground truth is a single band
+of integer class labels.
+"""
 
 import numpy as np
 from sklearn import metrics
 
-def _get_metrics(preds, gt, threshold=0.5):
-    """Calculate metrics for predictions vs ground truth"""
-    # Flatten arrays
-    preds_flat = preds.flatten()
-    gt_flat = gt.flatten()
-    # Apply threshold
-    preds_binary = (preds_flat > threshold).astype(bool)
-    n_truth = np.sum(gt_flat)
-    n_pred = np.sum(preds_binary)
-    print(n_truth, n_pred)
-    if n_truth == 0 or n_pred == 0:
-        print("Warning: No positive cases in ground truth or predictions, metrics undefined.")
-        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, n_truth, n_pred
-    else:
-        # Calculate metrics
-        pr_auc = metrics.average_precision_score(gt_flat, preds_flat)
-        accuracy = metrics.accuracy_score(gt_flat, preds_binary)
-        precision = metrics.precision_score(gt_flat, preds_binary, zero_division=0)
-        recall = metrics.recall_score(gt_flat, preds_binary, zero_division=0)
-        f1 = metrics.f1_score(gt_flat, preds_binary, zero_division=0)
-        kappa = metrics.cohen_kappa_score(gt_flat, preds_binary)
-        return accuracy, precision, recall, f1, kappa, pr_auc, n_truth, n_pred
+
+def _print_metrics(title, stats):
+    """Pretty-print a one-vs-rest metrics dict (as returned by _binary_metrics)."""
+    print(title)
+    print(f"  Accuracy: {stats['accuracy']:.4f}")
+    print(f"  Precision: {stats['precision']:.4f}")
+    print(f"  Recall: {stats['recall']:.4f}")
+    print(f"  F1 Score: {stats['f1']:.4f}")
+    print(f"  Cohen's Kappa: {stats['kappa']:.4f}")
+    print(f"  PR AUC: {stats['pr_auc']:.4f}")
+    print(f"  N (truth): {stats['n_truth']}")
+    print(f"  N (pred): {stats['n_pred']}")
 
 
-def calc_stats(predictions, ground_truth, grouped=False, threshold=0.5):
-    """Calculate stats for predictions vs ground truth"""
+def _binary_metrics(gt_binary, pred_binary, scores=None):
+    """One-vs-rest metrics for a single class/label.
+
+    ``pred_binary`` is the hard prediction (a thresholded score for binary
+    models, or ``argmax == class`` for multiclass). ``scores`` are the
+    continuous scores used for PR AUC; if ``None``, PR AUC is skipped.
+    """
+    gt_flat = np.asarray(gt_binary).flatten().astype(bool)
+    pred_flat = np.asarray(pred_binary).flatten().astype(bool)
+    n_truth = int(gt_flat.sum())
+    n_pred = int(pred_flat.sum())
+    stats = {k: 0.0 for k in ("accuracy", "precision", "recall", "f1", "kappa", "pr_auc")}
+    stats["n_truth"] = n_truth
+    stats["n_pred"] = n_pred
+    if n_truth == 0:
+        print("Warning: No positive cases in ground truth, metrics undefined.")
+        return stats
+    if n_pred == 0:
+        print("Warning: No positive cases in predictions; precision/recall/F1 will be 0.")
+    # Hard-label metrics from the thresholded/argmax predictions.
+    stats["accuracy"] = metrics.accuracy_score(gt_flat, pred_flat)
+    stats["precision"] = metrics.precision_score(gt_flat, pred_flat, zero_division=0)
+    stats["recall"] = metrics.recall_score(gt_flat, pred_flat, zero_division=0)
+    stats["f1"] = metrics.f1_score(gt_flat, pred_flat, zero_division=0)
+    stats["kappa"] = metrics.cohen_kappa_score(gt_flat, pred_flat)
+    # PR AUC uses the continuous class scores, not the hard labels.
+    if scores is not None:
+        stats["pr_auc"] = metrics.average_precision_score(gt_flat, np.asarray(scores).flatten())
+    return stats
+
+
+def _is_multiclass(predictions):
+    """Multiclass predictions are band-first (>1 band): argmax + class scores."""
+    return np.ndim(predictions) == 3 and np.shape(predictions)[0] > 1
+
+
+def calc_stats_multiclass(predictions, ground_truth, class_names=None):
+    """Per-class accuracy stats for multiclass predictions.
+
+    Hard-label metrics (accuracy/precision/recall/F1/kappa) come from the
+    argmax band; PR AUC uses the raw per-class scores. Also reports overall
+    multiclass accuracy and kappa across all pixels.
+
+    Args:
+        predictions: array of shape ``(num_classes + 1, H, W)`` where band 0 is
+            the argmax class and bands ``1 + c`` are the score for class ``c``.
+        ground_truth: array of integer class labels.
+        class_names: optional sequence mapping class index -> display name.
+
+    Returns:
+        dict with ``"overall"`` and ``"per_class"`` (keyed by class index) stats.
+    """
+    predictions = np.asarray(predictions)
+    pred_labels = predictions[0].astype(int)  # argmax band
+    scores = predictions[1:]                  # (num_classes, H, W)
+    num_classes = scores.shape[0]
+
+    gt_flat = np.asarray(ground_truth).flatten().astype(int)
+    pred_flat = pred_labels.flatten()
+
+    overall = {
+        "accuracy": metrics.accuracy_score(gt_flat, pred_flat),
+        "kappa": metrics.cohen_kappa_score(gt_flat, pred_flat),
+        "macro_f1": metrics.f1_score(gt_flat, pred_flat, average="macro", zero_division=0),
+    }
+    print("Overall multiclass stats:")
+    print(f"  Accuracy: {overall['accuracy']:.4f}")
+    print(f"  Cohen's Kappa: {overall['kappa']:.4f}")
+    print(f"  Macro F1: {overall['macro_f1']:.4f}")
+
+    per_class = {}
+    for c in range(num_classes):
+        name = class_names[c] if class_names is not None else c
+        stats = _binary_metrics(gt_flat == c, pred_flat == c, scores=scores[c])
+        per_class[c] = stats
+        _print_metrics(f"Stats for class {name}:", stats)
+
+    return {"overall": overall, "per_class": per_class}
+
+
+def calc_stats(predictions, ground_truth, grouped=False, threshold=0.5, class_names=None):
+    """Calculate stats for predictions vs ground truth.
+
+    Dispatches to per-class multiclass stats when ``predictions`` is a
+    multi-band (band-first) array; otherwise computes binary stats by
+    thresholding the single-band scores.
+    """
+    predictions = np.asarray(predictions)
+    ground_truth = np.asarray(ground_truth)
+
+    if _is_multiclass(predictions):
+        return calc_stats_multiclass(predictions, ground_truth, class_names=class_names)
+
     if grouped:
         unique_labels = np.unique(ground_truth)
         for label in unique_labels:
             if label != 0:  # Skip background
                 label_mask = ground_truth == label
-                # Calculate stats for this group
-                accuracy, precision, recall, f1, kappa, pr_auc, n_truth, n_pred = _get_metrics(predictions, label_mask, threshold=threshold)
-                print(f"Stats for group {label}:")
-                print(f"  Accuracy: {accuracy:.4f}")
-                print(f"  Precision: {precision:.4f}")
-                print(f"  Recall: {recall:.4f}")
-                print(f"  F1 Score: {f1:.4f}")
-                print(f"  Cohen's Kappa: {kappa:.4f}")
-                print(f"  PR AUC: {pr_auc:.4f}")
-                print(f"  N (truth): {n_truth}")
-                print(f"  N (pred): {n_pred}")
+                stats = _binary_metrics(label_mask, predictions > threshold, scores=predictions)
+                _print_metrics(f"Stats for group {label}:", stats)
 
-    accuracy, precision, recall, f1, kappa, pr_auc, n_truth, n_pred = _get_metrics(predictions, ground_truth>0, threshold=threshold)
-    print("Overall Stats:")
-    print(f"  Accuracy: {accuracy:.4f}")
-    print(f"  Precision: {precision:.4f}")
-    print(f"  Recall: {recall:.4f}")
-    print(f"  F1 Score: {f1:.4f}")
-    print(f"  Cohen's Kappa: {kappa:.4f}")
-    print(f"  PR AUC: {pr_auc:.4f}")
-    print(f"  N (truth): {n_truth}")
-    print(f"  N (pred): {n_pred}")
-    return accuracy, precision, recall, f1, kappa, pr_auc, n_truth, n_pred
+    overall = _binary_metrics(ground_truth > 0, predictions > threshold, scores=predictions)
+    _print_metrics("Overall Stats:", overall)
+    return overall
+
 
 def load_preprocess_inputs(predictions_path, ground_truth_path):
-    """Load and preprocess inputs for evaluation"""
-    # Load predictions and ground truth (this is a placeholder, replace with actual loading code)
+    """Load and preprocess inputs for evaluation.
+
+    For tif predictions, all bands are read. A single-band raster is squeezed to
+    2D (binary scores); a multi-band raster is returned band-first
+    ``(num_bands, H, W)`` (argmax band + class scores) and triggers the
+    multiclass code path in ``calc_stats``.
+    """
     if predictions_path.endswith('.csv'):
         if not ground_truth_path.endswith('.csv'):
             raise ValueError("Both predictions and ground truth must be in the same format (both csv or both tif)")
@@ -71,6 +149,8 @@ def load_preprocess_inputs(predictions_path, ground_truth_path):
         if not ground_truth_path.endswith('.tif') and not predictions_path.endswith('.tif'):
             raise ValueError("Both predictions and ground truth must be in the same format (both csv or both tif")
         import rasterio as rio
-        predictions = rio.open(predictions_path).read(1)  # Replace with actual loading code
-        ground_truth = rio.open(ground_truth_path).read(1)  # Replace with actual loading code
+        predictions = rio.open(predictions_path).read()  # (bands, H, W)
+        if predictions.shape[0] == 1:
+            predictions = predictions[0]  # binary: squeeze to (H, W)
+        ground_truth = rio.open(ground_truth_path).read(1)
     return predictions, ground_truth
