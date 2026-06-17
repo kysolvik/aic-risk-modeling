@@ -17,22 +17,19 @@ dependencies = [
     "pandas>=2.3.3",
     "rasterio>=1.4.4",
     "scikit-learn>=1.7.2",
+    "tensorflow-cpu>=2.21.0",
+    "tensorflow-metadata>=1.17.3",
+    "protobuf>=6.30,<7",
+    "google-cloud-storage>=3.12.0",
+    "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
-tensorflow = [
-    "tensorflow-metadata>=1.17.3",
-    "tensorflow-cpu>=2.21.0",
-    "protobuf>=6.30,<7",
-]
 vertex = [
-    "google-cloud-storage>=3.12.0",
     "google-cloud-aiplatform>=1.157.0",
-    "aic-risk-modeling[tensorflow]"
 ]
-local_train = [
+torch_cpu = [
     "torch>=2.3",
-    "aic-risk-modeling[tensorflow]"
 ]
 
 # CPU-only local installs: pull torch from the CPU index, not the default CUDA wheel.
