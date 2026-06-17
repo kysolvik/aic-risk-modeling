@@ -369,11 +369,16 @@ class IdentityModel(nn.Module):
 
 class FusionDecoder(nn.Module):
     """Runs each branch on its named input, concatenates the channels-last
-    outputs, and applies a conv head. Returns (batch, H, W) probabilities.
+    outputs, and applies a conv head.
+
+    With num_classes == 1 (binary) returns (batch, H, W) sigmoid probabilities;
+    with num_classes > 1 returns (batch, H, W, num_classes) softmax
+    probabilities.
     """
 
-    def __init__(self, branch_models):
+    def __init__(self, branch_models, num_classes=1):
         super().__init__()
+        self.num_classes = num_classes
         self.branches = nn.ModuleList(branch_models)
         in_channels = sum(m.out_channels for m in branch_models)
         self.conv1 = nn.Conv2d(in_channels, 128, 3, padding=1)
@@ -383,7 +388,7 @@ class FusionDecoder(nn.Module):
         self.conv3 = nn.Conv2d(64, 32, 3, padding=1)
         self.bn3 = nn.BatchNorm2d(32)
         self.conv4 = nn.Conv2d(32, 16, 3, padding=1)
-        self.out_conv = nn.Conv2d(16, 1, 1)
+        self.out_conv = nn.Conv2d(16, num_classes, 1)
 
     def forward(self, inputs):
         feats = [branch(inputs[branch.input_name]) for branch in self.branches]
@@ -394,8 +399,10 @@ class FusionDecoder(nn.Module):
         x = F.relu(self.conv4(x))
         # Head runs in float32 even under autocast (Keras dtype="float32" layer)
         with torch.autocast(device_type=x.device.type, enabled=False):
-            out = torch.sigmoid(self.out_conv(x.float()))
-        return out.squeeze(1)
+            logits = self.out_conv(x.float())
+            if self.num_classes == 1:
+                return torch.sigmoid(logits).squeeze(1)
+            return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
 
 
 class TransformerLayer(nn.Module):
@@ -468,17 +475,20 @@ class MTSViTFusion(nn.Module):
     by a spatial transformer encoder.
     Stage 3 (decoder): tokens are progressively upsampled to full resolution,
     concatenated with the single-timestep spatial branches, and passed through
-    a convolutional segmentation head. Returns (batch, H, W) probabilities.
+    a convolutional segmentation head. With num_classes == 1 (binary) returns
+    (batch, H, W) sigmoid probabilities; with num_classes > 1 returns
+    (batch, H, W, num_classes) softmax probabilities.
 
     Branch routing: identity branches with (T, H, W, C) inputs are the
     spatio-temporal modalities; identity branches with (T, F) inputs are the
     temporal context; all other branches provide spatial features to the head.
     """
 
-    def __init__(self, branch_models, embed_dim=128, patch_size=8,
-                 temporal_depth=2, spatial_depth=2, num_heads=4,
+    def __init__(self, branch_models, num_classes=1, embed_dim=128,
+                 patch_size=8, temporal_depth=2, spatial_depth=2, num_heads=4,
                  mlp_ratio=2, dropout=0.1):
         super().__init__()
+        self.num_classes = num_classes
         self.embed_dim = embed_dim
         self.patch_size = patch_size
 
@@ -488,16 +498,17 @@ class MTSViTFusion(nn.Module):
         for branch in branch_models:
             shape = getattr(branch, "input_shape", None)
             # Spatial-temporal
-            if len(shape) == 4:
-                spatiotemporal_branches.append(branch)
-            # Temporal context only
-            elif len(shape) == 2:
-                temporal_branches.append(branch)
-            # Spatial only
-            elif len(shape) == 3:
-                spatial_branches.append(branch)
-            else:
-                raise ValueError(f'Cannot determine type of branch model {branch}')
+            if shape:
+                if len(shape) == 4:
+                    spatiotemporal_branches.append(branch)
+                # Temporal context only
+                elif len(shape) == 2:
+                    temporal_branches.append(branch)
+                # Spatial only
+                elif len(shape) == 3:
+                    spatial_branches.append(branch)
+                else:
+                    raise ValueError(f'Cannot determine type of branch model {branch}')
         if not spatiotemporal_branches:
             raise ValueError(
                 "decoder_mtsvit needs at least one spatio-temporal input: an "
@@ -577,7 +588,7 @@ class MTSViTFusion(nn.Module):
             nn.Conv2d(64, 32, 3, padding=1), nn.ReLU(), nn.BatchNorm2d(32),
             nn.Conv2d(32, 16, 3, padding=1), nn.ReLU(),
         )
-        self.out_conv = nn.Conv2d(16, 1, 1)
+        self.out_conv = nn.Conv2d(16, num_classes, 1)
 
         for pos in list(self.temporal_pos.values()) + list(self.context_pos.values()):
             nn.init.trunc_normal_(pos, std=0.02)
@@ -626,8 +637,10 @@ class MTSViTFusion(nn.Module):
         x = self.head(torch.cat([x] + spatial_feats, dim=1))
         # Head output runs in float32 even under autocast
         with torch.autocast(device_type=x.device.type, enabled=False):
-            out = torch.sigmoid(self.out_conv(x.float()))
-        return out.squeeze(1)
+            logits = self.out_conv(x.float())
+            if self.num_classes == 1:
+                return torch.sigmoid(logits).squeeze(1)
+            return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -678,11 +691,11 @@ def get_identity(input_shape, input_name=None):
     return IdentityModel(input_shape, input_name)
 
 
-def decoder_fusion(branch_models):
+def decoder_fusion(branch_models, num_classes=1):
     """branch_models: list of branch modules (e.g. [lstm_branch, cnn_branch])"""
-    return FusionDecoder(branch_models)
+    return FusionDecoder(branch_models, num_classes=num_classes)
 
 
-def decoder_mtsvit(branch_models, **kwargs):
+def decoder_mtsvit(branch_models, num_classes=1, **kwargs):
     """Multi-step temporo-spatial fusion; kwargs come from config['decoder_config']."""
-    return MTSViTFusion(branch_models, **kwargs)
+    return MTSViTFusion(branch_models, num_classes=num_classes, **kwargs)

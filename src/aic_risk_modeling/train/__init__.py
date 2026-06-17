@@ -51,6 +51,7 @@ from .losses import (
 
 from .metrics import (
     SegmentationMetrics,
+    MulticlassSegmentationMetrics,
 )
 
 from .trainer import (
@@ -95,6 +96,7 @@ __all__ = [
     "decoder_mtsvit",
     "get_identity",
     "SegmentationMetrics",
+    "MulticlassSegmentationMetrics",
     "build_model",
     "build_all_models",
     "build_decoder",

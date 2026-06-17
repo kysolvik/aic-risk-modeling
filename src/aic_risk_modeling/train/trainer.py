@@ -20,7 +20,8 @@ from google.cloud import storage
 from urllib.parse import urlparse
 
 from aic_risk_modeling.train import data_loader, models, losses, data_norm
-from aic_risk_modeling.train.metrics import SegmentationMetrics
+from aic_risk_modeling.train.metrics import (
+    SegmentationMetrics, MulticlassSegmentationMetrics)
 
 # TensorFlow is only used for data loading; keep it off the GPU.
 tf.config.set_visible_devices([], "GPU")
@@ -70,12 +71,14 @@ def load_config(
 def _gcs_join(base: str, name: str) -> str:
     return base.rstrip("/") + "/" + name
 
-def build_decoder(decoder_type, branch_models, decoder_config=None):
+def build_decoder(decoder_type, branch_models, decoder_config=None,
+                  num_classes=1):
     function_name = f"decoder_{decoder_type}"
     try:
         # Attempt to get the function dynamically
         model_fn = getattr(models, function_name)
-        model = model_fn(branch_models, **(decoder_config or {}))
+        model = model_fn(branch_models, num_classes=num_classes,
+                         **(decoder_config or {}))
         print(f"Successfully initialized {decoder_type} model.")
 
     except AttributeError:
@@ -159,7 +162,8 @@ def load_model(model_path, map_location='cpu'):
     config = checkpoint['config']
     model = build_decoder(config['decoder'],
                           build_all_models(config['input_features']),
-                          config.get('decoder_config'))
+                          config.get('decoder_config'),
+                          num_classes=config.get('num_classes') or 1)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     return model
@@ -228,9 +232,14 @@ def run(config):
     steps_per_epoch = config.get('steps_per_epoch', 5000)
     weight_decay = config.get('weight_decay', 0.01)
     patience = config.get('early_stopping_patience', 4)
+    # num_classes == 1 is binary segmentation; >1 is multi-class (the output
+    # feature is left as raw integer class labels, e.g. viirs_type 0-4).
+    num_classes = config.get('num_classes') or 1
 
     # Get loss function
-    loss_function = losses.get_loss(config['loss_function'])
+    loss_function = losses.get_loss(config['loss_function'],
+                                    num_classes=num_classes,
+                                    class_weights=config.get('class_weights'))
 
     # Get datasets
     training_ds = data_loader.build_merged_dataset(
@@ -274,7 +283,8 @@ def run(config):
 
     # Build decoder (note: can build an identity decoder, if desired)
     model = build_decoder(config['decoder'], all_models,
-                          config.get('decoder_config'))
+                          config.get('decoder_config'),
+                          num_classes=num_classes)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
@@ -293,13 +303,21 @@ def run(config):
     # Mixed precision (mirrors the old keras mixed_float16 policy)
     scaler = torch.amp.GradScaler(enabled=device.type == 'cuda')
 
-    train_metrics = SegmentationMetrics()
-    val_metrics = SegmentationMetrics()
+    # Multi-class tracks a confusion matrix and checkpoints on foreground IoU;
+    # binary keeps the streaming ROC/PR-AUC metrics and checkpoints on PR AUC.
+    if num_classes > 1:
+        train_metrics = MulticlassSegmentationMetrics(num_classes)
+        val_metrics = MulticlassSegmentationMetrics(num_classes)
+        checkpoint_metric = config.get('checkpoint_metric', 'fire_iou')
+    else:
+        train_metrics = SegmentationMetrics()
+        val_metrics = SegmentationMetrics()
+        checkpoint_metric = config.get('checkpoint_metric', 'pr_auc')
 
     checkpoint_filepath = './checkpoint.model.pt'
     csv_path = './training.csv'
     history = []
-    best_val_pr_auc = float('-inf')
+    best_val_metric = float('-inf')
     epochs_since_improvement = 0
 
     for epoch in range(config['epochs']):
@@ -322,16 +340,17 @@ def run(config):
               " - ".join(f"{k}={v:.6f}" for k, v in row.items() if k != 'epoch'),
               flush=True)
 
-        # Checkpoint on best val PR AUC, with early stopping
-        if val_results['pr_auc'] > best_val_pr_auc:
-            best_val_pr_auc = val_results['pr_auc']
+        # Checkpoint on best val checkpoint_metric, with early stopping
+        if val_results[checkpoint_metric] > best_val_metric:
+            best_val_metric = val_results[checkpoint_metric]
             epochs_since_improvement = 0
             torch.save({'config': config, 'model_state_dict': model.state_dict()},
                        checkpoint_filepath)
         else:
             epochs_since_improvement += 1
             if epochs_since_improvement >= patience:
-                print(f"Early stopping: no val_pr_auc improvement in {patience} epochs.")
+                print(f"Early stopping: no val_{checkpoint_metric} improvement "
+                      f"in {patience} epochs.")
                 break
 
     # Load best checkpoint
