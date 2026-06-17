@@ -156,11 +156,10 @@ def main():
             with torch.autocast(device_type=device.type, dtype=amp_dtype,
                                 enabled=amp_enabled):
                 preds = model(inputs)
-                print(preds.shape)
             # Prepend argmax
-            if preds.shape[2] > 1:
-                p = torch.argmax(preds, dim=2, keepdim=True)
-                preds = torch.cat([p.float(), preds], dim=2)
+            if preds.shape[-1] > 1:
+                p = torch.argmax(preds, dim=-1, keepdim=True)
+                preds = torch.cat([p.float(), preds], dim=-1)
 
             # md_sidecar is stacked [batch, 1, 2] -> (md_x_raw, md_y_raw)
             md_sidecar = inputs['md_sidecar']
