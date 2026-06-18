@@ -461,6 +461,149 @@ class FusionDecoder(nn.Module):
             return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
 
 
+class FiLM(nn.Module):
+    """Feature-wise linear modulation (Perez et al. 2018).
+
+    Produces a per-channel scale/shift from a conditioning vector and applies it
+    to a (batch, C, H, W) feature map (spatially uniform). The projection is
+    zero-initialized so the layer starts as the identity transform
+    (gamma = beta = 0), giving a stable warmup.
+    """
+
+    def __init__(self, cond_dim, num_channels):
+        super().__init__()
+        self.proj = nn.Linear(cond_dim, 2 * num_channels)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, x, cond):
+        gamma, beta = self.proj(cond).chunk(2, dim=1)
+        gamma = gamma.unsqueeze(-1).unsqueeze(-1)
+        beta = beta.unsqueeze(-1).unsqueeze(-1)
+        return x * (1 + gamma) + beta
+
+
+class FiLMFusion(nn.Module):
+    """Climate-conditioned spatial fusion decoder.
+
+    A lightweight alternative to `MTSViTFusion`: spatial-feature branches are
+    concatenated and passed through a convolutional head whose features are
+    FiLM-modulated by an encoding of the temporal climate-index branches (e.g.
+    monthly oceanic indices). The climate state thus globally reweights spatial
+    features rather than being fused as extra channels.
+
+    Because ENSO teleconnections are spatially uneven, the conditioning is a
+    joint function of climate and tile location: a per-tile coordinate (named by
+    `location_input`) is encoded with random Fourier features and *gates* the
+    climate encoding before it generates the per-channel gamma/beta, so the same
+    climate state modulates different tiles differently. `location_input` is
+    optional; without it the decoder reduces to pure-climate FiLM.
+
+    Branch routing: the branch named `location_input` is the location modulator;
+    identity branches with (T, F) inputs are the climate indices; every other
+    branch provides a (batch, H, W, C) spatial feature map (so spatio-temporal
+    inputs must use a temporal-reducing branch model such as `convlstm`, not a
+    raw `identity`).
+
+    With num_classes == 1 (binary) returns (batch, H, W) sigmoid probabilities;
+    with num_classes > 1 returns (batch, H, W, num_classes) softmax probabilities.
+    """
+
+    def __init__(self, branch_models, num_classes=1, cond_dim=128,
+                 location_input=None, num_freqs=16, sigma=1.0):
+        super().__init__()
+        self.num_classes = num_classes
+        self.location_input = location_input
+
+        spatial_branches = []
+        context_branches = []
+        location_branch = None
+        for branch in branch_models:
+            if location_input is not None and branch.input_name == location_input:
+                location_branch = branch
+                continue
+            shape = getattr(branch, "input_shape", None)
+            if shape is not None and len(shape) == 2:
+                context_branches.append(branch)
+            else:
+                spatial_branches.append(branch)
+        if location_input is not None and location_branch is None:
+            raise ValueError(
+                f"location_input '{location_input}' matches no input branch")
+        if not context_branches:
+            raise ValueError(
+                "decoder_film needs at least one climate-index input: an "
+                "identity branch with shape [T, F]")
+        if not spatial_branches:
+            raise ValueError("decoder_film needs at least one spatial branch")
+        self.spatial_branches = nn.ModuleList(spatial_branches)
+        self.context_names = [b.input_name for b in context_branches]
+
+        # Climate encoder: flatten each (T, F) index series and project.
+        cond_in = sum(s[0] * s[1] for s in
+                      (b.input_shape for b in context_branches))
+        self.conditioner = nn.Sequential(
+            nn.Linear(cond_in, cond_dim), nn.ReLU(),
+            nn.Linear(cond_dim, cond_dim), nn.ReLU(),
+        )
+
+        # Location encoder + gate: tile coordinate -> random Fourier features ->
+        # per-channel gate on the climate code. Zero-initialized gate so the
+        # model starts as pure-climate FiLM and learns the gating on top.
+        if location_input is not None:
+            in_features = location_branch.input_shape[-1]
+            self.register_buffer("freq_proj",
+                                 torch.randn(in_features, num_freqs) * sigma)
+            self.loc_encoder = nn.Sequential(
+                nn.Linear(in_features + 2 * num_freqs, cond_dim), nn.ReLU(),
+                nn.Linear(cond_dim, cond_dim), nn.ReLU(),
+            )
+            self.loc_gate = nn.Linear(cond_dim, 2 * cond_dim)
+            nn.init.zeros_(self.loc_gate.weight)
+            nn.init.zeros_(self.loc_gate.bias)
+
+        in_channels = sum(b.out_channels for b in spatial_branches)
+        self.conv1 = nn.Conv2d(in_channels, 128, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(128)
+        self.film1 = FiLM(cond_dim, 128)
+        self.conv2 = nn.Conv2d(128, 64, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.film2 = FiLM(cond_dim, 64)
+        self.conv3 = nn.Conv2d(64, 32, 3, padding=1)
+        self.bn3 = nn.BatchNorm2d(32)
+        self.film3 = FiLM(cond_dim, 32)
+        self.conv4 = nn.Conv2d(32, 16, 3, padding=1)
+        self.film4 = FiLM(cond_dim, 16)
+        self.out_conv = nn.Conv2d(16, num_classes, 1)
+
+    def _condition(self, inputs):
+        flat = [inputs[name].flatten(1) for name in self.context_names]
+        cond = self.conditioner(torch.cat(flat, dim=1))
+        if self.location_input is not None:
+            coord = inputs[self.location_input].flatten(1)  # (B, in_features)
+            proj = 2 * math.pi * (coord @ self.freq_proj)
+            feats = torch.cat([coord, proj.sin(), proj.cos()], dim=-1)
+            gamma, beta = self.loc_gate(self.loc_encoder(feats)).chunk(2, dim=1)
+            cond = cond * (1 + gamma) + beta  # location gates climate
+        return cond
+
+    def forward(self, inputs):
+        cond = self._condition(inputs)
+        feats = [branch(inputs[branch.input_name])
+                 for branch in self.spatial_branches]
+        x = torch.cat(feats, dim=-1).permute(0, 3, 1, 2)
+        x = F.relu(self.film1(self.bn1(self.conv1(x)), cond))
+        x = F.relu(self.film2(self.bn2(self.conv2(x)), cond))
+        x = F.relu(self.film3(self.bn3(self.conv3(x)), cond))
+        x = F.relu(self.film4(self.conv4(x), cond))
+        # Head output runs in float32 even under autocast
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            logits = self.out_conv(x.float())
+            if self.num_classes == 1:
+                return torch.sigmoid(logits).squeeze(1)
+            return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
+
+
 class TransformerLayer(nn.Module):
     """Pre-norm transformer encoder layer (self-attention + MLP)."""
 
@@ -781,3 +924,8 @@ def decoder_fusion(branch_models, num_classes=1):
 def decoder_mtsvit(branch_models, num_classes=1, **kwargs):
     """Multi-step temporo-spatial fusion; kwargs come from config['decoder_config']."""
     return MTSViTFusion(branch_models, num_classes=num_classes, **kwargs)
+
+
+def decoder_film(branch_models, num_classes=1, **kwargs):
+    """Climate(×location)-conditioned spatial fusion; kwargs from config['decoder_config']."""
+    return FiLMFusion(branch_models, num_classes=num_classes, **kwargs)
