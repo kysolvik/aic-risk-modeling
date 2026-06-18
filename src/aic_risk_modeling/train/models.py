@@ -10,6 +10,8 @@ and `out_channels` (feature channels of their output) so `decoder_fusion`
 can route inputs and size its first convolution.
 """
 
+import math
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -114,9 +116,10 @@ def _time_distributed(module, x):
 # ---------------------------------------------------------------------------
 
 class UNet(nn.Module):
-    def __init__(self, input_shape, input_name=None):
+    def __init__(self, input_shape, input_name=None, for_fusion=True):
         super().__init__()
         self.input_name = input_name
+        self.for_fusion = for_fusion
         in_channels = input_shape[-1]
         self.e1 = EncoderBlock(in_channels, 64)
         self.e2 = EncoderBlock(64, 128)
@@ -127,8 +130,13 @@ class UNet(nn.Module):
         self.d2 = DecoderBlock(512, 256, 256)
         self.d3 = DecoderBlock(256, 128, 128)
         self.d4 = DecoderBlock(128, 64, 64)
-        self.out_conv = nn.Conv2d(64, 1, 1)
-        self.out_channels = 1
+        if for_fusion:
+            # Expose the 64-channel decoder feature map as fusion features
+            # instead of collapsing to a single channel.
+            self.out_channels = 64
+        else:
+            self.out_conv = nn.Conv2d(64, 1, 1)
+            self.out_channels = 1
 
     def forward(self, x):
         x = x.permute(0, 3, 1, 2)
@@ -141,21 +149,29 @@ class UNet(nn.Module):
         d = self.d2(d, s3)
         d = self.d3(d, s2)
         d = self.d4(d, s1)
-        return F.relu(self.out_conv(d)).permute(0, 2, 3, 1)
+        if not self.for_fusion:
+            d = F.relu(self.out_conv(d))
+        return d.permute(0, 2, 3, 1)
 
 
 class UNetLite(nn.Module):
-    def __init__(self, input_shape, input_name=None):
+    def __init__(self, input_shape, input_name=None, for_fusion=True):
         super().__init__()
         self.input_name = input_name
+        self.for_fusion = for_fusion
         in_channels = input_shape[-1]
         self.e1 = EncoderBlock(in_channels, 16)
         self.e2 = EncoderBlock(16, 32)
         self.bottleneck = ConvBlock(32, 64)
         self.d1 = DecoderBlock(64, 32, 32)
         self.d2 = DecoderBlock(32, 16, 16)
-        self.out_conv = nn.Conv2d(16, 1, 1)
-        self.out_channels = 1
+        if for_fusion:
+            # Expose the 16-channel decoder feature map as fusion features
+            # instead of collapsing to a single channel.
+            self.out_channels = 16
+        else:
+            self.out_conv = nn.Conv2d(16, 1, 1)
+            self.out_channels = 1
 
     def forward(self, x):
         x = x.permute(0, 3, 1, 2)
@@ -164,7 +180,9 @@ class UNetLite(nn.Module):
         b = self.bottleneck(p2)
         d = self.d1(b, s2)
         d = self.d2(d, s1)
-        return F.relu(self.out_conv(d)).permute(0, 2, 3, 1)
+        if not self.for_fusion:
+            d = F.relu(self.out_conv(d))
+        return d.permute(0, 2, 3, 1)
 
 
 class MLP(nn.Module):
@@ -198,6 +216,44 @@ class MLPForFusion(nn.Module):
         x = self.net(x)
         x = x.reshape(x.shape[0], 1, 1, self.out_channels)
         return x.expand(-1, PATCH_SIZE, PATCH_SIZE, -1)
+
+
+class CoordFourierForFusion(nn.Module):
+    """Encode a per-tile coordinate (e.g. lon/lat) into broadcast fusion features.
+
+    Front-ends the broadcast MLP with random Fourier features (Tancik et al. 2020)
+    so the network can represent high-frequency spatial structure -- raw normalized
+    coordinates through a small Linear cannot. Intended for static, low-dimensional
+    metadata such as `md_single`'s (md_x, md_y); not for absolute year, which does
+    not generalize to unseen years and is dropped from `feature_names`.
+
+    Like `MLPForFusion`, the per-tile vector is broadcast across the spatial grid.
+    """
+
+    def __init__(self, input_shape, input_name=None, num_freqs=16, sigma=1.0,
+                 out_channels=16):
+        super().__init__()
+        self.input_name = input_name
+        in_features = input_shape[-1]
+        # Fixed random projection (seeded by the trainer's torch.manual_seed) saved
+        # with the model so encoding is identical across save/load.
+        self.register_buffer("freq_proj",
+                             torch.randn(in_features, num_freqs) * sigma)
+        feat_dim = in_features + 2 * num_freqs  # raw coords + sin/cos
+        self.net = nn.Sequential(
+            nn.Linear(feat_dim, 64), nn.ReLU(), nn.Dropout(0.1),
+            nn.Linear(64, 32), nn.ReLU(),
+            nn.Linear(32, out_channels), nn.ReLU(),
+        )
+        self.out_channels = out_channels
+
+    def forward(self, x):
+        # x: (B, 1, in_features)
+        proj = 2 * math.pi * (x @ self.freq_proj)  # (B, 1, num_freqs)
+        feats = torch.cat([x, proj.sin(), proj.cos()], dim=-1)
+        h = self.net(feats)
+        h = h.reshape(h.shape[0], 1, 1, self.out_channels)
+        return h.expand(-1, PATCH_SIZE, PATCH_SIZE, -1)
 
 
 class MultiScaleMLPHead(nn.Module):
@@ -496,19 +552,22 @@ class MTSViTFusion(nn.Module):
         temporal_branches = []
         spatial_branches = []
         for branch in branch_models:
+            # Only identity branches expose `input_shape` and are routed by rank:
+            # (T, H, W, C) -> spatio-temporal modality, (T, F) -> temporal
+            # context, (H, W, C) -> spatial features. Every other branch (e.g. a
+            # unet_lite CNN) is a spatial feature branch whose output is
+            # concatenated into the segmentation head.
             shape = getattr(branch, "input_shape", None)
-            # Spatial-temporal
-            if shape:
-                if len(shape) == 4:
-                    spatiotemporal_branches.append(branch)
-                # Temporal context only
-                elif len(shape) == 2:
-                    temporal_branches.append(branch)
-                # Spatial only
-                elif len(shape) == 3:
-                    spatial_branches.append(branch)
-                else:
-                    raise ValueError(f'Cannot determine type of branch model {branch}')
+            if shape is None:
+                spatial_branches.append(branch)
+            elif len(shape) == 4:
+                spatiotemporal_branches.append(branch)
+            elif len(shape) == 2:
+                temporal_branches.append(branch)
+            elif len(shape) == 3:
+                spatial_branches.append(branch)
+            else:
+                raise ValueError(f'Cannot determine type of branch model {branch}')
         if not spatiotemporal_branches:
             raise ValueError(
                 "decoder_mtsvit needs at least one spatio-temporal input: an "
@@ -647,12 +706,12 @@ class MTSViTFusion(nn.Module):
 # Factories (looked up dynamically by trainer.build_model / build_decoder)
 # ---------------------------------------------------------------------------
 
-def get_unet(input_shape, input_name=None):
-    return UNet(input_shape, input_name)
+def get_unet(input_shape, input_name=None, for_fusion=True):
+    return UNet(input_shape, input_name, for_fusion=for_fusion)
 
 
-def get_unet_lite(input_shape, input_name=None):
-    return UNetLite(input_shape, input_name)
+def get_unet_lite(input_shape, input_name=None, for_fusion=True):
+    return UNetLite(input_shape, input_name, for_fusion=for_fusion)
 
 
 def get_mlp(input_shape, input_name=None):
@@ -661,6 +720,10 @@ def get_mlp(input_shape, input_name=None):
 
 def get_mlp_for_fusion(input_shape, input_name=None):
     return MLPForFusion(input_shape, input_name)
+
+
+def get_coord_fourier(input_shape, input_name=None):
+    return CoordFourierForFusion(input_shape, input_name)
 
 
 def get_multi_scale_mlp_head(input_shape, input_name=None, hidden=128):
