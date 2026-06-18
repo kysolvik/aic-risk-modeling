@@ -527,17 +527,20 @@ class MTSViTFusion(nn.Module):
     self-attention over each patch location's time series with cross-attention
     to temporal context tokens (e.g. monthly oceanic indices), and a per-
     modality cls token summarizes the series.
-    Stage 2 (spatial): modality tokens are fused per patch location and mixed
-    by a spatial transformer encoder.
+    Stage 2 (spatial): modality tokens plus patch-embedded single-timestep
+    spatial branches are fused per patch location and mixed by a spatial
+    transformer encoder.
     Stage 3 (decoder): tokens are progressively upsampled to full resolution,
-    concatenated with the single-timestep spatial branches, and passed through
-    a convolutional segmentation head. With num_classes == 1 (binary) returns
-    (batch, H, W) sigmoid probabilities; with num_classes > 1 returns
-    (batch, H, W, num_classes) softmax probabilities.
+    concatenated with the (full-resolution) single-timestep spatial branches,
+    and passed through a convolutional segmentation head. With num_classes == 1
+    (binary) returns (batch, H, W) sigmoid probabilities; with num_classes > 1
+    returns (batch, H, W, num_classes) softmax probabilities.
 
     Branch routing: identity branches with (T, H, W, C) inputs are the
     spatio-temporal modalities; identity branches with (T, F) inputs are the
-    temporal context; all other branches provide spatial features to the head.
+    temporal context; all other branches provide spatial features, which both
+    feed the spatial encoder (patch-embedded) and the segmentation head
+    (at full resolution).
     """
 
     def __init__(self, branch_models, num_classes=1, embed_dim=128,
@@ -618,9 +621,16 @@ class MTSViTFusion(nn.Module):
                 TransformerLayer(embed_dim, num_heads, mlp_ratio, dropout)
                 for _ in range(temporal_depth)])
 
-        # Stage 2: fuse modalities per patch location, then spatial encoder
-        self.modality_fuse = nn.Linear(len(spatiotemporal_branches) * embed_dim,
-                                       embed_dim)
+        # Stage 2: fuse modalities + spatial branches per patch, then spatial
+        # encoder. Single-timestep spatial branches are patch-embedded down to
+        # the token grid so they participate in cross-patch attention alongside
+        # the temporal modality summaries (they also still feed the head).
+        self.spatial_patch_embeds = nn.ModuleDict()
+        for branch in spatial_branches:
+            self.spatial_patch_embeds[branch.input_name] = nn.Conv2d(
+                branch.out_channels, embed_dim, patch_size, stride=patch_size)
+        num_token_sources = len(spatiotemporal_branches) + len(spatial_branches)
+        self.modality_fuse = nn.Linear(num_token_sources * embed_dim, embed_dim)
         self.spatial_pos = nn.Parameter(torch.zeros(num_patches, embed_dim))
         self.spatial_layers = nn.ModuleList([
             TransformerLayer(embed_dim, num_heads, mlp_ratio, dropout)
@@ -682,7 +692,18 @@ class MTSViTFusion(nn.Module):
         tokens = [self._encode_temporal(inputs[name], name, context)
                   for name in self.temporal_names]
 
-        # Stage 2: fuse modalities, spatial encoding
+        # Spatial branches: full-res feature maps (channels-first), computed once
+        # and reused by both the spatial encoder and the decoder head.
+        spatial_feats = [branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
+                         for branch in self.spatial_branches]
+
+        # Patch-embed each spatial map to the patch grid and add it as another
+        # token source for the spatial encoder.
+        for branch, feat in zip(self.spatial_branches, spatial_feats):
+            emb = self.spatial_patch_embeds[branch.input_name](feat)  # (B, D, gh, gw)
+            tokens.append(emb.flatten(2).permute(0, 2, 1))            # (B, N, D)
+
+        # Stage 2: fuse all token sources, spatial encoding
         x = self.modality_fuse(torch.cat(tokens, dim=-1)) + self.spatial_pos
         for layer in self.spatial_layers:
             x = layer(x)
@@ -691,8 +712,6 @@ class MTSViTFusion(nn.Module):
         batch = x.shape[0]
         x = x.permute(0, 2, 1).reshape(batch, self.embed_dim, *self.grid)
         x = self.upsample(x)
-        spatial_feats = [branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
-                         for branch in self.spatial_branches]
         x = self.head(torch.cat([x] + spatial_feats, dim=1))
         # Head output runs in float32 even under autocast
         with torch.autocast(device_type=x.device.type, enabled=False):
