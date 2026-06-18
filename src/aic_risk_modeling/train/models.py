@@ -864,6 +864,216 @@ class MTSViTFusion(nn.Module):
             return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
 
 
+class MambaBlock(nn.Module):
+    """Pre-norm residual block wrapping the official ``mamba_ssm.Mamba`` mixer.
+
+    The mamba-ssm selective-scan kernels are CUDA-only, so the import is deferred
+    to construction time -- this keeps `models.py` importable on CPU for every
+    other decoder, and only building an `SSMFusion` requires a GPU + the `mamba`
+    extra (`uv sync --extra mamba`). TransformerLayer analog: a Mamba time-mixer
+    plus an MLP, each with a pre-norm residual.
+    """
+
+    def __init__(self, dim, d_state=16, d_conv=4, expand=2, mlp_ratio=2,
+                 dropout=0.1):
+        super().__init__()
+        try:
+            from mamba_ssm import Mamba
+        except ImportError as e:  # pragma: no cover - environment dependent
+            raise ImportError(
+                "decoder_ssm requires the official mamba-ssm package (GPU/CUDA "
+                "only). Install it in a CUDA environment, e.g. "
+                "`uv sync --extra mamba`."
+            ) from e
+        self.ln1 = nn.LayerNorm(dim)
+        self.mamba = Mamba(d_model=dim, d_state=d_state, d_conv=d_conv,
+                           expand=expand)
+        self.ln2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_ratio * dim), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(mlp_ratio * dim, dim), nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        x = x + self.mamba(self.ln1(x))
+        return x + self.mlp(self.ln2(x))
+
+
+class SSMFusion(nn.Module):
+    """State-space temporal fusion using the official Mamba selective scan.
+
+    A sibling of `MTSViTFusion` that replaces the temporal *transformer* with a
+    stack of `MambaBlock`s, keeping the same branch routing, spatial transformer,
+    upsampling decoder, and segmentation head -- a clean A/B for "Mamba vs
+    attention as the temporal backbone". Requires a GPU (the mamba-ssm kernels
+    are CUDA-only), so it cannot be run in the CPU smoke tests; verify on Vertex.
+
+    Stage 1 (temporal): each spatio-temporal modality is patch-embedded per
+    frame; a stack of `MambaBlock`s scans each patch location's time series and
+    the final state summarizes it. Temporal climate-index context is encoded by
+    the same Mamba stack and added as global conditioning.
+    Stage 2 (spatial): modality summaries are fused per patch and mixed by a
+    spatial transformer.
+    Stage 3 (decoder): tokens are upsampled, concatenated with the single-
+    timestep spatial branches, and passed through a conv segmentation head. With
+    num_classes == 1 (binary) returns (batch, H, W) sigmoid probabilities; with
+    num_classes > 1 returns (batch, H, W, num_classes) softmax probabilities.
+
+    Branch routing matches `MTSViTFusion`: identity (T, H, W, C) inputs are the
+    spatio-temporal modalities; identity (T, F) inputs are the temporal context;
+    every other branch provides spatial features to the head. (A spatial
+    selective-scan 'propagate' stage is a natural future extension.)
+    """
+
+    def __init__(self, branch_models, num_classes=1, embed_dim=128,
+                 patch_size=8, temporal_depth=2, spatial_depth=2, num_heads=4,
+                 mlp_ratio=2, dropout=0.1, d_state=16, d_conv=4, expand=2):
+        super().__init__()
+        self.num_classes = num_classes
+        self.embed_dim = embed_dim
+        self.patch_size = patch_size
+
+        spatiotemporal_branches = []
+        temporal_branches = []
+        spatial_branches = []
+        for branch in branch_models:
+            shape = getattr(branch, "input_shape", None)
+            if shape is None:
+                spatial_branches.append(branch)
+            elif len(shape) == 4:
+                spatiotemporal_branches.append(branch)
+            elif len(shape) == 2:
+                temporal_branches.append(branch)
+            elif len(shape) == 3:
+                spatial_branches.append(branch)
+            else:
+                raise ValueError(f'Cannot determine type of branch model {branch}')
+        if not spatiotemporal_branches:
+            raise ValueError(
+                "decoder_ssm needs at least one spatio-temporal input: an "
+                "identity branch with timesteps and shape [H, W]")
+        self.spatial_branches = nn.ModuleList(spatial_branches)
+        self.temporal_names = [b.input_name for b in spatiotemporal_branches]
+        self.context_names = [b.input_name for b in temporal_branches]
+
+        # Per-modality patch embedding + temporal position embedding
+        self.patch_embeds = nn.ModuleDict()
+        self.temporal_pos = nn.ParameterDict()
+        height, width = spatiotemporal_branches[0].input_shape[1:3]
+        if height % patch_size or width % patch_size:
+            raise ValueError(f"patch_size {patch_size} must divide H, W "
+                             f"({height}, {width})")
+        self.grid = (height // patch_size, width // patch_size)
+        num_patches = self.grid[0] * self.grid[1]
+        for branch in spatiotemporal_branches:
+            steps, h, w, channels = branch.input_shape
+            if (h, w) != (height, width):
+                raise ValueError("All spatio-temporal inputs must share H, W")
+            name = branch.input_name
+            self.patch_embeds[name] = nn.Conv2d(channels, embed_dim,
+                                                patch_size, stride=patch_size)
+            self.temporal_pos[name] = nn.Parameter(torch.zeros(steps, embed_dim))
+
+        # Temporal context: per-step projection then a Mamba scan to a vector
+        self.context_projs = nn.ModuleDict()
+        for branch in temporal_branches:
+            steps, features = branch.input_shape
+            self.context_projs[branch.input_name] = nn.Linear(features, embed_dim)
+        if temporal_branches:
+            self.context_ssm = nn.ModuleList([
+                MambaBlock(embed_dim, d_state, d_conv, expand, mlp_ratio, dropout)
+                for _ in range(temporal_depth)])
+
+        # Stage 1: temporal Mamba encoder (shared across modalities)
+        self.temporal_layers = nn.ModuleList([
+            MambaBlock(embed_dim, d_state, d_conv, expand, mlp_ratio, dropout)
+            for _ in range(temporal_depth)])
+
+        # Stage 2: fuse modalities per patch, then spatial transformer
+        self.modality_fuse = nn.Linear(len(spatiotemporal_branches) * embed_dim,
+                                       embed_dim)
+        self.spatial_pos = nn.Parameter(torch.zeros(num_patches, embed_dim))
+        self.spatial_layers = nn.ModuleList([
+            TransformerLayer(embed_dim, num_heads, mlp_ratio, dropout)
+            for _ in range(spatial_depth)])
+
+        # Stage 3: upsample tokens back to full resolution (same as MTSViTFusion)
+        upsample = []
+        in_ch = embed_dim
+        scale = patch_size
+        while scale > 1:
+            out_ch = max(in_ch // 2, 16)
+            upsample.append(nn.Upsample(scale_factor=2, mode="bilinear"))
+            upsample.append(nn.Conv2d(in_ch, out_ch, 3, padding=1))
+            upsample.append(nn.ReLU())
+            in_ch = out_ch
+            scale //= 2
+        self.upsample = nn.Sequential(*upsample)
+
+        head_in = in_ch + sum(b.out_channels for b in spatial_branches)
+        self.head = nn.Sequential(
+            nn.Conv2d(head_in, 128, 3, padding=1), nn.ReLU(), nn.BatchNorm2d(128),
+            nn.Conv2d(128, 64, 3, padding=1), nn.ReLU(), nn.BatchNorm2d(64),
+            nn.Conv2d(64, 32, 3, padding=1), nn.ReLU(), nn.BatchNorm2d(32),
+            nn.Conv2d(32, 16, 3, padding=1), nn.ReLU(),
+        )
+        self.out_conv = nn.Conv2d(16, num_classes, 1)
+
+        for pos in self.temporal_pos.values():
+            nn.init.trunc_normal_(pos, std=0.02)
+        nn.init.trunc_normal_(self.spatial_pos, std=0.02)
+
+    def _encode_context(self, inputs):
+        if not self.context_names:
+            return None
+        summary = 0
+        for name in self.context_names:
+            x = self.context_projs[name](inputs[name])  # (B, T_ctx, D)
+            for layer in self.context_ssm:
+                x = layer(x)
+            summary = summary + x[:, -1]                 # final state: (B, D)
+        return summary
+
+    def _encode_temporal(self, x, name):
+        # x: (B, T, H, W, C) -> patch tokens (B, N, T, D) -> Mamba scan -> (B, N, D)
+        batch = x.shape[0]
+        x = _time_distributed(self.patch_embeds[name], x.permute(0, 1, 4, 2, 3))
+        x = x.flatten(3).permute(0, 3, 1, 2)            # (B, N, T, D)
+        x = x + self.temporal_pos[name]
+        x = x.flatten(0, 1)                             # (B*N, T, D)
+        for layer in self.temporal_layers:
+            x = layer(x)
+        return x[:, -1].unflatten(0, (batch, -1))       # final state: (B, N, D)
+
+    def forward(self, inputs):
+        context = self._encode_context(inputs)          # (B, D) or None
+
+        # Stage 1: temporal Mamba encoding per modality
+        tokens = [self._encode_temporal(inputs[name], name)
+                  for name in self.temporal_names]
+
+        # Stage 2: fuse modalities (+ climate conditioning), spatial encoding
+        x = self.modality_fuse(torch.cat(tokens, dim=-1)) + self.spatial_pos
+        if context is not None:
+            x = x + context.unsqueeze(1)                # broadcast over patches
+        for layer in self.spatial_layers:
+            x = layer(x)
+
+        # Stage 3: upsample and fuse with spatial branches
+        batch = x.shape[0]
+        x = x.permute(0, 2, 1).reshape(batch, self.embed_dim, *self.grid)
+        x = self.upsample(x)
+        spatial_feats = [branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
+                         for branch in self.spatial_branches]
+        x = self.head(torch.cat([x] + spatial_feats, dim=1))
+        # Head output runs in float32 even under autocast
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            logits = self.out_conv(x.float())
+            if self.num_classes == 1:
+                return torch.sigmoid(logits).squeeze(1)
+            return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
+
+
 # ---------------------------------------------------------------------------
 # Factories (looked up dynamically by trainer.build_model / build_decoder)
 # ---------------------------------------------------------------------------
@@ -929,3 +1139,11 @@ def decoder_mtsvit(branch_models, num_classes=1, **kwargs):
 def decoder_film(branch_models, num_classes=1, **kwargs):
     """Climate(×location)-conditioned spatial fusion; kwargs from config['decoder_config']."""
     return FiLMFusion(branch_models, num_classes=num_classes, **kwargs)
+
+
+def decoder_ssm(branch_models, num_classes=1, **kwargs):
+    """Mamba (official mamba-ssm) temporal fusion; kwargs from config['decoder_config'].
+
+    GPU/CUDA only -- constructing this needs the `mamba` extra; verify on Vertex.
+    """
+    return SSMFusion(branch_models, num_classes=num_classes, **kwargs)
