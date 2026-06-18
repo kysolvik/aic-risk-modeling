@@ -869,9 +869,8 @@ class MambaBlock(nn.Module):
 
     The mamba-ssm selective-scan kernels are CUDA-only, so the import is deferred
     to construction time -- this keeps `models.py` importable on CPU for every
-    other decoder, and only building an `SSMFusion` needs the package. mamba-ssm
-    is a core dependency but installs/runs only with CUDA (the Vertex GPU
-    container), not on a CPU box. TransformerLayer analog: a Mamba time-mixer
+    other decoder, and only building an `SSMFusion` requires a GPU + the `mamba`
+    extra (`uv sync --extra mamba`). TransformerLayer analog: a Mamba time-mixer
     plus an MLP, each with a pre-norm residual.
     """
 
@@ -882,10 +881,9 @@ class MambaBlock(nn.Module):
             from mamba_ssm import Mamba
         except ImportError as e:  # pragma: no cover - environment dependent
             raise ImportError(
-                "decoder_ssm requires the official mamba-ssm package, whose "
-                "selective-scan kernels are CUDA-only. It is a core dependency "
-                "but installs and runs only in a CUDA environment (e.g. the "
-                "Vertex GPU container), not on CPU."
+                "decoder_ssm requires the official mamba-ssm package (GPU/CUDA "
+                "only). Install it in a CUDA environment, e.g. "
+                "`uv sync --extra mamba`."
             ) from e
         self.ln1 = nn.LayerNorm(dim)
         self.mamba = Mamba(d_model=dim, d_state=d_state, d_conv=d_conv,
@@ -1146,6 +1144,6 @@ def decoder_film(branch_models, num_classes=1, **kwargs):
 def decoder_ssm(branch_models, num_classes=1, **kwargs):
     """Mamba (official mamba-ssm) temporal fusion; kwargs from config['decoder_config'].
 
-    GPU/CUDA only -- mamba-ssm installs and runs only with CUDA; verify on Vertex.
+    GPU/CUDA only -- constructing this needs the `mamba` extra; verify on Vertex.
     """
     return SSMFusion(branch_models, num_classes=num_classes, **kwargs)
