@@ -670,9 +670,9 @@ class MTSViTFusion(nn.Module):
     self-attention over each patch location's time series with cross-attention
     to temporal context tokens (e.g. monthly oceanic indices), and a per-
     modality cls token summarizes the series.
-    Stage 2 (spatial): modality tokens plus patch-embedded single-timestep
-    spatial branches are fused per patch location and mixed by a spatial
-    transformer encoder.
+    Stage 2 (spatial): modality tokens (optionally plus the patch-embedded
+    single-timestep spatial branches, when `spatial_in_encoder`) are fused per
+    patch location and mixed by a spatial transformer encoder.
     Stage 3 (decoder): tokens are progressively upsampled to full resolution,
     concatenated with the (full-resolution) single-timestep spatial branches,
     and passed through a convolutional segmentation head. With num_classes == 1
@@ -681,18 +681,23 @@ class MTSViTFusion(nn.Module):
 
     Branch routing: identity branches with (T, H, W, C) inputs are the
     spatio-temporal modalities; identity branches with (T, F) inputs are the
-    temporal context; all other branches provide spatial features, which both
-    feed the spatial encoder (patch-embedded) and the segmentation head
-    (at full resolution).
+    temporal context; all other branches provide spatial features to the
+    segmentation head (at full resolution) and, when `spatial_in_encoder` is set,
+    also to the spatial encoder (patch-embedded).
+
+    `spatial_in_encoder` defaults to False so that checkpoints trained before the
+    option was added rebuild the original architecture and load cleanly; set it
+    in `decoder_config` to feed spatial branches into the spatial transformer.
     """
 
     def __init__(self, branch_models, num_classes=1, embed_dim=128,
                  patch_size=8, temporal_depth=2, spatial_depth=2, num_heads=4,
-                 mlp_ratio=2, dropout=0.1):
+                 mlp_ratio=2, dropout=0.1, spatial_in_encoder=False):
         super().__init__()
         self.num_classes = num_classes
         self.embed_dim = embed_dim
         self.patch_size = patch_size
+        self.spatial_in_encoder = spatial_in_encoder
 
         spatiotemporal_branches = []
         temporal_branches = []
@@ -764,15 +769,17 @@ class MTSViTFusion(nn.Module):
                 TransformerLayer(embed_dim, num_heads, mlp_ratio, dropout)
                 for _ in range(temporal_depth)])
 
-        # Stage 2: fuse modalities + spatial branches per patch, then spatial
-        # encoder. Single-timestep spatial branches are patch-embedded down to
-        # the token grid so they participate in cross-patch attention alongside
-        # the temporal modality summaries (they also still feed the head).
-        self.spatial_patch_embeds = nn.ModuleDict()
-        for branch in spatial_branches:
-            self.spatial_patch_embeds[branch.input_name] = nn.Conv2d(
-                branch.out_channels, embed_dim, patch_size, stride=patch_size)
-        num_token_sources = len(spatiotemporal_branches) + len(spatial_branches)
+        # Stage 2: fuse the temporal modality summaries per patch, then spatial
+        # encoder. When `spatial_in_encoder`, single-timestep spatial branches
+        # are also patch-embedded down to the token grid so they join cross-patch
+        # attention (they feed the head at full resolution either way).
+        num_token_sources = len(spatiotemporal_branches)
+        if spatial_in_encoder:
+            self.spatial_patch_embeds = nn.ModuleDict()
+            for branch in spatial_branches:
+                self.spatial_patch_embeds[branch.input_name] = nn.Conv2d(
+                    branch.out_channels, embed_dim, patch_size, stride=patch_size)
+            num_token_sources += len(spatial_branches)
         self.modality_fuse = nn.Linear(num_token_sources * embed_dim, embed_dim)
         self.spatial_pos = nn.Parameter(torch.zeros(num_patches, embed_dim))
         self.spatial_layers = nn.ModuleList([
@@ -836,15 +843,16 @@ class MTSViTFusion(nn.Module):
                   for name in self.temporal_names]
 
         # Spatial branches: full-res feature maps (channels-first), computed once
-        # and reused by both the spatial encoder and the decoder head.
+        # and reused by the (optional) spatial-encoder tokens and the decoder head.
         spatial_feats = [branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
                          for branch in self.spatial_branches]
 
-        # Patch-embed each spatial map to the patch grid and add it as another
-        # token source for the spatial encoder.
-        for branch, feat in zip(self.spatial_branches, spatial_feats):
-            emb = self.spatial_patch_embeds[branch.input_name](feat)  # (B, D, gh, gw)
-            tokens.append(emb.flatten(2).permute(0, 2, 1))            # (B, N, D)
+        # Optionally patch-embed each spatial map to the patch grid and add it as
+        # another token source for the spatial encoder.
+        if self.spatial_in_encoder:
+            for branch, feat in zip(self.spatial_branches, spatial_feats):
+                emb = self.spatial_patch_embeds[branch.input_name](feat)  # (B,D,gh,gw)
+                tokens.append(emb.flatten(2).permute(0, 2, 1))           # (B, N, D)
 
         # Stage 2: fuse all token sources, spatial encoding
         x = self.modality_fuse(torch.cat(tokens, dim=-1)) + self.spatial_pos
