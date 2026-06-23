@@ -209,3 +209,26 @@ __marimo__/
 
 # Keras/tensorflow
 *.keras
+
+# PyTorch checkpoints
+*.pt
+
+# Custom: config files
+configs/
+
+# Tiffs, vrts, and styling files
+*.tif
+*.vrt
+*.aux.xml
+
+# dist
+dist/
+
+# csvs
+*.csv
+
+# Notebooks
+notebooks/
+
+# .tar.gz (package dists)
+*.tar.gz

@@ -84,5 +84,5 @@
         "normalize": false
     },
     "batch_size": 4,
-    "model_output_path": "gs://res-id/fire-amazon/models/fusion_test_v5.keras"
+    "model_output_path": "gs://res-id/fire-amazon/models/fusion_test_v5.pt"
 }

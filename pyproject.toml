@@ -4,14 +4,39 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aic-risk-modeling"
-version = "0.1.0"
+version = "0.2.0"
 description = "Amazon fire risk modeling utilities"
 readme = "README.md"
 license = { text = "Apache-2.0" }
-authors = [ 
-    { name = "Kylen Solvik", email = "kylen.solvik@columbia.edu" } 
+authors = [
+    { name = "Kylen Solvik", email = "kylen.solvik@columbia.edu" }
     ]
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = [
-    "tensorflow-metadata",
+    "numpy>=2.2.6",
+    "pandas>=2.3.3",
+    "rasterio>=1.4.4",
+    "scikit-learn>=1.7.2",
+    "tensorflow-cpu>=2.21.0",
+    "tensorflow-metadata>=1.17.3",
+    "protobuf>=6.30,<7",
+    "google-cloud-storage>=3.12.0",
+    "tqdm>=4.66",
 ]
+
+[project.optional-dependencies]
+vertex = [
+    "google-cloud-aiplatform>=1.157.0",
+]
+torch_cpu = [
+    "torch>=2.3",
+]
+
+# CPU-only local installs: pull torch from the CPU index, not the default CUDA wheel.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
