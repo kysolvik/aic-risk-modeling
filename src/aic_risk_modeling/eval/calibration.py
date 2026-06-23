@@ -11,10 +11,22 @@ predicted confidence to the observed positive rate:
   - Maximum Calibration Error (MCE): worst-case bin |confidence - frequency|.
   - Reliability diagram: confidence (x) vs frequency (y) against the y=x diagonal.
 
+It also provides post-hoc *temperature scaling* (Guo et al. 2017): a single
+scalar T > 1 softens an overconfident model by dividing the logits before the
+sigmoid. Because the saved predictions are already sigmoid probabilities (the
+model applies the sigmoid in ``forward``), we recover the logits as
+``log(p / (1 - p))``, divide by T, and re-apply the sigmoid. Temperature scaling
+is monotonic and fixes the p=0.5 crossing, so it leaves hard-label metrics and
+PR AUC untouched and only moves the calibration curve.
+
 Plotting uses matplotlib, imported lazily so it stays an optional dependency.
 """
 
 import numpy as np
+
+# Clip probabilities this far from {0, 1} before taking the logit, so saturated
+# predictions give finite logits (|logit| <= ~13.8 at 1e-6) instead of +/-inf.
+_PROB_EPS = 1e-6
 
 
 def reliability_bins(scores, labels, n_bins=15):
@@ -76,6 +88,64 @@ def expected_calibration_error(scores, labels, n_bins=15):
     ece = float(np.sum(weights * gap))
     mce = float(np.max(gap))
     return ece, mce, bins
+
+
+def _probs_to_logits(scores, eps=_PROB_EPS):
+    """Recover logits from saved sigmoid probabilities: ``log(p / (1 - p))``.
+
+    Probabilities are clipped ``eps`` away from 0 and 1 first, so predictions
+    that saturated to exactly 0 or 1 in the float32 raster yield large but
+    finite logits rather than infinities. Note this caps the recoverable
+    confidence: a model that truly saturated has lost the information temperature
+    scaling would need, and gets pinned at ``|logit| <= log((1 - eps) / eps)``.
+    """
+    p = np.clip(np.asarray(scores).reshape(-1).astype(np.float64), eps, 1.0 - eps)
+    return np.log(p / (1.0 - p))
+
+
+def apply_temperature(scores, temperature, eps=_PROB_EPS):
+    """Temperature-scale saved sigmoid probabilities.
+
+    Recovers logits from ``scores``, divides by ``temperature`` (T > 1 softens an
+    overconfident model toward 0.5; T < 1 sharpens), and re-applies the sigmoid.
+    Returns probabilities with the same shape as ``scores``.
+    """
+    if temperature is None or temperature <= 0:
+        raise ValueError(f"temperature must be a positive float, got {temperature!r}")
+    logits = _probs_to_logits(scores, eps=eps) / float(temperature)
+    # Stable sigmoid (avoids overflow in exp for large-magnitude logits).
+    out = np.where(logits >= 0,
+                   1.0 / (1.0 + np.exp(-logits)),
+                   np.exp(logits) / (1.0 + np.exp(logits)))
+    return out.reshape(np.shape(scores))
+
+
+def fit_temperature(scores, labels, eps=_PROB_EPS, bounds=(1e-2, 1e2)):
+    """Fit the NLL-minimizing temperature for saved sigmoid probabilities.
+
+    Recovers logits from ``scores`` and finds the scalar T that minimizes the
+    binary cross-entropy of ``sigmoid(logit / T)`` against ``labels`` (the
+    standard temperature-scaling objective of Guo et al. 2017). The NLL is
+    computed directly from logits via softplus for numerical stability.
+
+    Fit T on a held-out calibration split and apply it to the test set; fitting
+    and reporting on the same set is optimistic. Returns the fitted temperature
+    as a float (1.0 if there are no usable samples).
+    """
+    from scipy.optimize import minimize_scalar
+
+    logits = _probs_to_logits(scores, eps=eps)
+    y = np.asarray(labels).reshape(-1).astype(np.float64)
+    if logits.size == 0:
+        return 1.0
+
+    def nll(temperature):
+        s = logits / temperature
+        # -log-likelihood per sample = softplus(s) - y * s; mean over pixels.
+        return float(np.mean(np.logaddexp(0.0, s) - y * s))
+
+    result = minimize_scalar(nll, bounds=bounds, method="bounded")
+    return float(result.x)
 
 
 def reliability_table_str(bins):

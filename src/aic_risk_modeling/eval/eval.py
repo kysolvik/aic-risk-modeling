@@ -12,7 +12,9 @@ import numpy as np
 from sklearn import metrics
 
 from .calibration import (
+    apply_temperature,
     expected_calibration_error,
+    fit_temperature,
     plot_reliability_diagram,
     reliability_table_str,
 )
@@ -115,7 +117,8 @@ def calc_stats_multiclass(predictions, ground_truth, class_names=None):
 
 
 def calc_stats(predictions, ground_truth, grouped=False, threshold=0.5,
-               class_names=None, reliability_plot=None, calibration_bins=15):
+               class_names=None, reliability_plot=None, calibration_bins=15,
+               temperature=None, fit_temp=False):
     """Calculate stats for predictions vs ground truth.
 
     Dispatches to per-class multiclass stats when ``predictions`` is a
@@ -123,12 +126,36 @@ def calc_stats(predictions, ground_truth, grouped=False, threshold=0.5,
     thresholding the single-band scores. For binary predictions, also reports
     calibration: Expected/Maximum Calibration Error plus a reliability table,
     and writes a reliability-diagram PNG to ``reliability_plot`` when given.
+
+    Post-hoc temperature scaling (binary only): pass ``fit_temp=True`` to fit the
+    NLL-minimizing temperature on this set, or ``temperature=T`` to apply a known
+    T (e.g. one fitted on a held-out calibration split). Scaling is monotonic and
+    fixes the p=0.5 crossing, so hard-label metrics and PR AUC are unchanged; only
+    the calibration metrics/diagram move. Returns the fitted/applied T in the
+    stats dict under ``"temperature"``.
     """
     predictions = np.asarray(predictions)
     ground_truth = np.asarray(ground_truth)
 
     if _is_multiclass(predictions):
+        if fit_temp or temperature is not None:
+            print("Warning: temperature scaling is binary-only; ignoring for multiclass.")
         return calc_stats_multiclass(predictions, ground_truth, class_names=class_names)
+
+    labels = ground_truth > 0
+
+    # Post-hoc temperature scaling. Fitting and applying on the same set is
+    # optimistic; fit on a held-out split (printed T) and apply via temperature=T.
+    if fit_temp:
+        temperature = fit_temperature(predictions, labels)
+        print(f"Fitted temperature: T = {temperature:.4f} "
+              f"(NLL-minimizing, in-sample on this set)")
+    if temperature is not None and temperature != 1.0:
+        ece_raw, mce_raw, _ = expected_calibration_error(
+            predictions, labels, n_bins=calibration_bins)
+        predictions = apply_temperature(predictions, temperature)
+        print(f"Applied temperature scaling T = {temperature:.4f}  "
+              f"(pre-scaling calibration: ECE={ece_raw:.4f} MCE={mce_raw:.4f})")
 
     if grouped:
         unique_labels = np.unique(ground_truth)
@@ -138,13 +165,15 @@ def calc_stats(predictions, ground_truth, grouped=False, threshold=0.5,
                 stats = _binary_metrics(label_mask, predictions > threshold, scores=predictions)
                 _print_metrics(f"Stats for group {label}:", stats)
 
-    overall = _binary_metrics(ground_truth > 0, predictions > threshold, scores=predictions)
+    overall = _binary_metrics(labels, predictions > threshold, scores=predictions)
 
     # Calibration uses the continuous scores (not the thresholded labels).
     ece, mce, bins = expected_calibration_error(
-        predictions, ground_truth > 0, n_bins=calibration_bins)
+        predictions, labels, n_bins=calibration_bins)
     overall["ece"] = ece
     overall["mce"] = mce
+    if temperature is not None:
+        overall["temperature"] = float(temperature)
 
     _print_metrics("Overall Stats:", overall)
     print("Reliability (predicted probability vs empirical frequency):")

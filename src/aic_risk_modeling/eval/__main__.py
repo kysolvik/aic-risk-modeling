@@ -44,6 +44,22 @@ def parse_args():
         default=15,
         help="Number of equal-width probability bins for ECE / reliability.",
     )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        required=False,
+        default=None,
+        help="Apply post-hoc temperature scaling with this T (binary only). "
+             "Use a T fitted on a held-out split; T>1 softens overconfidence.",
+    )
+    parser.add_argument(
+        "--fit-temperature",
+        action="store_true",
+        required=False,
+        help="Fit the NLL-minimizing temperature on this set and apply it "
+             "(binary only). In-sample, so optimistic; for an honest estimate "
+             "fit here and apply the printed T to the test set via --temperature.",
+    )
     return parser.parse_args()
 
 def main():
@@ -53,7 +69,8 @@ def main():
     # Calculate stats
     calc_stats(predictions, ground_truth, grouped=args.grouped, threshold=args.threshold,
                reliability_plot=args.reliability_plot,
-               calibration_bins=args.calibration_bins)
+               calibration_bins=args.calibration_bins,
+               temperature=args.temperature, fit_temp=args.fit_temperature)
 
 if __name__ == "__main__":
     main()
