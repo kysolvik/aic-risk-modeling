@@ -453,7 +453,7 @@ def build_merged_dataset(
         shuffle=True,
         cache=False,
         rename_dict=None,
-        batch_size=4
+        batch_size=4,
         seed=None,
         ):
     datasets = []
