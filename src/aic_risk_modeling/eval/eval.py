@@ -11,6 +11,12 @@ of integer class labels.
 import numpy as np
 from sklearn import metrics
 
+from .calibration import (
+    expected_calibration_error,
+    plot_reliability_diagram,
+    reliability_table_str,
+)
+
 
 def _print_metrics(title, stats):
     """Pretty-print a one-vs-rest metrics dict (as returned by _binary_metrics)."""
@@ -21,6 +27,9 @@ def _print_metrics(title, stats):
     print(f"  F1 Score: {stats['f1']:.4f}")
     print(f"  Cohen's Kappa: {stats['kappa']:.4f}")
     print(f"  PR AUC: {stats['pr_auc']:.4f}")
+    if stats.get('ece') is not None:
+        print(f"  ECE: {stats['ece']:.4f}")
+        print(f"  MCE: {stats['mce']:.4f}")
     print(f"  N (truth): {stats['n_truth']}")
     print(f"  N (pred): {stats['n_pred']}")
 
@@ -105,12 +114,15 @@ def calc_stats_multiclass(predictions, ground_truth, class_names=None):
     return {"overall": overall, "per_class": per_class}
 
 
-def calc_stats(predictions, ground_truth, grouped=False, threshold=0.5, class_names=None):
+def calc_stats(predictions, ground_truth, grouped=False, threshold=0.5,
+               class_names=None, reliability_plot=None, calibration_bins=15):
     """Calculate stats for predictions vs ground truth.
 
     Dispatches to per-class multiclass stats when ``predictions`` is a
     multi-band (band-first) array; otherwise computes binary stats by
-    thresholding the single-band scores.
+    thresholding the single-band scores. For binary predictions, also reports
+    calibration: Expected/Maximum Calibration Error plus a reliability table,
+    and writes a reliability-diagram PNG to ``reliability_plot`` when given.
     """
     predictions = np.asarray(predictions)
     ground_truth = np.asarray(ground_truth)
@@ -127,7 +139,19 @@ def calc_stats(predictions, ground_truth, grouped=False, threshold=0.5, class_na
                 _print_metrics(f"Stats for group {label}:", stats)
 
     overall = _binary_metrics(ground_truth > 0, predictions > threshold, scores=predictions)
+
+    # Calibration uses the continuous scores (not the thresholded labels).
+    ece, mce, bins = expected_calibration_error(
+        predictions, ground_truth > 0, n_bins=calibration_bins)
+    overall["ece"] = ece
+    overall["mce"] = mce
+
     _print_metrics("Overall Stats:", overall)
+    print("Reliability (predicted probability vs empirical frequency):")
+    print(reliability_table_str(bins))
+    if reliability_plot is not None:
+        plot_reliability_diagram(bins, ece, mce, reliability_plot)
+
     return overall
 
 

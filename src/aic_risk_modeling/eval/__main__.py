@@ -30,6 +30,20 @@ def parse_args():
         help="Threshold for converting predictions to binary.",
         default=0.5,
     )
+    parser.add_argument(
+        "--reliability-plot",
+        type=str,
+        required=False,
+        default=None,
+        help="If provided, path to write a reliability-diagram PNG (binary only).",
+    )
+    parser.add_argument(
+        "--calibration-bins",
+        type=int,
+        required=False,
+        default=15,
+        help="Number of equal-width probability bins for ECE / reliability.",
+    )
     return parser.parse_args()
 
 def main():
@@ -37,7 +51,9 @@ def main():
     args = parse_args()
     predictions, ground_truth = load_preprocess_inputs(args.predictions, args.ground_truth)
     # Calculate stats
-    calc_stats(predictions, ground_truth, grouped=args.grouped, threshold=args.threshold)
+    calc_stats(predictions, ground_truth, grouped=args.grouped, threshold=args.threshold,
+               reliability_plot=args.reliability_plot,
+               calibration_bins=args.calibration_bins)
 
 if __name__ == "__main__":
     main()
