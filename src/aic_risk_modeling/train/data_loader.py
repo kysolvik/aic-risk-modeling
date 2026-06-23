@@ -181,6 +181,7 @@ def dataset_from_dir(
     feature_spec: Optional[Dict[str, tf.io.FixedLenFeature] | None] = None,
     batch_size: int = 8,
     shuffle: bool = False,
+    rename_dict=None,
     cache: Optional[str | bool] = False,
     compression: Optional[str] = "GZIP",
     shuffle_buffer: int = 512,
@@ -242,6 +243,11 @@ def dataset_from_dir(
 
     ds = ds.map(parse_fn, num_parallel_calls=tf.data.AUTOTUNE)
 
+    if rename_dict is not None:
+        @tf.autograph.experimental.do_not_convert
+        def _rename_features(example):
+            return {rename_dict.get(k, k): v for k, v in example.items()}
+        ds = ds.map(_rename_features, num_parallel_calls=tf.data.AUTOTUNE)
     if isinstance(cache, str):
         ds = ds.cache(cache)
     elif cache is True:
@@ -366,7 +372,6 @@ def select_bands_transform(
 
     return dataset.map(select_fn, num_parallel_calls=tf.data.AUTOTUNE)
 
-
 def _merged_zipped_ds(*zipped_ds):
     # Merge all input dicts
     merged_inputs = {}
@@ -447,7 +452,8 @@ def build_merged_dataset(
         axis='examples', # examples or features
         shuffle=True,
         cache=False,
-        batch_size=4,
+        rename_dict=None,
+        batch_size=4
         seed=None,
         ):
     datasets = []
@@ -457,7 +463,8 @@ def build_merged_dataset(
             tfrecord_pattern=tfrecord_pattern,
             cache=cache,
             batch_size=batch_size,
-            shuffle=False,
+            shuffle=False, # Shuffling will occur with overall dataset
+            rename_dict=rename_dict,
             seed=seed,
         )
         datasets.append(ds)
