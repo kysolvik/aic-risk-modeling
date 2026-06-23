@@ -29,37 +29,62 @@ import numpy as np
 _PROB_EPS = 1e-6
 
 
-def reliability_bins(scores, labels, n_bins=15):
+def _bin_edges(scores, n_bins, strategy):
+    """Bin edges over [0, 1] for ECE binning.
+
+    ``uniform`` returns ``n_bins`` equal-width bins. ``quantile`` returns bins
+    with roughly equal *count* by placing edges at score quantiles, so the
+    sparse high-probability region gets real weight instead of being swallowed
+    by one giant near-zero bin (the usual failure of equal-width ECE under heavy
+    class imbalance). Tied quantiles are de-duplicated, which can yield fewer
+    than ``n_bins`` bins; the [0, 1] endpoints are always included.
+    """
+    if strategy == 'uniform':
+        return np.linspace(0.0, 1.0, n_bins + 1)
+    if strategy == 'quantile':
+        edges = np.quantile(scores, np.linspace(0.0, 1.0, n_bins + 1))
+        edges[0], edges[-1] = 0.0, 1.0
+        edges = np.unique(edges)  # drop degenerate (tied) edges
+        if edges.size < 2:
+            edges = np.array([0.0, 1.0])
+        return edges
+    raise ValueError(f"unknown binning strategy {strategy!r} (use 'uniform' or 'quantile')")
+
+
+def reliability_bins(scores, labels, n_bins=15, strategy='uniform'):
     """Bin predictions by predicted probability for a reliability diagram.
 
     Args:
         scores: predicted probabilities in [0, 1], any shape (flattened here).
         labels: ground-truth labels (0/1 or bool), same shape as ``scores``.
-        n_bins: number of equal-width bins over [0, 1].
+        n_bins: number of bins.
+        strategy: ``'uniform'`` (equal-width) or ``'quantile'`` (equal-count).
 
     Returns:
-        dict of per-bin numpy arrays (length ``n_bins``): ``bin_lo``/``bin_hi``
-        (bin edges), ``conf`` (mean predicted probability in the bin, NaN if
-        empty), ``freq`` (empirical positive rate in the bin, NaN if empty), and
-        ``count`` (number of pixels in the bin).
+        dict of per-bin numpy arrays: ``bin_lo``/``bin_hi`` (bin edges), ``conf``
+        (mean predicted probability in the bin, NaN if empty), ``freq``
+        (empirical positive rate in the bin, NaN if empty), and ``count`` (number
+        of pixels in the bin). Length is ``n_bins`` for uniform, possibly fewer
+        for quantile when score ties collapse edges.
     """
     scores = np.clip(np.asarray(scores).reshape(-1).astype(np.float64), 0.0, 1.0)
     labels = np.asarray(labels).reshape(-1).astype(np.float64)
 
-    # Bin index in [0, n_bins-1]; the right edge (score == 1.0) lands in the last bin.
-    bin_idx = np.minimum((scores * n_bins).astype(int), n_bins - 1)
+    edges = _bin_edges(scores, n_bins, strategy)
+    nb = edges.size - 1
+    # Bin index in [0, nb-1]; the right edge (score == 1.0) lands in the last bin.
+    bin_idx = np.clip(np.searchsorted(edges, scores, side='right') - 1, 0, nb - 1)
 
-    count = np.bincount(bin_idx, minlength=n_bins).astype(np.float64)
-    score_sum = np.bincount(bin_idx, weights=scores, minlength=n_bins)
-    pos_sum = np.bincount(bin_idx, weights=labels, minlength=n_bins)
+    count = np.bincount(bin_idx, minlength=nb).astype(np.float64)
+    score_sum = np.bincount(bin_idx, weights=scores, minlength=nb)
+    pos_sum = np.bincount(bin_idx, weights=labels, minlength=nb)
 
     nonempty = count > 0
-    conf = np.full(n_bins, np.nan)
-    freq = np.full(n_bins, np.nan)
+    conf = np.full(nb, np.nan)
+    freq = np.full(nb, np.nan)
     conf[nonempty] = score_sum[nonempty] / count[nonempty]
     freq[nonempty] = pos_sum[nonempty] / count[nonempty]
 
-    edges = np.linspace(0.0, 1.0, n_bins + 1)
     return {
         'bin_lo': edges[:-1],
         'bin_hi': edges[1:],
@@ -69,7 +94,7 @@ def reliability_bins(scores, labels, n_bins=15):
     }
 
 
-def expected_calibration_error(scores, labels, n_bins=15):
+def expected_calibration_error(scores, labels, n_bins=15, strategy='uniform'):
     """Expected and maximum calibration error for binary predictions.
 
     Returns:
@@ -77,7 +102,7 @@ def expected_calibration_error(scores, labels, n_bins=15):
         |confidence - frequency| over non-empty bins, ``mce`` is the maximum
         over non-empty bins, and ``bins`` is the ``reliability_bins`` dict.
     """
-    bins = reliability_bins(scores, labels, n_bins=n_bins)
+    bins = reliability_bins(scores, labels, n_bins=n_bins, strategy=strategy)
     count = bins['count']
     total = count.sum()
     nonempty = count > 0
@@ -129,7 +154,7 @@ def fit_temperature(scores, labels, eps=_PROB_EPS, bounds=(1e-2, 1e2)):
     computed directly from logits via softplus for numerical stability.
 
     Fit T on a held-out calibration split and apply it to the test set; fitting
-    and reporting on the same set is optimistic. Returns the fitted temperature
+    and reporting on the same set (in-sample). Returns the fitted temperature
     as a float (1.0 if there are no usable samples).
     """
     from scipy.optimize import minimize_scalar
@@ -146,6 +171,91 @@ def fit_temperature(scores, labels, eps=_PROB_EPS, bounds=(1e-2, 1e2)):
 
     result = minimize_scalar(nll, bounds=bounds, method="bounded")
     return float(result.x)
+
+
+def _sigmoid_stable(s):
+    """Numerically stable elementwise sigmoid."""
+    return np.where(s >= 0, 1.0 / (1.0 + np.exp(-s)), np.exp(s) / (1.0 + np.exp(s)))
+
+
+def fit_platt(scores, labels, eps=_PROB_EPS):
+    """Fit Platt (logistic) scaling on saved sigmoid probabilities.
+
+    Recovers logits ``z`` from ``scores`` and fits ``sigmoid(a*z + b)`` by
+    logistic regression of ``labels`` on ``z`` (effectively unregularized). The
+    intercept ``b`` is what temperature scaling lacks: it shifts the whole
+    reliability curve, correcting a systematic bias/base-rate offset that a
+    single temperature (which pins the p=0.5 crossing) cannot. Temperature
+    scaling is the ``a = 1/T, b = 0`` special case.
+
+    Returns ``(a, b)``. Fit on a held-out calibration split.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    z = _probs_to_logits(scores, eps=eps).reshape(-1, 1)
+    y = np.asarray(labels).reshape(-1).astype(int)
+    # C large => negligible regularization, i.e. plain logistic calibration.
+    lr = LogisticRegression(C=1e6, solver="lbfgs", max_iter=1000)
+    lr.fit(z, y)
+    return float(lr.coef_[0, 0]), float(lr.intercept_[0])
+
+
+def apply_platt(scores, a, b, eps=_PROB_EPS):
+    """Apply Platt scaling: ``sigmoid(a * logit(scores) + b)``."""
+    s = a * _probs_to_logits(scores, eps=eps) + b
+    return _sigmoid_stable(s).reshape(np.shape(scores))
+
+
+def fit_isotonic(scores, labels):
+    """Fit isotonic regression mapping scores -> calibrated probabilities.
+
+    Non-parametric and monotonic: it can bend the reliability curve onto the
+    diagonal at *any* probability level (unlike the single global squash of
+    temperature scaling), so it handles arbitrary monotonic miscalibration. With
+    pixel-scale data there are plenty of samples to fit it; the main risk is
+    overfitting the sparse high-probability tail, so fit it on a held-out split.
+
+    Returns a fitted ``sklearn.isotonic.IsotonicRegression``.
+    """
+    from sklearn.isotonic import IsotonicRegression
+
+    iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+    iso.fit(np.asarray(scores).reshape(-1).astype(np.float64),
+            np.asarray(labels).reshape(-1).astype(np.float64))
+    return iso
+
+
+def apply_isotonic(scores, iso):
+    """Apply a fitted isotonic calibrator, preserving ``scores`` shape."""
+    out = iso.predict(np.asarray(scores).reshape(-1).astype(np.float64))
+    return out.reshape(np.shape(scores))
+
+
+def fit_calibrator(method, scores, labels):
+    """Fit a post-hoc calibrator and return ``(transform_fn, info_str)``.
+
+    ``transform_fn`` maps a probability array to calibrated probabilities;
+    ``info_str`` summarizes the fitted parameters for logging. ``method`` is one
+    of ``'temperature'``, ``'platt'``, ``'isotonic'``.
+
+    Temperature scaling is monotonic *and* fixes the p=0.5 crossing, so it leaves
+    threshold-0.5 hard metrics unchanged; Platt and isotonic are monotonic (so PR
+    AUC is preserved) but can move the 0.5 operating point, so hard-label metrics
+    may shift.
+    """
+    method = method.lower()
+    if method == 'temperature':
+        t = fit_temperature(scores, labels)
+        return (lambda s: apply_temperature(s, t)), f"temperature (T={t:.4f})"
+    if method == 'platt':
+        a, b = fit_platt(scores, labels)
+        return (lambda s: apply_platt(s, a, b)), f"platt (a={a:.4f}, b={b:.4f})"
+    if method == 'isotonic':
+        iso = fit_isotonic(scores, labels)
+        return (lambda s: apply_isotonic(s, iso)), "isotonic (non-parametric)"
+    raise ValueError(
+        f"unknown calibration method {method!r} "
+        "(use 'temperature', 'platt', or 'isotonic')")
 
 
 def reliability_table_str(bins):
