@@ -11,6 +11,14 @@ of integer class labels.
 import numpy as np
 from sklearn import metrics
 
+from .calibration import (
+    apply_temperature,
+    expected_calibration_error,
+    fit_calibrator,
+    plot_reliability_diagram,
+    reliability_table_str,
+)
+
 
 def _print_metrics(title, stats):
     """Pretty-print a one-vs-rest metrics dict (as returned by _binary_metrics)."""
@@ -21,6 +29,9 @@ def _print_metrics(title, stats):
     print(f"  F1 Score: {stats['f1']:.4f}")
     print(f"  Cohen's Kappa: {stats['kappa']:.4f}")
     print(f"  PR AUC: {stats['pr_auc']:.4f}")
+    if stats.get('ece') is not None:
+        print(f"  ECE: {stats['ece']:.4f}")
+        print(f"  MCE: {stats['mce']:.4f}")
     print(f"  N (truth): {stats['n_truth']}")
     print(f"  N (pred): {stats['n_pred']}")
 
@@ -105,18 +116,68 @@ def calc_stats_multiclass(predictions, ground_truth, class_names=None):
     return {"overall": overall, "per_class": per_class}
 
 
-def calc_stats(predictions, ground_truth, grouped=False, threshold=0.5, class_names=None):
+def calc_stats(predictions, ground_truth, grouped=False, threshold=0.5,
+               class_names=None, reliability_plot=None, calibration_bins=15,
+               calibration_binning='uniform', calibration_method='none',
+               calibration_fit=None, temperature=None):
     """Calculate stats for predictions vs ground truth.
 
     Dispatches to per-class multiclass stats when ``predictions`` is a
     multi-band (band-first) array; otherwise computes binary stats by
-    thresholding the single-band scores.
+    thresholding the single-band scores. For binary predictions, also reports
+    calibration: Expected/Maximum Calibration Error plus a reliability table,
+    and writes a reliability-diagram PNG to ``reliability_plot`` when given.
+
+    ``calibration_binning`` selects ``'uniform'`` (equal-width) or ``'quantile'``
+    (equal-count) ECE bins; quantile binning keeps the sparse high-probability
+    region from being swamped by the near-zero mass under heavy class imbalance.
+
+    Post-hoc calibration (binary only): ``calibration_method`` is one of
+    ``'none'``/``'temperature'``/``'platt'``/``'isotonic'``. The calibrator is fit
+    on ``calibration_fit`` (a ``(scores, ground_truth)`` held-out pair, an
+    out-of-sample fit) if given, else in-sample on this set. ``temperature=T``
+    applies a known scalar directly without fitting (overrides
+    ``calibration_method``). When a calibrator is applied, the pre-calibration
+    ECE/MCE are also printed.
+
+    Returns ``(stats, calibrated)``: ``stats`` is the metrics dict, and
+    ``calibrated`` is the calibrated prediction array (same shape as
+    ``predictions``) when a calibrator was applied, else ``None``.
     """
     predictions = np.asarray(predictions)
     ground_truth = np.asarray(ground_truth)
 
     if _is_multiclass(predictions):
-        return calc_stats_multiclass(predictions, ground_truth, class_names=class_names)
+        if calibration_method != 'none' or temperature is not None:
+            print("Warning: post-hoc calibration is binary-only; ignoring for multiclass.")
+        return calc_stats_multiclass(predictions, ground_truth, class_names=class_names), None
+
+    labels = ground_truth > 0
+
+    # Post-hoc calibration. Fitting and reporting on the same set (in-sample);
+    # pass calibration_fit (a held-out split) for an out-of-sample estimate.
+    transform = None
+    cal_info = None
+    if temperature is not None and temperature != 1.0:
+        transform = lambda s: apply_temperature(s, temperature)  # noqa: E731
+        cal_info = f"temperature (T={temperature:.4f}, supplied)"
+    elif calibration_method != 'none':
+        if calibration_fit is not None:
+            fit_scores, fit_gt = calibration_fit
+            fit_scores, fit_labels = np.asarray(fit_scores), np.asarray(fit_gt) > 0
+            fit_src = "held-out calibration set"
+        else:
+            fit_scores, fit_labels = predictions, labels
+            fit_src = "this set (in-sample)"
+        transform, cal_info = fit_calibrator(calibration_method, fit_scores, fit_labels)
+        cal_info += f", fit on {fit_src}"
+
+    if transform is not None:
+        ece_raw, mce_raw, _ = expected_calibration_error(
+            predictions, labels, n_bins=calibration_bins, strategy=calibration_binning)
+        predictions = transform(predictions)
+        print(f"Applied post-hoc calibration: {cal_info}")
+        print(f"  pre-calibration:  ECE={ece_raw:.4f}  MCE={mce_raw:.4f}")
 
     if grouped:
         unique_labels = np.unique(ground_truth)
@@ -126,9 +187,24 @@ def calc_stats(predictions, ground_truth, grouped=False, threshold=0.5, class_na
                 stats = _binary_metrics(label_mask, predictions > threshold, scores=predictions)
                 _print_metrics(f"Stats for group {label}:", stats)
 
-    overall = _binary_metrics(ground_truth > 0, predictions > threshold, scores=predictions)
+    overall = _binary_metrics(labels, predictions > threshold, scores=predictions)
+
+    # Calibration uses the continuous scores (not the thresholded labels).
+    ece, mce, bins = expected_calibration_error(
+        predictions, labels, n_bins=calibration_bins, strategy=calibration_binning)
+    overall["ece"] = ece
+    overall["mce"] = mce
+    if cal_info is not None:
+        overall["calibration"] = cal_info
+
     _print_metrics("Overall Stats:", overall)
-    return overall
+    print(f"Reliability ({calibration_binning} bins, predicted probability vs "
+          f"empirical frequency):")
+    print(reliability_table_str(bins))
+    if reliability_plot is not None:
+        plot_reliability_diagram(bins, ece, mce, reliability_plot)
+
+    return overall, (predictions if transform is not None else None)
 
 
 def load_preprocess_inputs(predictions_path, ground_truth_path):
@@ -154,3 +230,33 @@ def load_preprocess_inputs(predictions_path, ground_truth_path):
             predictions = predictions[0]  # binary: squeeze to (H, W)
         ground_truth = rio.open(ground_truth_path).read(1)
     return predictions, ground_truth
+
+
+def write_calibrated_predictions(predictions_path, output_path, calibrated):
+    """Write calibrated predictions back out, mirroring the input format.
+
+    For a CSV input, copies the source frame and overwrites the ``pred`` column
+    with the calibrated probabilities (other columns preserved). For a GeoTIFF
+    input, copies the source raster's profile (georeferencing, compression) and
+    writes the calibrated scores as a single float32 band. ``calibrated`` is the
+    array returned by ``calc_stats`` and must match what ``load_preprocess_inputs``
+    read for ``predictions_path`` (binary only).
+    """
+    calibrated = np.asarray(calibrated)
+    if predictions_path.endswith('.csv'):
+        import pandas as pd
+        df = pd.read_csv(predictions_path)
+        if len(df) != calibrated.size:
+            raise ValueError(
+                f"calibrated length {calibrated.size} does not match "
+                f"{len(df)} rows in {predictions_path}")
+        df['pred'] = calibrated.reshape(-1)
+        df.to_csv(output_path, index=False)
+    else:
+        import rasterio as rio
+        with rio.open(predictions_path) as src:
+            profile = src.profile
+        profile.update(count=1, dtype=rio.float32)
+        with rio.open(output_path, 'w', **profile) as dst:
+            dst.write(calibrated.astype('float32'), 1)
+    print(f"Wrote calibrated predictions to {output_path}")
