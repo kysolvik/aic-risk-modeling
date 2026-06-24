@@ -171,11 +171,20 @@ def load_model(model_path, map_location='cpu'):
 
 
 def _torch_batches(dataset, device):
-    """Yield (inputs, labels) from a tf.data dataset as torch tensors."""
-    for inputs, labels in dataset.as_numpy_iterator():
+    """Yield (inputs, labels, sample_weight) from a tf.data dataset as torch tensors.
+
+    sample_weight is None when the dataset yields plain (inputs, labels)
+    2-tuples (i.e. no per-pixel weighting configured)."""
+    for batch in dataset.as_numpy_iterator():
+        if len(batch) == 3:
+            inputs, labels, weights = batch
+            weights = torch.as_tensor(weights).float().to(device)
+        else:
+            inputs, labels = batch
+            weights = None
         inputs = {k: torch.as_tensor(v).to(device) for k, v in inputs.items()}
         labels = torch.as_tensor(labels).float().to(device)
-        yield inputs, labels
+        yield inputs, labels, weights
 
 
 def _cosine_warmup_schedule(optimizer, warmup_steps, decay_steps):
@@ -202,12 +211,12 @@ def _run_epoch(model, dataset, loss_function, device, metrics,
     amp_dtype = torch.float16 if amp_enabled else torch.bfloat16
 
     with torch.set_grad_enabled(training):
-        for inputs, labels in _torch_batches(dataset, device):
+        for inputs, labels, weights in _torch_batches(dataset, device):
             with torch.autocast(device_type=device.type, dtype=amp_dtype,
                                 enabled=amp_enabled):
                 preds = model(inputs)
             # preds are float32 (the fusion head opts out of autocast)
-            loss = loss_function(labels, preds)
+            loss = loss_function(labels, preds, weights)
 
             if training:
                 optimizer.zero_grad(set_to_none=True)
@@ -236,11 +245,15 @@ def run(config):
     # num_classes == 1 is binary segmentation; >1 is multi-class (the output
     # feature is left as raw integer class labels, e.g. viirs_type 0-4).
     num_classes = config.get('num_classes') or 1
+    # Positive-class weight for the binary weighted losses; also the default
+    # weight for fire pixels of types not explicitly listed in 'sample_weight'.
+    pos_weight = config.get('pos_weight', 9.0)
 
     # Get loss function
     loss_function = losses.get_loss(config['loss_function'],
                                     num_classes=num_classes,
-                                    class_weights=config.get('class_weights'))
+                                    class_weights=config.get('class_weights'),
+                                    pos_weight=pos_weight)
 
     # Get datasets
     training_ds = data_loader.build_merged_dataset(
@@ -271,16 +284,22 @@ def run(config):
     training_ds = training_ds.map(norm_func, num_parallel_calls=tf.data.AUTOTUNE)
     validation_ds = validation_ds.map(norm_func, num_parallel_calls=tf.data.AUTOTUNE)
 
-    # Select bands
+    # Select bands. An optional 'sample_weight' config block adds a per-pixel
+    # loss weight map (e.g. up-weighting fire types 3/4) to train and val.
+    sample_weight_config = config.get('sample_weight')
     training_ds = data_loader.select_bands_transform(
         training_ds,
         input_feature_config=config['input_features'],
         output_feature_config=config['output_features'],
+        sample_weight_config=sample_weight_config,
+        pos_weight=pos_weight,
     )
     validation_ds = data_loader.select_bands_transform(
         validation_ds,
         input_feature_config=config['input_features'],
         output_feature_config=config['output_features'],
+        sample_weight_config=sample_weight_config,
+        pos_weight=pos_weight,
     )
 
     # Get branch models

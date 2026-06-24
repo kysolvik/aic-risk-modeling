@@ -316,15 +316,49 @@ def _single_feature_group_prep(
 
     return all_inputs
 
+def build_type_weight_map(raw_type, type_weights, pos_weight):
+    """Per-pixel loss weight map derived from a raw fire-type band.
+
+    Background (type 0) gets weight 1.0; fire pixels (type > 0) default to
+    ``pos_weight``; any type listed in ``type_weights`` overrides with its
+    absolute weight. This lets specific fire types be up-weighted in the loss
+    while the model stays binary fire/no-fire.
+
+    Args:
+        raw_type: integer tensor of raw fire-type values (e.g. im_viirs_type,
+            values 0-4).
+        type_weights: dict mapping fire-type value (int or str) to absolute
+            per-pixel weight.
+        pos_weight: weight applied to fire pixels whose type is not listed in
+            ``type_weights``.
+
+    Returns:
+        A float32 tensor of per-pixel weights, same shape as ``raw_type``.
+    """
+    raw_type = tf.cast(raw_type, tf.int32)
+    weight = tf.ones_like(raw_type, dtype=tf.float32)
+    weight = tf.where(raw_type > 0,
+                      tf.cast(pos_weight, tf.float32),
+                      weight)
+    for type_value, type_weight in type_weights.items():
+        weight = tf.where(tf.equal(raw_type, int(type_value)),
+                          tf.cast(type_weight, tf.float32),
+                          weight)
+    return weight
+
 def _to_tuple_transform(
     example: Dict,
     input_feature_config: dict,
-    output_feature_config: dict
+    output_feature_config: dict,
+    sample_weight_config: Optional[dict] = None,
+    pos_weight: float = 9.0,
 ):
-    """Transform a parsed example into (inputs, outputs) tuple.
+    """Transform a parsed example into an (inputs, outputs[, sample_weight]) tuple.
 
     Returns:
-        Tuple of (inputs_dict, outputs_dict or outputs_tensor)
+        Tuple of (inputs_dict, outputs_dict or outputs_tensor), or
+        (inputs_dict, outputs, sample_weight_tensor) when sample_weight_config
+        is provided.
     """
 
     # Input features first
@@ -348,12 +382,24 @@ def _to_tuple_transform(
             example,
             output_feature_config
         )
-    return inputs, outputs
+
+    if sample_weight_config is None:
+        return inputs, outputs
+
+    # Build a per-pixel loss weight map from the raw (untransformed) fire-type
+    # band. The original `example` still holds raw values because the output
+    # prep applies its binarizing transform to a copy (see apply_transforms).
+    feature_name = sample_weight_config.get('feature_name', 'im_viirs_type')
+    type_weights = sample_weight_config.get('type_weights', {})
+    weights = build_type_weight_map(example[feature_name], type_weights, pos_weight)
+    return inputs, outputs, weights
 
 def select_bands_transform(
     dataset: tf.data.Dataset,
     input_feature_config: dict,
-    output_feature_config: dict
+    output_feature_config: dict,
+    sample_weight_config: Optional[dict] = None,
+    pos_weight: float = 9.0,
 ) -> tf.data.Dataset:
     """Select input and output bands from a dataset of feature dicts, with optional transforms.
 
@@ -363,12 +409,20 @@ def select_bands_transform(
         dataset: A dataset yielding feature dicts (e.g., from dataset_from_dir or merge_datasets)
         input_feature_config:
         output_feature_config:
+        sample_weight_config: optional dict with 'feature_name' (default
+            'im_viirs_type') and 'type_weights' (a {type: weight} mapping). When
+            given, the dataset additionally yields a per-pixel loss weight map.
+        pos_weight: positive-class weight used for fire pixels whose type is not
+            listed in sample_weight_config['type_weights'].
     Returns:
-        A dataset yielding (inputs_dict, outputs_dict/tensor) tuples
+        A dataset yielding (inputs_dict, outputs_dict/tensor) tuples, or
+        (inputs_dict, outputs, sample_weight) 3-tuples when sample_weight_config
+        is provided.
     """
     def select_fn(example):
-        inputs, labels = _to_tuple_transform(example, input_feature_config, output_feature_config)
-        return inputs, labels
+        return _to_tuple_transform(
+            example, input_feature_config, output_feature_config,
+            sample_weight_config=sample_weight_config, pos_weight=pos_weight)
 
     return dataset.map(select_fn, num_parallel_calls=tf.data.AUTOTUNE)
 
