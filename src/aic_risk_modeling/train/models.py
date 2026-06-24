@@ -423,6 +423,70 @@ class IdentityModel(nn.Module):
         return x
 
 
+class _ScaleGain(nn.Module):
+    """Per-source learnable scalar gain (magnitude rescale, distribution kept)."""
+
+    def __init__(self):
+        super().__init__()
+        self.gain = nn.Parameter(torch.ones(()))
+
+    def forward(self, x):
+        return x * self.gain
+
+
+class BranchNorm(nn.Module):
+    """Per-source normalization applied before a fusion concat.
+
+    Stops one loud or wide branch from dominating the concat and drowning out a
+    quieter branch (measure the imbalance with ``scripts/probe_branch_scales.py``).
+    Operates on a list of channels-first ``(B, C, H, W)`` source tensors, in the
+    order they enter the concat, and returns the normalized list.
+
+    Modes:
+      - ``None`` (default): disabled. ``forward`` returns the list unchanged and
+        the module holds no parameters, so existing checkpoints are unaffected.
+      - ``"groupnorm"``: per-source ``GroupNorm(1, C)`` + affine (per-sample
+        LayerNorm over ``(C, H, W)``). Robust to any channel count and to the
+        spatially-constant broadcast branches (16-ch -> nonzero cross-channel
+        variance). CAVEAT: GroupNorm over the spatial dims zeroes a
+        spatially-constant *single-channel* source (variance 0), so any source
+        with ``C == 1`` auto-falls back to a scale gain instead.
+      - ``"scale"``: per-source learnable scalar gain (``x * g``, ``g`` init 1.0).
+        Fixes only loudness and preserves each branch's distribution, so it is
+        safe for the raw-standardized identity branch.
+
+    ``exclude`` is a set of source labels (branch ``input_name``s, plus the
+    reserved ``"<transformer>"`` for MTSViT's upsampled features) that pass
+    through untouched -- for branches whose absolute level is a real predictor.
+    """
+
+    def __init__(self, channels, labels, mode=None, exclude=None):
+        super().__init__()
+        self.mode = mode
+        if mode is None:
+            self.norms = None
+            return
+        exclude = set(exclude or ())
+        norms = []
+        for c, label in zip(channels, labels):
+            if label in exclude:
+                norms.append(nn.Identity())
+            elif mode == "scale" or (mode == "groupnorm" and c == 1):
+                norms.append(_ScaleGain())
+            elif mode == "groupnorm":
+                norms.append(nn.GroupNorm(1, c))
+            else:
+                raise ValueError(
+                    f"unknown branch_norm mode {mode!r} "
+                    "(use 'groupnorm', 'scale', or null)")
+        self.norms = nn.ModuleList(norms)
+
+    def forward(self, feats):
+        if self.norms is None:
+            return feats
+        return [norm(f) for norm, f in zip(self.norms, feats)]
+
+
 class FusionDecoder(nn.Module):
     """Runs each branch on its named input, concatenates the channels-last
     outputs, and applies a conv head.
@@ -432,10 +496,15 @@ class FusionDecoder(nn.Module):
     probabilities.
     """
 
-    def __init__(self, branch_models, num_classes=1):
+    def __init__(self, branch_models, num_classes=1, branch_norm=None,
+                 branch_norm_exclude=None):
         super().__init__()
         self.num_classes = num_classes
         self.branches = nn.ModuleList(branch_models)
+        self.branch_norm = BranchNorm(
+            [m.out_channels for m in branch_models],
+            [m.input_name for m in branch_models],
+            mode=branch_norm, exclude=branch_norm_exclude)
         in_channels = sum(m.out_channels for m in branch_models)
         self.conv1 = nn.Conv2d(in_channels, 128, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(128)
@@ -447,8 +516,11 @@ class FusionDecoder(nn.Module):
         self.out_conv = nn.Conv2d(16, num_classes, 1)
 
     def forward(self, inputs):
-        feats = [branch(inputs[branch.input_name]) for branch in self.branches]
-        x = torch.cat(feats, dim=-1).permute(0, 3, 1, 2)
+        # Channels-first per branch, normalize, then concat (equivalent to the
+        # channels-last concat + permute when branch_norm is disabled).
+        feats = [branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
+                 for branch in self.branches]
+        x = torch.cat(self.branch_norm(feats), dim=1)
         x = self.bn1(F.relu(self.conv1(x)))
         x = self.bn2(F.relu(self.conv2(x)))
         x = self.bn3(F.relu(self.conv3(x)))
@@ -510,7 +582,8 @@ class FiLMFusion(nn.Module):
     """
 
     def __init__(self, branch_models, num_classes=1, cond_dim=128,
-                 location_input=None, num_freqs=16, sigma=1.0):
+                 location_input=None, num_freqs=16, sigma=1.0,
+                 branch_norm=None, branch_norm_exclude=None):
         super().__init__()
         self.num_classes = num_classes
         self.location_input = location_input
@@ -538,6 +611,10 @@ class FiLMFusion(nn.Module):
             raise ValueError("decoder_film needs at least one spatial branch")
         self.spatial_branches = nn.ModuleList(spatial_branches)
         self.context_names = [b.input_name for b in context_branches]
+        self.branch_norm = BranchNorm(
+            [b.out_channels for b in spatial_branches],
+            [b.input_name for b in spatial_branches],
+            mode=branch_norm, exclude=branch_norm_exclude)
 
         # Climate encoder: flatten each (T, F) index series and project.
         cond_in = sum(s[0] * s[1] for s in
@@ -589,9 +666,9 @@ class FiLMFusion(nn.Module):
 
     def forward(self, inputs):
         cond = self._condition(inputs)
-        feats = [branch(inputs[branch.input_name])
+        feats = [branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
                  for branch in self.spatial_branches]
-        x = torch.cat(feats, dim=-1).permute(0, 3, 1, 2)
+        x = torch.cat(self.branch_norm(feats), dim=1)
         x = F.relu(self.film1(self.bn1(self.conv1(x)), cond))
         x = F.relu(self.film2(self.bn2(self.conv2(x)), cond))
         x = F.relu(self.film3(self.bn3(self.conv3(x)), cond))
@@ -692,7 +769,8 @@ class MTSViTFusion(nn.Module):
 
     def __init__(self, branch_models, num_classes=1, embed_dim=128,
                  patch_size=8, temporal_depth=2, spatial_depth=2, num_heads=4,
-                 mlp_ratio=2, dropout=0.1, spatial_in_encoder=False):
+                 mlp_ratio=2, dropout=0.1, spatial_in_encoder=False,
+                 branch_norm=None, branch_norm_exclude=None):
         super().__init__()
         self.num_classes = num_classes
         self.embed_dim = embed_dim
@@ -799,7 +877,13 @@ class MTSViTFusion(nn.Module):
             scale //= 2
         self.upsample = nn.Sequential(*upsample)
 
-        # Segmentation head over upsampled tokens + spatial branch features
+        # Segmentation head over upsampled tokens + spatial branch features.
+        # The concat order is [upsampled transformer features] + spatial branches;
+        # branch_norm matches that order (label "<transformer>" for the former).
+        self.branch_norm = BranchNorm(
+            [in_ch] + [b.out_channels for b in spatial_branches],
+            ["<transformer>"] + [b.input_name for b in spatial_branches],
+            mode=branch_norm, exclude=branch_norm_exclude)
         head_in = in_ch + sum(b.out_channels for b in spatial_branches)
         self.head = nn.Sequential(
             nn.Conv2d(head_in, 128, 3, padding=1), nn.ReLU(), nn.BatchNorm2d(128),
@@ -863,7 +947,7 @@ class MTSViTFusion(nn.Module):
         batch = x.shape[0]
         x = x.permute(0, 2, 1).reshape(batch, self.embed_dim, *self.grid)
         x = self.upsample(x)
-        x = self.head(torch.cat([x] + spatial_feats, dim=1))
+        x = self.head(torch.cat(self.branch_norm([x] + spatial_feats), dim=1))
         # Head output runs in float32 even under autocast
         with torch.autocast(device_type=x.device.type, enabled=False):
             logits = self.out_conv(x.float())
@@ -924,9 +1008,11 @@ def get_identity(input_shape, input_name=None):
     return IdentityModel(input_shape, input_name)
 
 
-def decoder_fusion(branch_models, num_classes=1):
-    """branch_models: list of branch modules (e.g. [lstm_branch, cnn_branch])"""
-    return FusionDecoder(branch_models, num_classes=num_classes)
+def decoder_fusion(branch_models, num_classes=1, **kwargs):
+    """branch_models: list of branch modules (e.g. [lstm_branch, cnn_branch]).
+
+    kwargs come from config['decoder_config'] (e.g. branch_norm)."""
+    return FusionDecoder(branch_models, num_classes=num_classes, **kwargs)
 
 
 def decoder_mtsvit(branch_models, num_classes=1, **kwargs):
