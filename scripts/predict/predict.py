@@ -151,7 +151,7 @@ def main():
     amp_enabled = device.type == 'cuda'
     amp_dtype = torch.float16 if amp_enabled else torch.bfloat16
     with torch.no_grad():
-        for inputs, labels in tqdm(arm.train.trainer._torch_batches(ds, device),
+        for inputs, labels, weights in tqdm(arm.train.trainer._torch_batches(ds, device),
                                    desc='Predicting', unit='batch'):
             with torch.autocast(device_type=device.type, dtype=amp_dtype,
                                 enabled=amp_enabled):

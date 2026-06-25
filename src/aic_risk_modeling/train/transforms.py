@@ -11,6 +11,9 @@ def gt0_bool(tensor):
 def gt2_bool(tensor):
     return tf.cast(tensor > 2, tf.bool)
 
+def gt1_bool(tensor):
+    return tf.cast(tensor > 1, tf.bool)
+
 def eq2(tensor):
     return tf.cast(tensor == 2, tf.float32)
 
@@ -117,6 +120,7 @@ transform_registry = {
     "gt0": gt0,
     "gt0_bool": gt0_bool,
     "gt2_bool": gt2_bool,
+    "gt1_bool": gt1_bool,
     "eq2": eq2,
     "normalize_mcwd": normalize_mcwd,
     "normalize_def": normalize_def,
