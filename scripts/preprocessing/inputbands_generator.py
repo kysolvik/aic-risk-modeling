@@ -9,16 +9,28 @@ Original file is located at
 
 import ee
 ee.Authenticate()
-from aic_risk_modeling.preprocess import download_clim_indices
 ee.Initialize(project='macedo-lab-general-9051')
 
 area = ee.FeatureCollection('projects/ksolvik-misc/assets/Lim_Raisg')
 amazonBounds = area.geometry().simplify(1000) #I had to simplify the area because stratified sampling was failing on the initial complex area
 embeddingsCol = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
+# TODO: Include distance to pasture separate from general human activities
 distancePreCalculee = ee.Image('projects/columbia-research-project/assets/distanceHumanActivities_Amazon_100m_2017-2023')
+# TODO: Include distance to indigenous protected areas specificially
 distancePreCalculee2 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m_v2')
 distancePreCalculee3 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m')
 viirs_burnedYears = ee.Image('projects/columbia-research-project/assets/VIIRS_Target_2019-2024')
+
+def addCWD(era5LandImage):
+    """Calculate CWD from single image"""
+    era5LandImageCWD = (era5LandImage
+        .addBands(
+            (era5LandImage.select('total_precipitation_sum')
+                  .subtract(era5LandImage.select('total_evaporation_sum').multiply(-1))
+             ).rename('cwd')
+        )
+    )
+    return era5LandImageCWD
 
 def create_inputBands(target_year):
     targetYear = ee.Number(target_year)
@@ -34,6 +46,7 @@ def create_inputBands(target_year):
               .mosaic())
 
     # Target VIIRS Hot Spots
+    # TODO: Update with new images once ready. Include prev year of data as an input
     class_band = ee.String('class_').cat(targetYear.format('%d'))
     conf_band = ee.String('conf_').cat(targetYear.format('%d'))
     type_band = ee.String('type_').cat(targetYear.format('%d'))
@@ -43,28 +56,6 @@ def create_inputBands(target_year):
         ['class', 'confidence', 'fire_type']
     )
 
-    # ONI (El Nino pattern)
-    df_oni = download_clim_indices("oni", year_start=2015, year_end=2024)
-    df_oni['year'] = df_oni.index.year
-    df_oni['quarter'] = df_oni.index.quarter
-
-    quarterly_oni = df_oni.groupby(['year', 'quarter'])['metric'].mean().unstack()
-
-    oni_dict_python = {}
-    for annee_idx, row in quarterly_oni.iterrows():
-        oni_dict_python[str(annee_idx)] = [round(val, 1) for val in row.values]
-
-    oniQuarters = ee.Dictionary(oni_dict_python)
-
-    currentOniValues = ee.List(oniQuarters.get(dataYear.format('%d')))
-    prevOniValues = ee.List(oniQuarters.get(prevDataYear.format('%d')))
-
-    oniImageCurrentYear = (ee.Image.constant(currentOniValues)
-        .rename(['ONI_Q1_curr', 'ONI_Q2_curr', 'ONI_Q3_curr', 'ONI_Q4_curr']))
-
-    oniImagePrevYear = (ee.Image.constant(prevOniValues)
-        .rename(['ONI_Q1_prev', 'ONI_Q2_prev', 'ONI_Q3_prev', 'ONI_Q4_prev']))
-
     #Distances
     distanceBandName = ee.String('distance_').cat(dataYear.format('%d'))
     distanceAuxZonesHumaines = distancePreCalculee.select(distanceBandName).rename('DistanceHumanActivities')
@@ -73,31 +64,61 @@ def create_inputBands(target_year):
     distanceAllProtectedAreas = distancePreCalculee3.select('distance_wdpa').rename('DistanceAllProtectedAreas')
 
     # Deforestation
+    # TODO: When we run future predictions, we won't have the latest annual deforestation
+    # One option is to update with the GLAD-L alerts dataset: 
+    # https://glad.umd.edu/dataset/glad-forest-alerts
     hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
-    yearHansen = dataYear.subtract(2000)
+    targetYearHansen = targetYear.subtract(2000)
+    hansenMasked = hansen.mask(
+        hansen.select('lossyear').lte(targetYearHansen)
+        ).select(['treecover2000', 'loss', 'lossyear'])
 
-    recentDeforestation = (hansen.select('lossyear')
-        .gte(yearHansen.subtract(1))
-        .And(hansen.select('lossyear').lte(yearHansen))
-        .unmask(0)
-        .rename('Recent_Deforestation'))
+    # ERA5 climate data
+    startMeteo = ee.Date.fromYMD(prevDataYear, 11, 1)
+    endMeteo = ee.Date.fromYMD(dataYear, 11, 1)
 
-    # Evapotranspiration
-    startMeteo = ee.Date.fromYMD(dataYear, 1, 1)
-    endMeteo = ee.Date.fromYMD(targetYear, 1, 1)
+    # ERA5 Ag - Daily, with temp vars and more
+    era5Ag = (ee.ImageCollection('projects/climate-engine-pro/assets/ce-ag-era5-v2/daily')
+            .filterDate(startMeteo, endMeteo))
+    era5AgSelect = era5Ag.select(
+            ['Precipitation_Flux', 'Temperature_Air_2m_Mean_24h', 'Temperature_Air_2m_Max_24h',
+             'Temperature_Air_2m_Min_24h', 'Vapour_Pressure_Deficit_at_Maximum_Temperature']
+            )
+    months = ee.List.sequence(1, 12)
+    # IMPORTANT: Must already be filtered to a single year
+    era5AgMonthly = ee.ImageCollection.fromImages(
+        months.map(lambda m: 
+                   era5AgSelect.filter(ee.Filter.calendarRange(m, m, 'month'))
+                   .mean()
+        )
+    )
+    era5AgStats = (era5AgMonthly.mean().addBands(
+                   era5AgMonthly.reduce(ee.Reducer.minMax()))
+                   )
 
-    era5Land = (ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY_AGGR') #Replaces terraClimate
-                .filterDate(startMeteo, endMeteo))
+    # ERA5Land products - higher res, includes evaporation
+    era5Land = (ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY_AGGR')
+            .filterDate(startMeteo, endMeteo))
+    era5LandCWD = (era5Land.select(
+        ['total_evaporation_sum', 'total_precipitation_sum']
+        ).map(addCWD)
+        )
+    era5LandStats = (era5LandCWD.mean().addBands(
+                     era5LandCWD.reduce(ee.Reducer.minMax()))
+                     )
 
-    Evapotranspiration = (era5Land.select('total_evaporation_sum')
-                               .sum()
-                               .multiply(-1) #To keep positive values, don't know if useful
-                               .unmask(0)
-                               .rename('Evapotranspiration'))
+    modVI = (ee.ImageCollection('MODIS/061/MOD13A1')
+                .filterDate(startMeteo, endMeteo)
+                .select(['NDVI','EVI']).merge(
+                    (ee.ImageCollection('MODIS/061/MYD13A1')
+                    .filterDate(startMeteo, endMeteo)
+                    .select(['NDVI','EVI'])
+                   ))
+            ).mean()
 
     # World Population
     landscanCol = ee.ImageCollection("projects/sat-io/open-datasets/ORNL/LANDSCAN_GLOBAL")
-    population = (landscanCol.filterDate(ee.Date.fromYMD(dataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
+    population = (landscanCol.filterDate(startMeteo, endMeteo)
                   .select('b1')
                   .mosaic()
                   .unmask(0)
@@ -105,7 +126,7 @@ def create_inputBands(target_year):
 
     # Night Lights
     nightLightsCol = ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG")
-    nightLights = (nightLightsCol.filterDate(ee.Date.fromYMD(dataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
+    nightLights = (nightLightsCol.filterDate(startMeteo, endMeteo)
                    .select('avg_rad')
                    .mean()
                    .unmask(0)
@@ -116,9 +137,15 @@ def create_inputBands(target_year):
     elevation = terrain.select('elevation').rename('Elevation')
     slope = terrain.select('slope').rename('Slope')
 
+    # Accessibility to cities
+    accessToCities =  (ee.Image('projects/malariaatlasproject/assets/accessibility/accessibility_to_cities/2015_v1_0')
+                       .select('accessibility'))
+
+    # TODO: Add VIIRS NRT record for past 5 years based on Suomi NPP (but still keep MODIS):
+    # https://gee-community-catalog.org/projects/firms_vector/
     # Fire memory MODIS (I don't know if it's a good idea to keep MODIS here, I might have to change it to VIIRS Hot Spots too)
     startMemoryDate = ee.Date.fromYMD(targetYear.subtract(5), 1, 1)
-    endMemoryDate = ee.Date.fromYMD(targetYear, 1, 1)
+    endMemoryDate = endMeteo
 
     modisMemoryCol = (ee.ImageCollection('MODIS/061/MCD64A1')
                       .filterDate(startMemoryDate, endMemoryDate)
@@ -132,14 +159,15 @@ def create_inputBands(target_year):
 
     # Fusion
     imageFinale = (inputs.addBands(target)
-        .addBands(oniImagePrevYear)
-        .addBands(oniImageCurrentYear)
         .addBands(distanceStrictProtectedAreas)
         .addBands(distanceSustainableUseProtectedAreas)
         .addBands(distanceAllProtectedAreas)
         .addBands(distanceAuxZonesHumaines)
-        .addBands(Evapotranspiration)
-        .addBands(recentDeforestation)
+        .addBands(era5AgStats)
+        .addBands(era5LandStats)
+        .addBands(modVI)
+        .addBands(accessToCities)
+        .addBands(hansenMasked)
         .addBands(population)
         .addBands(nightLights)
         .addBands(elevation)
