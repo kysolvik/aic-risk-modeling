@@ -68,8 +68,8 @@ def create_inputBands(target_year):
         ).select(['treecover2000', 'loss', 'lossyear'])
 
     # ERA5 climate data
-    startMeteo = ee.Date.fromYMD(dataYear, 1, 1)
-    endMeteo = ee.Date.fromYMD(dataYear, 1, 1)
+    startMeteo = ee.Date.fromYMD(prevDataYear, 11, 1)
+    endMeteo = ee.Date.fromYMD(dataYear, 11, 1)
 
     # ERA5 Ag - Daily, with temp vars and more
     era5Ag = (ee.ImageCollection('projects/climate-engine-pro/assets/ce-ag-era5-v2/daily')
@@ -102,17 +102,17 @@ def create_inputBands(target_year):
                      )
 
     modVI = (ee.ImageCollection('MODIS/061/MOD13A1')
-                .filterDate(ee.Date.fromYMD(dataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
+                .filterDate(startMeteo, endMeteo)
                 .select(['NDVI','EVI']).merge(
                     (ee.ImageCollection('MODIS/061/MYD13A1')
-                    .filterDate(ee.Date.fromYMD(dataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
+                    .filterDate(startMeteo, endMeteo)
                     .select(['NDVI','EVI'])
                    ))
             ).mean()
 
     # World Population
     landscanCol = ee.ImageCollection("projects/sat-io/open-datasets/ORNL/LANDSCAN_GLOBAL")
-    population = (landscanCol.filterDate(ee.Date.fromYMD(dataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
+    population = (landscanCol.filterDate(startMeteo, endMeteo)
                   .select('b1')
                   .mosaic()
                   .unmask(0)
@@ -120,7 +120,7 @@ def create_inputBands(target_year):
 
     # Night Lights
     nightLightsCol = ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG")
-    nightLights = (nightLightsCol.filterDate(ee.Date.fromYMD(dataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
+    nightLights = (nightLightsCol.filterDate(startMeteo, endMeteo)
                    .select('avg_rad')
                    .mean()
                    .unmask(0)
@@ -137,7 +137,7 @@ def create_inputBands(target_year):
 
     # Fire memory MODIS (I don't know if it's a good idea to keep MODIS here, I might have to change it to VIIRS Hot Spots too)
     startMemoryDate = ee.Date.fromYMD(targetYear.subtract(5), 1, 1)
-    endMemoryDate = ee.Date.fromYMD(targetYear, 1, 1)
+    endMemoryDate = endMeteo
 
     modisMemoryCol = (ee.ImageCollection('MODIS/061/MCD64A1')
                       .filterDate(startMemoryDate, endMemoryDate)
