@@ -20,6 +20,17 @@ distancePreCalculee2 = ee.Image('projects/columbia-research-project/assets/dista
 distancePreCalculee3 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m')
 viirs_burnedYears = ee.Image('projects/columbia-research-project/assets/VIIRS_Target_2019-2024')
 
+def addCWD(era5LandImage):
+    """Calculate CWD from single image"""
+    era5LandImageCWD = (era5LandImage
+        .addBands(
+            (era5LandImage.select('total_precipitation_sum')
+                  .subtract(era5LandImage.select('total_evaporation_sum').multiply(-1))
+             ).rename('cwd')
+        )
+    )
+    return era5LandImageCWD
+
 def create_inputBands(target_year):
     targetYear = ee.Number(target_year)
     dataYear = targetYear.subtract(1)
@@ -57,18 +68,40 @@ def create_inputBands(target_year):
         hansen.select('lossyear').lte(targetYearHansen)
         ).select(['treecover2000', 'loss', 'lossyear'])
 
-    # Evapotranspiration
+    # ERA5 climate data
     startMeteo = ee.Date.fromYMD(dataYear, 1, 1)
-    endMeteo = ee.Date.fromYMD(targetYear, 1, 1)
+    endMeteo = ee.Date.fromYMD(dataYear, 1, 1)
 
-    era5Land = (ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY_AGGR') #Replaces terraClimate
-                .filterDate(startMeteo, endMeteo))
+    # ERA5 Ag - Daily, with temp vars and more
+    era5Ag = (ee.ImageCollection('projects/climate-engine-pro/assets/ce-ag-era5-v2/daily')
+            .filterDate(startMeteo, endMeteo))
+    era5AgSelect = era5Ag.select(
+            ['Precipitation_Flux', 'Temperature_Air_2m_Mean_24h', 'Temperature_Air_2m_Max_24h',
+             'Temperature_Air_2m_Min_24h', 'Vapour_Pressure_Deficit_at_Maximum_Temperature']
+            )
+    months = ee.List.sequence(1, 12)
+    # IMPORTANT: Must already be filtered to a single year
+    era5AgMonthly = ee.ImageCollection.fromImages(
+        months.map(lambda m: 
+                   era5AgSelect.filter(ee.Filter.calendarRange(m, m, 'month'))
+                   .mean()
+        )
+    )
+    era5AgStats = (era5AgMonthly.mean().addBands(
+                   era5AgMonthly.reduce(ee.Reducer.minMax()))
+                   )
 
-    Evapotranspiration = (era5Land.select('total_evaporation_sum')
-                               .sum()
-                               .multiply(-1) #To keep positive values, don't know if useful
-                               .unmask(0)
-                               .rename('Evapotranspiration'))
+    # ERA5Land products - higher res, includes evaporation
+    era5Land = (ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY_AGGR')
+            .filterDate(startMeteo, endMeteo))
+    
+    era5LandCWD = (era5Land.select(
+        ['total_evaporation_sum', 'total_precipitation_sum']
+        ).map(addCWD)
+        )
+    era5LandStats = (era5LandCWD.mean().addBands(
+                     era5LandCWD.reduce(ee.Reducer.minMax()))
+                     )
 
     # World Population
     landscanCol = ee.ImageCollection("projects/sat-io/open-datasets/ORNL/LANDSCAN_GLOBAL")
@@ -111,7 +144,8 @@ def create_inputBands(target_year):
         .addBands(distanceSustainableUseProtectedAreas)
         .addBands(distanceAllProtectedAreas)
         .addBands(distanceAuxZonesHumaines)
-        .addBands(Evapotranspiration)
+        .addBands(era5AgStats)
+        .addBands(era5LandStats)
         .addBands(hansenMasked)
         .addBands(population)
         .addBands(nightLights)
