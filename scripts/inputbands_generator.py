@@ -14,7 +14,9 @@ ee.Initialize(project='macedo-lab-general-9051')
 area = ee.FeatureCollection('projects/ksolvik-misc/assets/Lim_Raisg')
 amazonBounds = area.geometry().simplify(1000) #I had to simplify the area because stratified sampling was failing on the initial complex area
 embeddingsCol = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
+# TODO: Include distance to pasture separate from general human activities
 distancePreCalculee = ee.Image('projects/columbia-research-project/assets/distanceHumanActivities_Amazon_100m_2017-2023')
+# TODO: Include distance to indigenous protected areas specificially
 distancePreCalculee2 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m_v2')
 distancePreCalculee3 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m')
 viirs_burnedYears = ee.Image('projects/columbia-research-project/assets/VIIRS_Target_2019-2024')
@@ -44,6 +46,7 @@ def create_inputBands(target_year):
               .mosaic())
 
     # Target VIIRS Hot Spots
+    # TODO: Update with new images once ready. Include prev year of data as an input
     class_band = ee.String('class_').cat(targetYear.format('%d'))
     conf_band = ee.String('conf_').cat(targetYear.format('%d'))
     type_band = ee.String('type_').cat(targetYear.format('%d'))
@@ -61,6 +64,9 @@ def create_inputBands(target_year):
     distanceAllProtectedAreas = distancePreCalculee3.select('distance_wdpa').rename('DistanceAllProtectedAreas')
 
     # Deforestation
+    # TODO: When we run future predictions, we won't have the latest annual deforestation
+    # One option is to update with the GLAD-L alerts dataset: 
+    # https://glad.umd.edu/dataset/glad-forest-alerts
     hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
     targetYearHansen = targetYear.subtract(2000)
     hansenMasked = hansen.mask(
@@ -135,6 +141,8 @@ def create_inputBands(target_year):
     accessToCities =  (ee.Image('projects/malariaatlasproject/assets/accessibility/accessibility_to_cities/2015_v1_0')
                        .select('accessibility'))
 
+    # TODO: Add VIIRS NRT record for past 5 years based on Suomi NPP (but still keep MODIS):
+    # https://gee-community-catalog.org/projects/firms_vector/
     # Fire memory MODIS (I don't know if it's a good idea to keep MODIS here, I might have to change it to VIIRS Hot Spots too)
     startMemoryDate = ee.Date.fromYMD(targetYear.subtract(5), 1, 1)
     endMemoryDate = endMeteo
