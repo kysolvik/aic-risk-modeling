@@ -94,7 +94,6 @@ def create_inputBands(target_year):
     # ERA5Land products - higher res, includes evaporation
     era5Land = (ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY_AGGR')
             .filterDate(startMeteo, endMeteo))
-    
     era5LandCWD = (era5Land.select(
         ['total_evaporation_sum', 'total_precipitation_sum']
         ).map(addCWD)
