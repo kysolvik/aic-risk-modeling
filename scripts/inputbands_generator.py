@@ -52,13 +52,10 @@ def create_inputBands(target_year):
 
     # Deforestation
     hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
-    yearHansen = dataYear.subtract(2000)
-
-    recentDeforestation = (hansen.select('lossyear')
-        .gte(yearHansen.subtract(1))
-        .And(hansen.select('lossyear').lte(yearHansen))
-        .unmask(0)
-        .rename('Recent_Deforestation'))
+    targetYearHansen = targetYear.subtract(2000)
+    hansenMasked = hansen.mask(
+        hansen.select('lossyear').lte(targetYearHansen)
+        ).select(['treecover2000', 'loss', 'lossyear'])
 
     # Evapotranspiration
     startMeteo = ee.Date.fromYMD(dataYear, 1, 1)
@@ -115,7 +112,7 @@ def create_inputBands(target_year):
         .addBands(distanceAllProtectedAreas)
         .addBands(distanceAuxZonesHumaines)
         .addBands(Evapotranspiration)
-        .addBands(recentDeforestation)
+        .addBands(hansenMasked)
         .addBands(population)
         .addBands(nightLights)
         .addBands(elevation)
