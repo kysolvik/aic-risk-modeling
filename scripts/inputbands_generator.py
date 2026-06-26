@@ -101,6 +101,15 @@ def create_inputBands(target_year):
                      era5LandCWD.reduce(ee.Reducer.minMax()))
                      )
 
+    modVI = (ee.ImageCollection('MODIS/061/MOD13A1')
+                .filterDate(ee.Date.fromYMD(dataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
+                .select(['NDVI','EVI']).merge(
+                    (ee.ImageCollection('MODIS/061/MYD13A1')
+                    .filterDate(ee.Date.fromYMD(dataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
+                    .select(['NDVI','EVI'])
+                   ))
+            ).mean()
+
     # World Population
     landscanCol = ee.ImageCollection("projects/sat-io/open-datasets/ORNL/LANDSCAN_GLOBAL")
     population = (landscanCol.filterDate(ee.Date.fromYMD(dataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
@@ -121,6 +130,10 @@ def create_inputBands(target_year):
     terrain = ee.Terrain.products(ee.Image('USGS/SRTMGL1_003'))
     elevation = terrain.select('elevation').rename('Elevation')
     slope = terrain.select('slope').rename('Slope')
+
+    # Accessibility to cities
+    accessToCities =  (ee.Image('projects/malariaatlasproject/assets/accessibility/accessibility_to_cities/2015_v1_0')
+                       .select('accessibility'))
 
     # Fire memory MODIS (I don't know if it's a good idea to keep MODIS here, I might have to change it to VIIRS Hot Spots too)
     startMemoryDate = ee.Date.fromYMD(targetYear.subtract(5), 1, 1)
@@ -144,6 +157,8 @@ def create_inputBands(target_year):
         .addBands(distanceAuxZonesHumaines)
         .addBands(era5AgStats)
         .addBands(era5LandStats)
+        .addBands(modVI)
+        .addBands(accessToCities)
         .addBands(hansenMasked)
         .addBands(population)
         .addBands(nightLights)
