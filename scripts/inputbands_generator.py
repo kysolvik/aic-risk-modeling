@@ -43,28 +43,6 @@ def create_inputBands(target_year):
         ['class', 'confidence', 'fire_type']
     )
 
-    # ONI (El Nino pattern)
-    df_oni = download_clim_indices("oni", year_start=2015, year_end=2024)
-    df_oni['year'] = df_oni.index.year
-    df_oni['quarter'] = df_oni.index.quarter
-
-    quarterly_oni = df_oni.groupby(['year', 'quarter'])['metric'].mean().unstack()
-
-    oni_dict_python = {}
-    for annee_idx, row in quarterly_oni.iterrows():
-        oni_dict_python[str(annee_idx)] = [round(val, 1) for val in row.values]
-
-    oniQuarters = ee.Dictionary(oni_dict_python)
-
-    currentOniValues = ee.List(oniQuarters.get(dataYear.format('%d')))
-    prevOniValues = ee.List(oniQuarters.get(prevDataYear.format('%d')))
-
-    oniImageCurrentYear = (ee.Image.constant(currentOniValues)
-        .rename(['ONI_Q1_curr', 'ONI_Q2_curr', 'ONI_Q3_curr', 'ONI_Q4_curr']))
-
-    oniImagePrevYear = (ee.Image.constant(prevOniValues)
-        .rename(['ONI_Q1_prev', 'ONI_Q2_prev', 'ONI_Q3_prev', 'ONI_Q4_prev']))
-
     #Distances
     distanceBandName = ee.String('distance_').cat(dataYear.format('%d'))
     distanceAuxZonesHumaines = distancePreCalculee.select(distanceBandName).rename('DistanceHumanActivities')
@@ -132,8 +110,6 @@ def create_inputBands(target_year):
 
     # Fusion
     imageFinale = (inputs.addBands(target)
-        .addBands(oniImagePrevYear)
-        .addBands(oniImageCurrentYear)
         .addBands(distanceStrictProtectedAreas)
         .addBands(distanceSustainableUseProtectedAreas)
         .addBands(distanceAllProtectedAreas)
