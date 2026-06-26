@@ -9,7 +9,6 @@ Original file is located at
 
 import ee
 ee.Authenticate()
-from aic_risk_modeling.preprocess import download_clim_indices
 ee.Initialize(project='macedo-lab-general-9051')
 
 area = ee.FeatureCollection('projects/ksolvik-misc/assets/Lim_Raisg')
