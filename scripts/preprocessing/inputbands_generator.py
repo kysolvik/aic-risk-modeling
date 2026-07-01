@@ -140,9 +140,7 @@ def create_inputBands(target_year):
     accessToCities =  (ee.Image('projects/malariaatlasproject/assets/accessibility/accessibility_to_cities/2015_v1_0')
                        .select('accessibility'))
 
-    # TODO: Add VIIRS NRT record for past 5 years based on Suomi NPP (but still keep MODIS):
-    # https://gee-community-catalog.org/projects/firms_vector/
-    # Fire memory MODIS (I don't know if it's a good idea to keep MODIS here, I might have to change it to VIIRS Hot Spots too)
+    # MODIS Fire memory
     startMemoryDate = ee.Date.fromYMD(targetYear.subtract(5), 1, 1)
     endMemoryDate = endMeteo
 
@@ -150,8 +148,14 @@ def create_inputBands(target_year):
                       .filterDate(startMemoryDate, endMemoryDate)
                       .filterBounds(amazonBounds)
                       .select('BurnDate'))
+    MODISfireMemory = modisMemoryCol.max().gt(0).unmask(0).rename('MODIS_Fire_Memory_5y')
 
-    fireMemory = modisMemoryCol.max().gt(0).unmask(0).rename('Fire_Memory_5y')
+    #VIIRS Fire Memory
+
+    VIIRSfireMemory = (ee.ImageCollection('projects/columbia-research-project/assets/VIIRSfireMemory5y_Amazon_100m')
+                      .select(ee.Script('target_').cat(target_year.format('%d'))).gt(0).unmask(0).rename('VIIRS_Fire_Memory_5y')v #I made it binary here but don't know if you wanted to
+
+
 
     #TargetYear
     yearBand = ee.Image.constant(targetYear).rename('Target_Year')
@@ -173,7 +177,8 @@ def create_inputBands(target_year):
         .addBands(nightLights)
         .addBands(elevation)
         .addBands(slope)
-        .addBands(fireMemory)
+        .addBands(MODISfireMemory)
+        .addBands(VIIRSfireMemory)
         .addBands(yearBand))
 
     return imageFinale, target
