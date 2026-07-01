@@ -14,12 +14,11 @@ ee.Initialize(project='macedo-lab-general-9051')
 area = ee.FeatureCollection('projects/ksolvik-misc/assets/Lim_Raisg')
 amazonBounds = area.geometry().simplify(1000) #I had to simplify the area because stratified sampling was failing on the initial complex area
 embeddingsCol = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
-# TODO: Include distance to pasture separate from general human activities
+distancePastures = distancePreCalculee5.select(ee.String('distance_').cat(targetYear.format('%d'))).rename('DistancePastures')
 distancePreCalculee = ee.Image('projects/columbia-research-project/assets/distanceHumanActivities_Amazon_100m_2017-2023')
-# TODO: Include distance to indigenous protected areas specificially
+distanceIndigenous = distancePreCalculee4.select('distance_IndigenousAreas').rename('DistanceIndigenousAreas')
 distancePreCalculee2 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m_v2')
 distancePreCalculee3 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m')
-viirs_burnedYears = ee.Image('projects/columbia-research-project/assets/VIIRS_Target_2019-2024')
 
 def addCWD(era5LandImage):
     """Calculate CWD from single image"""
@@ -46,12 +45,12 @@ def create_inputBands(target_year):
               .mosaic())
 
     # Target VIIRS Hot Spots
-    # TODO: Update with new images once ready. Include prev year of data as an input
+    viirs_target = ee.Image(ee.String('projects/macedo-lab-general-9051/assets/amazon_fire_dashboard/rasters/amazon_nrt_fire_').cat(targetYear.format('%d')).cat('_raster'))
     class_band = ee.String('class_').cat(targetYear.format('%d'))
     conf_band = ee.String('conf_').cat(targetYear.format('%d'))
     type_band = ee.String('type_').cat(targetYear.format('%d'))
 
-    target = viirs_burnedYears.select(
+    target = viirs_target.select(
         [class_band, conf_band, type_band],
         ['class', 'confidence', 'fire_type']
     )
@@ -163,6 +162,8 @@ def create_inputBands(target_year):
         .addBands(distanceSustainableUseProtectedAreas)
         .addBands(distanceAllProtectedAreas)
         .addBands(distanceAuxZonesHumaines)
+        .addBands(distanceIndigenous)
+        .addBands(distancePastures)
         .addBands(era5AgStats)
         .addBands(era5LandStats)
         .addBands(modVI)
