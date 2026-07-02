@@ -63,14 +63,11 @@ def create_inputBands(target_year):
     distanceAllProtectedAreas = distancePreCalculee3.select('distance_wdpa').rename('DistanceAllProtectedAreas')
 
     # Deforestation
-    # TODO: When we run future predictions, we won't have the latest annual deforestation
-    # One option is to update with the GLAD-L alerts dataset: 
-    # https://glad.umd.edu/dataset/glad-forest-alerts
-    hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
-    targetYearHansen = targetYear.subtract(2000)
-    hansenMasked = hansen.mask(
-        hansen.select('lossyear').lte(targetYearHansen)
-        ).select(['treecover2000', 'loss', 'lossyear'])
+var hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
+            .select(['treecover2000', 'loss', 'lossyear'])
+            .rename(['hansen_treecover2000', 'hansen_loss', 'hansen_lossyear']);
+
+var glad_alertdate = ee.Image('projects/glad/S2alert/alertDate').rename('glad_alertdate');
 
     # ERA5 climate data
     startMeteo = ee.Date.fromYMD(prevDataYear, 11, 1)
@@ -172,7 +169,8 @@ def create_inputBands(target_year):
         .addBands(era5LandStats)
         .addBands(modVI)
         .addBands(accessToCities)
-        .addBands(hansenMasked)
+        .addBands(hansen)
+        .addBands(glad_alertdate)
         .addBands(population)
         .addBands(nightLights)
         .addBands(elevation)
