@@ -1,6 +1,11 @@
 
 import argparse
-from .eval import calc_stats, load_preprocess_inputs, write_calibrated_predictions
+from .eval import (
+    calc_stats,
+    load_preprocess_inputs,
+    tile_burn_area_stats,
+    write_calibrated_predictions,
+)
 
 def parse_args():
     """Parse command line arguments"""
@@ -82,6 +87,36 @@ def parse_args():
              "fitting (binary only). Overrides --calibration-method.",
     )
     parser.add_argument(
+        "--tile-analysis",
+        action="store_true",
+        required=False,
+        help="If provided, also compare actual vs expected (non-thresholded) "
+             "burn area over non-overlapping tiles.",
+    )
+    parser.add_argument(
+        "--tile-size",
+        type=int,
+        required=False,
+        default=128,
+        help="Side length (pixels) of the square tiles for --tile-analysis.",
+    )
+    parser.add_argument(
+        "--tile-csv",
+        type=str,
+        required=False,
+        default=None,
+        help="If set with --tile-analysis, write per-tile burn areas "
+             "(row,col,n_pixels,actual,expected,error) to this CSV.",
+    )
+    parser.add_argument(
+        "--tile-plot",
+        type=str,
+        required=False,
+        default=None,
+        help="If set with --tile-analysis, write an expected-vs-actual burn "
+             "area scatter PNG here.",
+    )
+    parser.add_argument(
         "--calibrated-output",
         type=str,
         required=False,
@@ -115,6 +150,11 @@ def main():
         calibration_binning=args.calibration_binning,
         calibration_method=method, calibration_fit=calibration_fit,
         temperature=args.temperature)
+
+    if args.tile_analysis:
+        tile_burn_area_stats(
+            predictions, ground_truth, tile_size=args.tile_size,
+            csv_path=args.tile_csv, plot=args.tile_plot)
 
     if args.calibrated_output:
         if calibrated is None:
