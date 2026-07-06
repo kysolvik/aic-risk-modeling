@@ -46,13 +46,14 @@ def create_inputBands(target_year):
 
     # Target VIIRS Hot Spots
     viirs_target = ee.Image(ee.String('projects/macedo-lab-general-9051/assets/amazon_fire_dashboard/rasters/amazon_nrt_fire_').cat(targetYear.format('%d')).cat('_raster'))
-    class_band = ee.String('class_').cat(targetYear.format('%d'))
-    conf_band = ee.String('conf_').cat(targetYear.format('%d'))
-    type_band = ee.String('type_').cat(targetYear.format('%d'))
+    class_band = 'b1'
+    type_band = 'b2'
+    conf_band = 'b3'
+
 
     target = viirs_target.select(
-        [class_band, conf_band, type_band],
-        ['class', 'confidence', 'fire_type']
+        [class_band, type_band, conf_band],
+        ['class', 'fire_type', 'confidence']
     )
 
     #Distances
@@ -150,8 +151,7 @@ var glad_alertdate = ee.Image('projects/glad/S2alert/alertDate').rename('glad_al
     #VIIRS Fire Memory
 
     VIIRSfireMemory = (ee.ImageCollection('projects/columbia-research-project/assets/VIIRSfireMemory5y_Amazon_100m')
-                      .select(ee.Script('target_').cat(target_year.format('%d'))).gt(0).unmask(0).rename('VIIRS_Fire_Memory_5y')v #I made it binary here but don't know if you wanted to
-
+                      .select(ee.Script('target_').cat(target_year.format('%d'))).unmask(0).rename('VIIRS_Fire_Memory_5y')v #I changed it to the latest day of burn (1-365) of the 5Y period instead of binary
 
 
     #TargetYear
