@@ -3,6 +3,8 @@ import argparse
 from .eval import (
     calc_stats,
     load_preprocess_inputs,
+    municipality_burn_area_stats,
+    read_raster_geo,
     tile_burn_area_stats,
     write_calibrated_predictions,
 )
@@ -117,6 +119,36 @@ def parse_args():
              "area scatter PNG here.",
     )
     parser.add_argument(
+        "--municipality-analysis",
+        action="store_true",
+        required=False,
+        help="If provided, also compare actual vs expected (non-thresholded) "
+             "burn area aggregated by Brazilian municipality (GeoTIFF only).",
+    )
+    parser.add_argument(
+        "--municipality-shp",
+        type=str,
+        required=False,
+        default="../data/municipios/municipios.shp",
+        help="Path to the municipality shapefile for --municipality-analysis.",
+    )
+    parser.add_argument(
+        "--municipality-csv",
+        type=str,
+        required=False,
+        default=None,
+        help="If set with --municipality-analysis, write per-municipality burn "
+             "areas (cd_mun,nm_mun,sigla_uf,n_pixels,actual,expected,error) here.",
+    )
+    parser.add_argument(
+        "--municipality-plot",
+        type=str,
+        required=False,
+        default=None,
+        help="If set with --municipality-analysis, write an expected-vs-actual "
+             "burn area scatter PNG here.",
+    )
+    parser.add_argument(
         "--calibrated-output",
         type=str,
         required=False,
@@ -155,6 +187,15 @@ def main():
         tile_burn_area_stats(
             predictions, ground_truth, tile_size=args.tile_size,
             csv_path=args.tile_csv, plot=args.tile_plot)
+
+    if args.municipality_analysis:
+        transform, crs = read_raster_geo(args.predictions)
+        if transform is None:
+            raise SystemExit(
+                "--municipality-analysis requires GeoTIFF predictions (not CSV).")
+        municipality_burn_area_stats(
+            predictions, ground_truth, transform, crs, args.municipality_shp,
+            csv_path=args.municipality_csv, plot=args.municipality_plot)
 
     if args.calibrated_output:
         if calibrated is None:

@@ -221,35 +221,65 @@ def _fire_probability(predictions):
     return predictions
 
 
-def _print_tile_stats(stats, tile_size):
-    """Pretty-print the aggregate tile burn-area stats."""
-    print(f"Tile burn-area analysis ({tile_size}x{tile_size} tiles, "
-          f"units = burned pixels):")
-    print(f"  Tiles: {stats['n_tiles']}")
+def _burn_area_aggregate(actual, expected):
+    """Aggregate actual-vs-expected burn-area stats over a set of regions.
+
+    ``actual`` and ``expected`` are 1-D arrays of per-region burned-pixel counts
+    (ground-truth count and summed probability, respectively). Returns totals,
+    the expected/actual ratio, and per-region bias / MAE / RMSE, plus the Pearson
+    correlation between actual and expected across regions. Shared by the tile
+    and municipality analyses.
+    """
+    actual = np.asarray(actual, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+    error = expected - actual
+    n = int(actual.size)
+    total_actual = float(actual.sum())
+    total_expected = float(expected.sum())
+
+    # Pearson r is undefined with <2 regions or a constant side (zero variance).
+    if n > 1 and actual.std() > 0 and expected.std() > 0:
+        pearson_r = float(np.corrcoef(actual, expected)[0, 1])
+    else:
+        pearson_r = float('nan')
+
+    return {
+        'n': n,
+        'total_actual': total_actual,
+        'total_expected': total_expected,
+        'ratio': (total_expected / total_actual) if total_actual else float('nan'),
+        'bias': float(error.mean()) if n else 0.0,
+        'mae': float(np.abs(error).mean()) if n else 0.0,
+        'rmse': float(np.sqrt((error ** 2).mean())) if n else 0.0,
+        'pearson_r': pearson_r,
+    }
+
+
+def _print_burn_summary(stats, header, count_label, per_label):
+    """Print the aggregate burn-area stats (units = burned pixels).
+
+    ``count_label`` labels the region count (e.g. ``"Tiles"``) and ``per_label``
+    the per-region metrics (e.g. ``"tile"``).
+    """
+    print(header)
+    print(f"  {count_label}: {stats['n']}")
     print(f"  Total actual burn:   {stats['total_actual']:.1f}")
     print(f"  Total expected burn: {stats['total_expected']:.1f}")
     print(f"  Expected/actual ratio: {stats['ratio']:.4f}")
-    print(f"  Per-tile bias (expected - actual): {stats['bias']:.4f}")
-    print(f"  Per-tile MAE:  {stats['mae']:.4f}")
-    print(f"  Per-tile RMSE: {stats['rmse']:.4f}")
+    print(f"  Per-{per_label} bias (expected - actual): {stats['bias']:.4f}")
+    print(f"  Per-{per_label} MAE:  {stats['mae']:.4f}")
+    print(f"  Per-{per_label} RMSE: {stats['rmse']:.4f}")
     print(f"  Actual-vs-expected correlation (Pearson r): {stats['pearson_r']:.4f}")
 
 
-def _write_tile_csv(per_tile, csv_path):
-    """Write one row per tile: row,col,n_pixels,actual,expected,error."""
+def _write_burn_csv(columns, csv_path, what):
+    """Write per-region burn areas (a dict of equal-length columns) to CSV."""
     import pandas as pd
-    pd.DataFrame({
-        'row': per_tile['row'],
-        'col': per_tile['col'],
-        'n_pixels': per_tile['n_pixels'],
-        'actual': per_tile['actual'],
-        'expected': per_tile['expected'],
-        'error': per_tile['error'],
-    }).to_csv(csv_path, index=False)
-    print(f"Wrote per-tile burn areas to {csv_path}")
+    pd.DataFrame(columns).to_csv(csv_path, index=False)
+    print(f"Wrote {what} to {csv_path}")
 
 
-def _plot_tile_scatter(per_tile, stats, out_path, tile_size):
+def _plot_burn_scatter(actual, expected, out_path, title):
     """Save an expected-vs-actual burn-area scatter with a y=x reference line.
 
     matplotlib is imported lazily; if it is not installed, prints a notice and
@@ -263,11 +293,11 @@ def _plot_tile_scatter(per_tile, stats, out_path, tile_size):
         matplotlib.use("Agg")  # headless backend, no display required
         import matplotlib.pyplot as plt
     except ImportError:
-        print(f"matplotlib not installed; skipping tile scatter ({out_path}).")
+        print(f"matplotlib not installed; skipping burn-area scatter ({out_path}).")
         return False
 
-    actual = per_tile['actual']
-    expected = per_tile['expected']
+    actual = np.asarray(actual)
+    expected = np.asarray(expected)
     hi = float(max(actual.max(initial=0.0), expected.max(initial=0.0), 1.0))
 
     fig, ax = plt.subplots(figsize=(5, 5))
@@ -277,8 +307,7 @@ def _plot_tile_scatter(per_tile, stats, out_path, tile_size):
     ax.set_ylabel('expected burn area (pixels)')
     ax.set_xlim(0, hi)
     ax.set_ylim(0, hi)
-    ax.set_title(f"{tile_size}x{tile_size} tiles "
-                 f"(r={stats['pearson_r']:.3f}, ratio={stats['ratio']:.3f})")
+    ax.set_title(title)
     ax.legend(loc='upper left')
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
@@ -339,43 +368,166 @@ def tile_burn_area_stats(predictions, ground_truth, tile_size=128,
 
     actual = np.asarray(actual)
     expected = np.asarray(expected)
-    error = expected - actual
-    n_tiles = int(actual.size)
-    total_actual = float(actual.sum())
-    total_expected = float(expected.sum())
-
-    # Pearson r is undefined with <2 tiles or a constant side (zero variance).
-    if n_tiles > 1 and actual.std() > 0 and expected.std() > 0:
-        pearson_r = float(np.corrcoef(actual, expected)[0, 1])
-    else:
-        pearson_r = float('nan')
-
-    stats = {
-        'n_tiles': n_tiles,
-        'total_actual': total_actual,
-        'total_expected': total_expected,
-        'ratio': (total_expected / total_actual) if total_actual else float('nan'),
-        'bias': float(error.mean()) if n_tiles else 0.0,
-        'mae': float(np.abs(error).mean()) if n_tiles else 0.0,
-        'rmse': float(np.sqrt((error ** 2).mean())) if n_tiles else 0.0,
-        'pearson_r': pearson_r,
-    }
+    agg = _burn_area_aggregate(actual, expected)
     per_tile = {
         'row': np.asarray(rows),
         'col': np.asarray(cols),
         'n_pixels': np.asarray(n_pixels),
         'actual': actual,
         'expected': expected,
-        'error': error,
+        'error': expected - actual,
     }
 
-    _print_tile_stats(stats, tile_size)
+    _print_burn_summary(
+        agg, f"Tile burn-area analysis ({tile_size}x{tile_size} tiles, "
+        f"units = burned pixels):", "Tiles", "tile")
     if csv_path is not None:
-        _write_tile_csv(per_tile, csv_path)
+        _write_burn_csv(per_tile, csv_path, "per-tile burn areas")
     if plot is not None:
-        _plot_tile_scatter(per_tile, stats, plot, tile_size)
+        _plot_burn_scatter(
+            actual, expected, plot,
+            f"{tile_size}x{tile_size} tiles "
+            f"(r={agg['pearson_r']:.3f}, ratio={agg['ratio']:.3f})")
 
-    return {**stats, 'per_tile': per_tile}
+    return {**agg, 'n_tiles': agg['n'], 'per_tile': per_tile}
+
+
+def _print_extreme_municipalities(per_muni, top_n):
+    """Print the municipalities whose expected burn most over/under-shoots actual."""
+    error = np.asarray(per_muni['error'])
+    if error.size == 0 or top_n <= 0:
+        return
+    name = np.asarray(per_muni['nm_mun'])
+    uf = np.asarray(per_muni['sigla_uf'])
+    actual = np.asarray(per_muni['actual'])
+    expected = np.asarray(per_muni['expected'])
+    order = np.argsort(error)  # most negative (under-predicted) first
+
+    def line(i):
+        return (f"    {name[i]} ({uf[i]}): actual={actual[i]:.1f} "
+                f"expected={expected[i]:.1f} error={error[i]:+.1f}")
+
+    print(f"  Most OVER-predicted (expected >> actual), top {top_n}:")
+    for i in order[::-1][:top_n]:
+        print(line(i))
+    print(f"  Most UNDER-predicted (expected << actual), top {top_n}:")
+    for i in order[:top_n]:
+        print(line(i))
+
+
+def municipality_burn_area_stats(predictions, ground_truth, transform, crs,
+                                 shp_path, name_field='nm_mun',
+                                 code_field='cd_mun', state_field='sigla_uf',
+                                 top_n=5, csv_path=None, plot=None):
+    """Compare actual vs expected burn area aggregated by Brazilian municipality.
+
+    The zonal analogue of ``tile_burn_area_stats``: instead of a fixed grid, it
+    rasterizes the municipality polygons from ``shp_path`` onto the prediction
+    grid (given by ``transform`` / ``crs``) and, per municipality that overlaps
+    the scene, sums the ground-truth burned pixels (*actual* burn area) and the
+    predicted fire probabilities (*expected* burn area -- the expected number of
+    burned pixels, **not** a thresholded count). Municipalities are administrative
+    units fire managers act on, so this reports where the model over- or
+    under-predicts the regional burn amount.
+
+    Actual and expected are in units of burned pixels; only municipalities with
+    at least one pixel inside the scene are kept. Runs on ``predictions`` as
+    passed in, before any post-hoc calibration applied by ``calc_stats``.
+
+    Args:
+        predictions: binary scores ``(H, W)`` or multiclass band-first array;
+            converted to P(fire) via ``_fire_probability``.
+        ground_truth: array of integer class labels; burned = ``> 0``.
+        transform: affine transform of the prediction grid (from the raster).
+        crs: CRS of the prediction grid; polygons are reprojected to match.
+        shp_path: path to the municipality shapefile.
+        name_field/code_field/state_field: shapefile columns for the name, IBGE
+            code, and state abbreviation.
+        top_n: how many most over/under-predicted municipalities to print.
+        csv_path: if given, write per-municipality rows there.
+        plot: if given, write an expected-vs-actual scatter PNG there.
+
+    Returns:
+        dict of aggregate stats (as ``_burn_area_aggregate``) plus
+        ``n_municipalities`` and ``per_municipality`` (a dict of per-municipality
+        arrays), or ``None`` if no municipality overlaps the scene.
+    """
+    import geopandas as gpd
+    from rasterio import features
+    from rasterio.transform import array_bounds
+
+    prob = _fire_probability(predictions)
+    labels = np.asarray(ground_truth) > 0
+    if prob.shape != labels.shape:
+        raise ValueError(f"prediction spatial shape {prob.shape} and "
+                         f"ground-truth shape {labels.shape} differ")
+    height, width = prob.shape
+
+    gdf = gpd.read_file(shp_path)
+    if crs is not None and gdf.crs is not None and str(gdf.crs) != str(crs):
+        gdf = gdf.to_crs(crs)
+    # Restrict to municipalities overlapping the raster's bounding box.
+    left, bottom, right, top = array_bounds(height, width, transform)
+    gdf = gdf.cx[left:right, bottom:top].reset_index(drop=True)
+    if len(gdf) == 0:
+        print("Municipality burn-area analysis: no municipalities overlap the "
+              "prediction extent.")
+        return None
+
+    # Rasterize polygons to zone ids 1..N (0 = outside any polygon) on the
+    # prediction grid, then take zonal sums via weighted bincount.
+    shapes = ((geom, i + 1) for i, geom in enumerate(gdf.geometry))
+    zones = features.rasterize(shapes, out_shape=(height, width),
+                               transform=transform, fill=0, dtype='int32')
+    zones_flat = zones.ravel()
+    n = len(gdf)
+    counts = np.bincount(zones_flat, minlength=n + 1)[1:]
+    actual_all = np.bincount(zones_flat, weights=labels.ravel().astype(np.float64),
+                             minlength=n + 1)[1:]
+    expected_all = np.bincount(zones_flat, weights=prob.ravel().astype(np.float64),
+                               minlength=n + 1)[1:]
+
+    present = counts > 0  # keep only municipalities with pixels in the scene
+    gdf_p = gdf.loc[present]
+    actual = actual_all[present]
+    expected = expected_all[present]
+
+    agg = _burn_area_aggregate(actual, expected)
+    per_muni = {
+        'cd_mun': gdf_p[code_field].to_numpy(),
+        'nm_mun': gdf_p[name_field].to_numpy(),
+        'sigla_uf': gdf_p[state_field].to_numpy(),
+        'n_pixels': counts[present].astype(np.int64),
+        'actual': actual,
+        'expected': expected,
+        'error': expected - actual,
+    }
+
+    _print_burn_summary(
+        agg, "Municipality burn-area analysis (units = burned pixels):",
+        "Municipalities", "municipality")
+    _print_extreme_municipalities(per_muni, top_n)
+    if csv_path is not None:
+        _write_burn_csv(per_muni, csv_path, "per-municipality burn areas")
+    if plot is not None:
+        _plot_burn_scatter(
+            actual, expected, plot,
+            f"municipalities (r={agg['pearson_r']:.3f}, ratio={agg['ratio']:.3f})")
+
+    return {**agg, 'n_municipalities': agg['n'], 'per_municipality': per_muni}
+
+
+def read_raster_geo(predictions_path):
+    """Return ``(transform, crs)`` for a GeoTIFF path, or ``(None, None)`` for CSV.
+
+    Municipality analysis needs the prediction grid's georeferencing, which
+    ``load_preprocess_inputs`` drops when it returns bare arrays.
+    """
+    if predictions_path.endswith('.csv'):
+        return None, None
+    import rasterio as rio
+    with rio.open(predictions_path) as src:
+        return src.transform, src.crs
 
 
 def load_preprocess_inputs(predictions_path, ground_truth_path):
