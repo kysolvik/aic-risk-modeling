@@ -150,9 +150,19 @@ var glad_alertdate = ee.Image('projects/glad/S2alert/alertDate').rename('glad_al
 
     #VIIRS Fire Memory
 
-    VIIRSfireMemory = (ee.ImageCollection('projects/columbia-research-project/assets/VIIRSfireMemory5y_Amazon_100m')
-                      .select(ee.Script('target_').cat(target_year.format('%d'))).unmask(0).rename('VIIRS_Fire_Memory_5y')v #I changed it to the latest day of burn (1-365) of the 5Y period instead of binary
+    viirs_start_date = ee.Date.fromYMD(dataYear.subtract(4), 1, 1)
+    viirs_end_date = ee.Date.fromYMD(dataYear, 11, 1)
 
+    fiveYFires = (ee.ImageCollection('projects/macedo-lab-general-9051/assets/viirs_snpp_archive').filterDate(viirs_start_date, viirs_end_date))
+
+    def transform_to_year(img):
+
+        imageYear = ee.Number.parse(img.date().format('YYYY'))
+        masque_feu = img.gt(0)
+
+        return ee.Image.constant(imageYear).updateMask(masque_feu)
+
+    VIIRSfireMemory = fiveYFires.map(transform_to_year).max().unmask(0).rename('VIIRS_Fire_Memory_5y')
 
     #TargetYear
     yearBand = ee.Image.constant(targetYear).rename('Target_Year')
