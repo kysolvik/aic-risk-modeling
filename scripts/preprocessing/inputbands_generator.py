@@ -14,12 +14,11 @@ ee.Initialize(project='macedo-lab-general-9051')
 area = ee.FeatureCollection('projects/ksolvik-misc/assets/Lim_Raisg')
 amazonBounds = area.geometry().simplify(1000) #I had to simplify the area because stratified sampling was failing on the initial complex area
 embeddingsCol = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
-# TODO: Include distance to pasture separate from general human activities
+distancePastures = distancePreCalculee5.select(ee.String('distance_').cat(targetYear.format('%d'))).rename('DistancePastures')
 distancePreCalculee = ee.Image('projects/columbia-research-project/assets/distanceHumanActivities_Amazon_100m_2017-2023')
-# TODO: Include distance to indigenous protected areas specificially
+distanceIndigenous = distancePreCalculee4.select('distance_IndigenousAreas').rename('DistanceIndigenousAreas')
 distancePreCalculee2 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m_v2')
 distancePreCalculee3 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m')
-viirs_burnedYears = ee.Image('projects/columbia-research-project/assets/VIIRS_Target_2019-2024')
 
 def addCWD(era5LandImage):
     """Calculate CWD from single image"""
@@ -46,14 +45,15 @@ def create_inputBands(target_year):
               .mosaic())
 
     # Target VIIRS Hot Spots
-    # TODO: Update with new images once ready. Include prev year of data as an input
-    class_band = ee.String('class_').cat(targetYear.format('%d'))
-    conf_band = ee.String('conf_').cat(targetYear.format('%d'))
-    type_band = ee.String('type_').cat(targetYear.format('%d'))
+    viirs_target = ee.Image(ee.String('projects/macedo-lab-general-9051/assets/amazon_fire_dashboard/rasters/amazon_nrt_fire_').cat(targetYear.format('%d')).cat('_raster'))
+    class_band = 'b1'
+    type_band = 'b2'
+    conf_band = 'b3'
 
-    target = viirs_burnedYears.select(
-        [class_band, conf_band, type_band],
-        ['class', 'confidence', 'fire_type']
+
+    target = viirs_target.select(
+        [class_band, type_band, conf_band],
+        ['class', 'fire_type', 'confidence']
     )
 
     #Distances
@@ -64,14 +64,11 @@ def create_inputBands(target_year):
     distanceAllProtectedAreas = distancePreCalculee3.select('distance_wdpa').rename('DistanceAllProtectedAreas')
 
     # Deforestation
-    # TODO: When we run future predictions, we won't have the latest annual deforestation
-    # One option is to update with the GLAD-L alerts dataset: 
-    # https://glad.umd.edu/dataset/glad-forest-alerts
-    hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
-    targetYearHansen = targetYear.subtract(2000)
-    hansenMasked = hansen.mask(
-        hansen.select('lossyear').lte(targetYearHansen)
-        ).select(['treecover2000', 'loss', 'lossyear'])
+var hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
+            .select(['treecover2000', 'loss', 'lossyear'])
+            .rename(['hansen_treecover2000', 'hansen_loss', 'hansen_lossyear']);
+
+var glad_alertdate = ee.Image('projects/glad/S2alert/alertDate').rename('glad_alertdate');
 
     # ERA5 climate data
     startMeteo = ee.Date.fromYMD(prevDataYear, 11, 1)
@@ -141,9 +138,7 @@ def create_inputBands(target_year):
     accessToCities =  (ee.Image('projects/malariaatlasproject/assets/accessibility/accessibility_to_cities/2015_v1_0')
                        .select('accessibility'))
 
-    # TODO: Add VIIRS NRT record for past 5 years based on Suomi NPP (but still keep MODIS):
-    # https://gee-community-catalog.org/projects/firms_vector/
-    # Fire memory MODIS (I don't know if it's a good idea to keep MODIS here, I might have to change it to VIIRS Hot Spots too)
+    # MODIS Fire memory
     startMemoryDate = ee.Date.fromYMD(targetYear.subtract(5), 1, 1)
     endMemoryDate = endMeteo
 
@@ -151,8 +146,23 @@ def create_inputBands(target_year):
                       .filterDate(startMemoryDate, endMemoryDate)
                       .filterBounds(amazonBounds)
                       .select('BurnDate'))
+    MODISfireMemory = modisMemoryCol.max().gt(0).unmask(0).rename('MODIS_Fire_Memory_5y')
 
-    fireMemory = modisMemoryCol.max().gt(0).unmask(0).rename('Fire_Memory_5y')
+    #VIIRS Fire Memory
+
+    viirs_start_date = ee.Date.fromYMD(dataYear.subtract(4), 1, 1)
+    viirs_end_date = ee.Date.fromYMD(dataYear, 11, 1)
+
+    fiveYFires = (ee.ImageCollection('projects/macedo-lab-general-9051/assets/viirs_snpp_archive').filterDate(viirs_start_date, viirs_end_date))
+
+    def transform_to_year(img):
+
+        imageYear = ee.Number.parse(img.date().format('YYYY'))
+        masque_feu = img.gt(0)
+
+        return ee.Image.constant(imageYear).updateMask(masque_feu)
+
+    VIIRSfireMemory = fiveYFires.map(transform_to_year).max().unmask(0).rename('VIIRS_Fire_Memory_5y')
 
     #TargetYear
     yearBand = ee.Image.constant(targetYear).rename('Target_Year')
@@ -163,16 +173,20 @@ def create_inputBands(target_year):
         .addBands(distanceSustainableUseProtectedAreas)
         .addBands(distanceAllProtectedAreas)
         .addBands(distanceAuxZonesHumaines)
+        .addBands(distanceIndigenous)
+        .addBands(distancePastures)
         .addBands(era5AgStats)
         .addBands(era5LandStats)
         .addBands(modVI)
         .addBands(accessToCities)
-        .addBands(hansenMasked)
+        .addBands(hansen)
+        .addBands(glad_alertdate)
         .addBands(population)
         .addBands(nightLights)
         .addBands(elevation)
         .addBands(slope)
-        .addBands(fireMemory)
+        .addBands(MODISfireMemory)
+        .addBands(VIIRSfireMemory)
         .addBands(yearBand))
 
     return imageFinale, target
