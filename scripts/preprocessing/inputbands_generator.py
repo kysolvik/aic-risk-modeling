@@ -64,11 +64,11 @@ def create_inputBands(target_year):
     distanceAllProtectedAreas = distancePreCalculee3.select('distance_wdpa').rename('DistanceAllProtectedAreas')
 
     # Deforestation
-var hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
+    hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
             .select(['treecover2000', 'loss', 'lossyear'])
             .rename(['hansen_treecover2000', 'hansen_loss', 'hansen_lossyear']);
 
-var glad_alertdate = ee.Image('projects/glad/S2alert/alertDate').rename('glad_alertdate');
+    glad_alertdate = ee.Image('projects/glad/S2alert/alertDate').rename('glad_alertdate');
 
     # ERA5 climate data
     startMeteo = ee.Date.fromYMD(prevDataYear, 11, 1)
