@@ -149,6 +149,15 @@ def parse_args():
              "burn area scatter PNG here.",
     )
     parser.add_argument(
+        "--municipality-highlight",
+        type=str,
+        required=False,
+        default=None,
+        help="Comma-separated list of cd_mun (IBGE code) integers to highlight "
+             "and name-label in the --municipality-plot scatter (and flag with a "
+             "'highlighted' column in --municipality-csv).",
+    )
+    parser.add_argument(
         "--calibrated-output",
         type=str,
         required=False,
@@ -193,9 +202,14 @@ def main():
         if transform is None:
             raise SystemExit(
                 "--municipality-analysis requires GeoTIFF predictions (not CSV).")
+        highlight_cd_mun = None
+        if args.municipality_highlight:
+            highlight_cd_mun = [c.strip() for c in
+                                args.municipality_highlight.split(",") if c.strip()]
         municipality_burn_area_stats(
             predictions, ground_truth, transform, crs, args.municipality_shp,
-            csv_path=args.municipality_csv, plot=args.municipality_plot)
+            csv_path=args.municipality_csv, plot=args.municipality_plot,
+            highlight_cd_mun=highlight_cd_mun)
 
     if args.calibrated_output:
         if calibrated is None:

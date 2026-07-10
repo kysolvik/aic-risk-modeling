@@ -279,11 +279,18 @@ def _write_burn_csv(columns, csv_path, what):
     print(f"Wrote {what} to {csv_path}")
 
 
-def _plot_burn_scatter(actual, expected, out_path, title):
+def _plot_burn_scatter(actual, expected, out_path, title,
+                       highlight_mask=None, highlight_labels=None):
     """Save an expected-vs-actual burn-area scatter with a y=x reference line.
 
     matplotlib is imported lazily; if it is not installed, prints a notice and
     returns False instead of raising (mirrors ``plot_reliability_diagram``).
+
+    Args:
+        highlight_mask: optional boolean array over the points; where True the
+            point is drawn in a distinct color on top of the base scatter.
+        highlight_labels: optional labels (same length as the points) annotated
+            next to the highlighted points.
 
     Returns:
         True if the figure was written, False if matplotlib is unavailable.
@@ -303,6 +310,17 @@ def _plot_burn_scatter(actual, expected, out_path, title):
     fig, ax = plt.subplots(figsize=(5, 5))
     ax.plot([0, hi], [0, hi], '--', color='gray', label='y=x')
     ax.scatter(actual, expected, s=8, alpha=0.4, color='C0')
+    if highlight_mask is not None:
+        highlight_mask = np.asarray(highlight_mask, dtype=bool)
+        ax.scatter(actual[highlight_mask], expected[highlight_mask],
+                   s=40, color='C3', edgecolors='k', linewidths=0.5,
+                   zorder=3, label='highlighted')
+        if highlight_labels is not None:
+            highlight_labels = np.asarray(highlight_labels)
+            for x, y, lbl in zip(actual[highlight_mask], expected[highlight_mask],
+                                 highlight_labels[highlight_mask]):
+                ax.annotate(str(lbl), (x, y), textcoords='offset points',
+                            xytext=(4, 4), fontsize=7, color='C3')
     ax.set_xlabel('actual burn area (pixels)')
     ax.set_ylabel('expected burn area (pixels)')
     ax.set_xlim(0, hi)
@@ -386,8 +404,7 @@ def tile_burn_area_stats(predictions, ground_truth, tile_size=128,
     if plot is not None:
         _plot_burn_scatter(
             actual, expected, plot,
-            f"{tile_size}x{tile_size} tiles "
-            f"(r={agg['pearson_r']:.3f}, ratio={agg['ratio']:.3f})")
+            f"{tile_size}x{tile_size} tiles")
 
     return {**agg, 'n_tiles': agg['n'], 'per_tile': per_tile}
 
@@ -418,7 +435,8 @@ def _print_extreme_municipalities(per_muni, top_n):
 def municipality_burn_area_stats(predictions, ground_truth, transform, crs,
                                  shp_path, name_field='nm_mun',
                                  code_field='cd_mun', state_field='sigla_uf',
-                                 top_n=5, csv_path=None, plot=None):
+                                 top_n=5, csv_path=None, plot=None,
+                                 highlight_cd_mun=None):
     """Compare actual vs expected burn area aggregated by Brazilian municipality.
 
     The zonal analogue of ``tile_burn_area_stats``: instead of a fixed grid, it
@@ -446,6 +464,9 @@ def municipality_burn_area_stats(predictions, ground_truth, transform, crs,
         top_n: how many most over/under-predicted municipalities to print.
         csv_path: if given, write per-municipality rows there.
         plot: if given, write an expected-vs-actual scatter PNG there.
+        highlight_cd_mun: optional iterable of ``cd_mun`` codes; matching
+            municipalities are highlighted and name-annotated in the scatter
+            plot and flagged in the CSV via a ``highlighted`` column.
 
     Returns:
         dict of aggregate stats (as ``_burn_area_aggregate``) plus
@@ -503,6 +524,18 @@ def municipality_burn_area_stats(predictions, ground_truth, transform, crs,
         'error': expected - actual,
     }
 
+    highlight_mask = None
+    if highlight_cd_mun:
+        wanted = {str(c).strip() for c in highlight_cd_mun}
+        codes_str = per_muni['cd_mun'].astype(str)
+        highlight_mask = np.isin(codes_str, list(wanted))
+        matched = codes_str[highlight_mask]
+        missing = wanted - set(matched.tolist())
+        print(f"  Highlighting {highlight_mask.sum()} municipalities by cd_mun.")
+        if missing:
+            print(f"  cd_mun not found in scene: {', '.join(sorted(missing))}")
+        per_muni['highlighted'] = highlight_mask
+
     _print_burn_summary(
         agg, "Municipality burn-area analysis (units = burned pixels):",
         "Municipalities", "municipality")
@@ -511,8 +544,8 @@ def municipality_burn_area_stats(predictions, ground_truth, transform, crs,
         _write_burn_csv(per_muni, csv_path, "per-municipality burn areas")
     if plot is not None:
         _plot_burn_scatter(
-            actual, expected, plot,
-            f"municipalities (r={agg['pearson_r']:.3f}, ratio={agg['ratio']:.3f})")
+            actual, expected, plot, "municipalities",
+            highlight_mask=highlight_mask, highlight_labels=per_muni['nm_mun'])
 
     return {**agg, 'n_municipalities': agg['n'], 'per_municipality': per_muni}
 
