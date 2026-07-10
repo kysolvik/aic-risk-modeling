@@ -4,6 +4,7 @@ from .eval import (
     calc_stats,
     load_preprocess_inputs,
     municipality_burn_area_stats,
+    pyramid_pool_stats,
     read_raster_geo,
     tile_burn_area_stats,
     write_calibrated_predictions,
@@ -119,6 +120,39 @@ def parse_args():
              "area scatter PNG here.",
     )
     parser.add_argument(
+        "--pyramid-analysis",
+        action="store_true",
+        required=False,
+        help="If provided, also report PR AUC / F1 over a pyramid of "
+             "max-pooled blocks (1x1, 2x2, 4x4, ...) to relax spatial "
+             "placement tolerance at increasing scales.",
+    )
+    parser.add_argument(
+        "--pyramid-blocks",
+        type=str,
+        required=False,
+        default=None,
+        help="Comma-separated block side lengths for --pyramid-analysis "
+             "(e.g. '1,2,4,8'). Defaults to powers of two up to min(H, W).",
+    )
+    parser.add_argument(
+        "--pyramid-csv",
+        type=str,
+        required=False,
+        default=None,
+        help="If set with --pyramid-analysis, write per-level metrics "
+             "(block,grid_h,grid_w,n_blocks,n_truth,n_pred,precision,recall,"
+             "f1,pr_auc) to this CSV.",
+    )
+    parser.add_argument(
+        "--pyramid-plot",
+        type=str,
+        required=False,
+        default=None,
+        help="If set with --pyramid-analysis, write an F1 / PR-AUC vs "
+             "block-size line plot PNG here.",
+    )
+    parser.add_argument(
         "--municipality-analysis",
         action="store_true",
         required=False,
@@ -196,6 +230,16 @@ def main():
         tile_burn_area_stats(
             predictions, ground_truth, tile_size=args.tile_size,
             csv_path=args.tile_csv, plot=args.tile_plot)
+
+    if args.pyramid_analysis:
+        block_sizes = None
+        if args.pyramid_blocks:
+            block_sizes = [int(b) for b in args.pyramid_blocks.split(",")
+                           if b.strip()]
+        pyramid_pool_stats(
+            predictions, ground_truth, threshold=args.threshold,
+            block_sizes=block_sizes, csv_path=args.pyramid_csv,
+            plot=args.pyramid_plot)
 
     if args.municipality_analysis:
         transform, crs = read_raster_geo(args.predictions)

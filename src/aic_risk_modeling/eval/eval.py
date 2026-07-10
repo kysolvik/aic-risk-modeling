@@ -550,6 +550,169 @@ def municipality_burn_area_stats(predictions, ground_truth, transform, crs,
     return {**agg, 'n_municipalities': agg['n'], 'per_municipality': per_muni}
 
 
+def _block_max_pool(arr, block):
+    """Non-overlapping ``block`` x ``block`` max-pool of a 2-D array.
+
+    When H/W are not multiples of ``block`` the array is zero-padded on the
+    bottom/right first. Zero padding is safe for both the fire-probability and
+    the 0/1 label fields because 0 is the minimum possible value, so a partial
+    edge block's max is effectively taken over its real pixels only.
+    """
+    block = int(block)
+    if block <= 1:
+        return np.asarray(arr)
+    arr = np.asarray(arr)
+    height, width = arr.shape
+    pad_h, pad_w = (-height) % block, (-width) % block
+    if pad_h or pad_w:
+        arr = np.pad(arr, ((0, pad_h), (0, pad_w)), constant_values=0)
+    padded_h, padded_w = arr.shape
+    return arr.reshape(padded_h // block, block,
+                       padded_w // block, block).max(axis=(1, 3))
+
+
+def _default_pyramid_blocks(height, width):
+    """Powers-of-two block sizes ``[1, 2, 4, ...]`` up to ``min(H, W)``.
+
+    Stops once a single block would span the whole smaller dimension, since
+    beyond that the pooled grid is a single row/column and the detection metrics
+    degenerate.
+    """
+    limit = max(1, min(height, width))
+    blocks, block = [], 1
+    while block <= limit:
+        blocks.append(block)
+        block *= 2
+    return blocks
+
+
+def _print_pyramid_summary(levels, threshold):
+    """Print the per-level pyramid detection metrics as a compact table."""
+    print(f"Pyramid max-pool detection metrics (threshold={threshold:g}):")
+    print(f"  {'block':>7} {'grid':>13} {'n_pos':>9} {'precision':>10} "
+          f"{'recall':>8} {'f1':>8} {'pr_auc':>8}")
+    for s in levels:
+        grid = f"{s['grid_h']}x{s['grid_w']}"
+        print(f"  {str(s['block']) + 'px':>7} {grid:>13} {s['n_truth']:>9} "
+              f"{s['precision']:>10.4f} {s['recall']:>8.4f} {s['f1']:>8.4f} "
+              f"{s['pr_auc']:>8.4f}")
+
+
+def _plot_pyramid(levels, out_path, threshold):
+    """Save an F1 / PR-AUC vs block-size line plot (log2 x-axis).
+
+    matplotlib is imported lazily; if it is not installed, prints a notice and
+    returns False instead of raising (mirrors ``_plot_burn_scatter``).
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # headless backend, no display required
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print(f"matplotlib not installed; skipping pyramid plot ({out_path}).")
+        return False
+
+    blocks = [s['block'] for s in levels]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(blocks, [s['f1'] for s in levels], 'o-', color='C0', label='F1')
+    ax.plot(blocks, [s['pr_auc'] for s in levels], 's-', color='C1',
+            label='PR AUC')
+    ax.set_xscale('log', base=2)
+    ax.set_xticks(blocks)
+    ax.set_xticklabels([str(b) for b in blocks])
+    ax.set_xlabel('block size (pixels per side)')
+    ax.set_ylabel('score')
+    ax.set_ylim(0, 1)
+    ax.set_title(f'Multi-scale detection (threshold={threshold:g})')
+    ax.legend(loc='lower right')
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    return True
+
+
+def pyramid_pool_stats(predictions, ground_truth, threshold=0.5,
+                       block_sizes=None, csv_path=None, plot=None):
+    """Detection metrics (PR AUC / F1) over a pyramid of max-pooled blocks.
+
+    Builds a spatial pyramid by non-overlapping max-pooling both the predicted
+    fire probability and the 0/1 burned-label field at increasing block sizes
+    (1x1, 2x2, 4x4, ... by default). At each level a block is *positive* if any
+    of its pixels burned (max of the labels), and its predicted score is the max
+    fire probability over the block; PR AUC uses those pooled scores and F1 uses
+    them thresholded at ``threshold``.
+
+    Coarsening this way relaxes the spatial-placement requirement: a model that
+    detects fire in roughly the right neighborhood but misses the exact pixel is
+    penalized at 1x1 yet scores well once the block is large enough to contain
+    both the predicted and actual pixel. The curve of F1 / PR AUC vs block size
+    therefore shows at what spatial scale the model's detections become reliable
+    -- complementary to ``tile_burn_area_stats`` (which checks regional burn
+    *amount*) and to the per-pixel metrics from ``calc_stats``.
+
+    Args:
+        predictions: binary scores ``(H, W)`` or multiclass band-first array
+            ``(num_classes + 1, H, W)``; converted to P(fire) via
+            ``_fire_probability``.
+        ground_truth: array of integer class labels; burned = ``> 0``.
+        threshold: probability threshold for the hard labels used in F1 (the
+            pooled score is compared with ``>`` this value, matching
+            ``calc_stats``).
+        block_sizes: iterable of block side lengths; defaults to powers of two
+            up to ``min(H, W)``.
+        csv_path: if given, write per-level metrics there.
+        plot: if given, write an F1 / PR-AUC vs block-size PNG there.
+
+    Returns:
+        dict with ``threshold``, ``block_sizes``, and ``levels`` (a list of
+        per-level metrics dicts, each the ``_binary_metrics`` output plus
+        ``block``, ``grid_h``, ``grid_w``, ``n_blocks``).
+    """
+    prob = _fire_probability(predictions)
+    labels = np.asarray(ground_truth) > 0
+    if prob.shape != labels.shape:
+        raise ValueError(f"prediction spatial shape {prob.shape} and "
+                         f"ground-truth shape {labels.shape} differ")
+    height, width = prob.shape
+
+    if block_sizes is None:
+        block_sizes = _default_pyramid_blocks(height, width)
+    else:
+        block_sizes = [int(b) for b in block_sizes]
+    labels_f = labels.astype(np.float64)
+
+    levels = []
+    for block in block_sizes:
+        pooled_prob = _block_max_pool(prob, block)
+        pooled_labels = _block_max_pool(labels_f, block) > 0
+        stats = _binary_metrics(pooled_labels, pooled_prob > threshold,
+                                scores=pooled_prob)
+        stats['block'] = block
+        stats['grid_h'], stats['grid_w'] = pooled_prob.shape
+        stats['n_blocks'] = int(pooled_prob.size)
+        levels.append(stats)
+
+    _print_pyramid_summary(levels, threshold)
+    if csv_path is not None:
+        columns = {
+            'block': [s['block'] for s in levels],
+            'grid_h': [s['grid_h'] for s in levels],
+            'grid_w': [s['grid_w'] for s in levels],
+            'n_blocks': [s['n_blocks'] for s in levels],
+            'n_truth': [s['n_truth'] for s in levels],
+            'n_pred': [s['n_pred'] for s in levels],
+            'precision': [s['precision'] for s in levels],
+            'recall': [s['recall'] for s in levels],
+            'f1': [s['f1'] for s in levels],
+            'pr_auc': [s['pr_auc'] for s in levels],
+        }
+        _write_burn_csv(columns, csv_path, "per-level pyramid metrics")
+    if plot is not None:
+        _plot_pyramid(levels, plot, threshold)
+
+    return {'threshold': threshold, 'block_sizes': block_sizes, 'levels': levels}
+
+
 def read_raster_geo(predictions_path):
     """Return ``(transform, crs)`` for a GeoTIFF path, or ``(None, None)`` for CSV.
 
