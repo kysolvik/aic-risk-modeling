@@ -1,6 +1,14 @@
 
 import argparse
-from .eval import calc_stats, load_preprocess_inputs, write_calibrated_predictions
+from .eval import (
+    calc_stats,
+    load_preprocess_inputs,
+    municipality_burn_area_stats,
+    pyramid_pool_stats,
+    read_raster_geo,
+    tile_burn_area_stats,
+    write_calibrated_predictions,
+)
 
 def parse_args():
     """Parse command line arguments"""
@@ -82,6 +90,108 @@ def parse_args():
              "fitting (binary only). Overrides --calibration-method.",
     )
     parser.add_argument(
+        "--tile-analysis",
+        action="store_true",
+        required=False,
+        help="If provided, also compare actual vs expected (non-thresholded) "
+             "burn area over non-overlapping tiles.",
+    )
+    parser.add_argument(
+        "--tile-size",
+        type=int,
+        required=False,
+        default=128,
+        help="Side length (pixels) of the square tiles for --tile-analysis.",
+    )
+    parser.add_argument(
+        "--tile-csv",
+        type=str,
+        required=False,
+        default=None,
+        help="If set with --tile-analysis, write per-tile burn areas "
+             "(row,col,n_pixels,actual,expected,error) to this CSV.",
+    )
+    parser.add_argument(
+        "--tile-plot",
+        type=str,
+        required=False,
+        default=None,
+        help="If set with --tile-analysis, write an expected-vs-actual burn "
+             "area scatter PNG here.",
+    )
+    parser.add_argument(
+        "--pyramid-analysis",
+        action="store_true",
+        required=False,
+        help="If provided, also report PR AUC / F1 over a pyramid of "
+             "max-pooled blocks (1x1, 2x2, 4x4, ...) to relax spatial "
+             "placement tolerance at increasing scales.",
+    )
+    parser.add_argument(
+        "--pyramid-blocks",
+        type=str,
+        required=False,
+        default=None,
+        help="Comma-separated block side lengths for --pyramid-analysis "
+             "(e.g. '1,2,4,8'). Defaults to powers of two up to min(H, W).",
+    )
+    parser.add_argument(
+        "--pyramid-csv",
+        type=str,
+        required=False,
+        default=None,
+        help="If set with --pyramid-analysis, write per-level metrics "
+             "(block,grid_h,grid_w,n_blocks,n_truth,n_pred,precision,recall,"
+             "f1,pr_auc) to this CSV.",
+    )
+    parser.add_argument(
+        "--pyramid-plot",
+        type=str,
+        required=False,
+        default=None,
+        help="If set with --pyramid-analysis, write an F1 / PR-AUC vs "
+             "block-size line plot PNG here.",
+    )
+    parser.add_argument(
+        "--municipality-analysis",
+        action="store_true",
+        required=False,
+        help="If provided, also compare actual vs expected (non-thresholded) "
+             "burn area aggregated by Brazilian municipality (GeoTIFF only).",
+    )
+    parser.add_argument(
+        "--municipality-shp",
+        type=str,
+        required=False,
+        default="../data/municipios/municipios.shp",
+        help="Path to the municipality shapefile for --municipality-analysis.",
+    )
+    parser.add_argument(
+        "--municipality-csv",
+        type=str,
+        required=False,
+        default=None,
+        help="If set with --municipality-analysis, write per-municipality burn "
+             "areas (cd_mun,nm_mun,sigla_uf,n_pixels,actual,expected,error) here.",
+    )
+    parser.add_argument(
+        "--municipality-plot",
+        type=str,
+        required=False,
+        default=None,
+        help="If set with --municipality-analysis, write an expected-vs-actual "
+             "burn area scatter PNG here.",
+    )
+    parser.add_argument(
+        "--municipality-highlight",
+        type=str,
+        required=False,
+        default=None,
+        help="Comma-separated list of cd_mun (IBGE code) integers to highlight "
+             "and name-label in the --municipality-plot scatter (and flag with a "
+             "'highlighted' column in --municipality-csv).",
+    )
+    parser.add_argument(
         "--calibrated-output",
         type=str,
         required=False,
@@ -115,6 +225,35 @@ def main():
         calibration_binning=args.calibration_binning,
         calibration_method=method, calibration_fit=calibration_fit,
         temperature=args.temperature)
+
+    if args.tile_analysis:
+        tile_burn_area_stats(
+            predictions, ground_truth, tile_size=args.tile_size,
+            csv_path=args.tile_csv, plot=args.tile_plot)
+
+    if args.pyramid_analysis:
+        block_sizes = None
+        if args.pyramid_blocks:
+            block_sizes = [int(b) for b in args.pyramid_blocks.split(",")
+                           if b.strip()]
+        pyramid_pool_stats(
+            predictions, ground_truth, threshold=args.threshold,
+            block_sizes=block_sizes, csv_path=args.pyramid_csv,
+            plot=args.pyramid_plot)
+
+    if args.municipality_analysis:
+        transform, crs = read_raster_geo(args.predictions)
+        if transform is None:
+            raise SystemExit(
+                "--municipality-analysis requires GeoTIFF predictions (not CSV).")
+        highlight_cd_mun = None
+        if args.municipality_highlight:
+            highlight_cd_mun = [c.strip() for c in
+                                args.municipality_highlight.split(",") if c.strip()]
+        municipality_burn_area_stats(
+            predictions, ground_truth, transform, crs, args.municipality_shp,
+            csv_path=args.municipality_csv, plot=args.municipality_plot,
+            highlight_cd_mun=highlight_cd_mun)
 
     if args.calibrated_output:
         if calibrated is None:

@@ -207,6 +207,525 @@ def calc_stats(predictions, ground_truth, grouped=False, threshold=0.5,
     return overall, (predictions if transform is not None else None)
 
 
+def _fire_probability(predictions):
+    """Per-pixel probability of fire (the pixel's expected burn value) as (H, W).
+
+    Binary predictions are already P(fire). Multiclass predictions are
+    band-first (band 0 is the argmax, band ``1 + c`` is the softmax score for
+    class ``c``, class 0 = no-fire), so P(fire) is the complement of the class-0
+    score, ``1 - predictions[1]``.
+    """
+    predictions = np.asarray(predictions)
+    if _is_multiclass(predictions):
+        return 1.0 - predictions[1]
+    return predictions
+
+
+def _burn_area_aggregate(actual, expected):
+    """Aggregate actual-vs-expected burn-area stats over a set of regions.
+
+    ``actual`` and ``expected`` are 1-D arrays of per-region burned-pixel counts
+    (ground-truth count and summed probability, respectively). Returns totals,
+    the expected/actual ratio, and per-region bias / MAE / RMSE, plus the Pearson
+    correlation between actual and expected across regions. Shared by the tile
+    and municipality analyses.
+    """
+    actual = np.asarray(actual, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+    error = expected - actual
+    n = int(actual.size)
+    total_actual = float(actual.sum())
+    total_expected = float(expected.sum())
+
+    # Pearson r is undefined with <2 regions or a constant side (zero variance).
+    if n > 1 and actual.std() > 0 and expected.std() > 0:
+        pearson_r = float(np.corrcoef(actual, expected)[0, 1])
+    else:
+        pearson_r = float('nan')
+
+    return {
+        'n': n,
+        'total_actual': total_actual,
+        'total_expected': total_expected,
+        'ratio': (total_expected / total_actual) if total_actual else float('nan'),
+        'bias': float(error.mean()) if n else 0.0,
+        'mae': float(np.abs(error).mean()) if n else 0.0,
+        'rmse': float(np.sqrt((error ** 2).mean())) if n else 0.0,
+        'pearson_r': pearson_r,
+    }
+
+
+def _print_burn_summary(stats, header, count_label, per_label):
+    """Print the aggregate burn-area stats (units = burned pixels).
+
+    ``count_label`` labels the region count (e.g. ``"Tiles"``) and ``per_label``
+    the per-region metrics (e.g. ``"tile"``).
+    """
+    print(header)
+    print(f"  {count_label}: {stats['n']}")
+    print(f"  Total actual burn:   {stats['total_actual']:.1f}")
+    print(f"  Total expected burn: {stats['total_expected']:.1f}")
+    print(f"  Expected/actual ratio: {stats['ratio']:.4f}")
+    print(f"  Per-{per_label} bias (expected - actual): {stats['bias']:.4f}")
+    print(f"  Per-{per_label} MAE:  {stats['mae']:.4f}")
+    print(f"  Per-{per_label} RMSE: {stats['rmse']:.4f}")
+    print(f"  Actual-vs-expected correlation (Pearson r): {stats['pearson_r']:.4f}")
+
+
+def _write_burn_csv(columns, csv_path, what):
+    """Write per-region burn areas (a dict of equal-length columns) to CSV."""
+    import pandas as pd
+    pd.DataFrame(columns).to_csv(csv_path, index=False)
+    print(f"Wrote {what} to {csv_path}")
+
+
+def _plot_burn_scatter(actual, expected, out_path, title,
+                       highlight_mask=None, highlight_labels=None):
+    """Save an expected-vs-actual burn-area scatter with a y=x reference line.
+
+    matplotlib is imported lazily; if it is not installed, prints a notice and
+    returns False instead of raising (mirrors ``plot_reliability_diagram``).
+
+    Args:
+        highlight_mask: optional boolean array over the points; where True the
+            point is drawn in a distinct color on top of the base scatter.
+        highlight_labels: optional labels (same length as the points) annotated
+            next to the highlighted points.
+
+    Returns:
+        True if the figure was written, False if matplotlib is unavailable.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # headless backend, no display required
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print(f"matplotlib not installed; skipping burn-area scatter ({out_path}).")
+        return False
+
+    actual = np.asarray(actual)
+    expected = np.asarray(expected)
+    hi = float(max(actual.max(initial=0.0), expected.max(initial=0.0), 1.0))
+
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.plot([0, hi], [0, hi], '--', color='gray', label='y=x')
+    ax.scatter(actual, expected, s=8, alpha=0.4, color='C0')
+    if highlight_mask is not None:
+        highlight_mask = np.asarray(highlight_mask, dtype=bool)
+        ax.scatter(actual[highlight_mask], expected[highlight_mask],
+                   s=40, color='C3', edgecolors='k', linewidths=0.5,
+                   zorder=3, label='highlighted')
+        if highlight_labels is not None:
+            highlight_labels = np.asarray(highlight_labels)
+            for x, y, lbl in zip(actual[highlight_mask], expected[highlight_mask],
+                                 highlight_labels[highlight_mask]):
+                ax.annotate(str(lbl), (x, y), textcoords='offset points',
+                            xytext=(4, 4), fontsize=7, color='C3')
+    ax.set_xlabel('actual burn area (pixels)')
+    ax.set_ylabel('expected burn area (pixels)')
+    ax.set_xlim(0, hi)
+    ax.set_ylim(0, hi)
+    ax.set_title(title)
+    ax.legend(loc='upper left')
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    return True
+
+
+def tile_burn_area_stats(predictions, ground_truth, tile_size=128,
+                         csv_path=None, plot=None):
+    """Compare actual vs expected burn area over non-overlapping tiles.
+
+    Splits the scene into ``tile_size`` x ``tile_size`` tiles and, per tile,
+    sums the ground-truth burned pixels (*actual* burn area) and the predicted
+    fire probabilities (*expected* burn area -- the expected number of burned
+    pixels, **not** a thresholded count). A spatially smeared but well-calibrated
+    model lands near the y=x line here even when its per-pixel F1 is poor, so
+    this isolates "does the model get the regional burn amount right?" from "does
+    it put the fire in exactly the right pixels?".
+
+    Actual and expected are in units of burned pixels. Partial edge tiles (when
+    H/W are not multiples of ``tile_size``) are included; each tile's two sums
+    are over the same pixel set so the comparison stays fair, but tiles differ in
+    area (``n_pixels`` is recorded). Runs on ``predictions`` as passed in, before
+    any post-hoc calibration applied by ``calc_stats``.
+
+    Args:
+        predictions: binary scores ``(H, W)`` or multiclass band-first array
+            ``(num_classes + 1, H, W)``; converted to P(fire) via
+            ``_fire_probability``.
+        ground_truth: array of integer class labels; burned = ``> 0``.
+        tile_size: side length of the square tiles.
+        csv_path: if given, write per-tile rows there.
+        plot: if given, write an expected-vs-actual scatter PNG there.
+
+    Returns:
+        dict of aggregate stats (``n_tiles``, ``total_actual``,
+        ``total_expected``, ``ratio``, ``bias``, ``mae``, ``rmse``,
+        ``pearson_r``) plus ``per_tile``, a dict of per-tile numpy arrays
+        (``row``, ``col``, ``n_pixels``, ``actual``, ``expected``, ``error``).
+    """
+    prob = _fire_probability(predictions)
+    labels = np.asarray(ground_truth) > 0
+    if prob.shape != labels.shape:
+        raise ValueError(f"prediction spatial shape {prob.shape} and "
+                         f"ground-truth shape {labels.shape} differ")
+    height, width = prob.shape
+
+    rows, cols, n_pixels, actual, expected = [], [], [], [], []
+    for r in range(0, height, tile_size):
+        for c in range(0, width, tile_size):
+            p_tile = prob[r:r + tile_size, c:c + tile_size]
+            l_tile = labels[r:r + tile_size, c:c + tile_size]
+            rows.append(r)
+            cols.append(c)
+            n_pixels.append(l_tile.size)
+            actual.append(float(l_tile.sum()))
+            expected.append(float(p_tile.sum()))
+
+    actual = np.asarray(actual)
+    expected = np.asarray(expected)
+    agg = _burn_area_aggregate(actual, expected)
+    per_tile = {
+        'row': np.asarray(rows),
+        'col': np.asarray(cols),
+        'n_pixels': np.asarray(n_pixels),
+        'actual': actual,
+        'expected': expected,
+        'error': expected - actual,
+    }
+
+    _print_burn_summary(
+        agg, f"Tile burn-area analysis ({tile_size}x{tile_size} tiles, "
+        f"units = burned pixels):", "Tiles", "tile")
+    if csv_path is not None:
+        _write_burn_csv(per_tile, csv_path, "per-tile burn areas")
+    if plot is not None:
+        _plot_burn_scatter(
+            actual, expected, plot,
+            f"{tile_size}x{tile_size} tiles")
+
+    return {**agg, 'n_tiles': agg['n'], 'per_tile': per_tile}
+
+
+def _print_extreme_municipalities(per_muni, top_n):
+    """Print the municipalities whose expected burn most over/under-shoots actual."""
+    error = np.asarray(per_muni['error'])
+    if error.size == 0 or top_n <= 0:
+        return
+    name = np.asarray(per_muni['nm_mun'])
+    uf = np.asarray(per_muni['sigla_uf'])
+    actual = np.asarray(per_muni['actual'])
+    expected = np.asarray(per_muni['expected'])
+    order = np.argsort(error)  # most negative (under-predicted) first
+
+    def line(i):
+        return (f"    {name[i]} ({uf[i]}): actual={actual[i]:.1f} "
+                f"expected={expected[i]:.1f} error={error[i]:+.1f}")
+
+    print(f"  Most OVER-predicted (expected >> actual), top {top_n}:")
+    for i in order[::-1][:top_n]:
+        print(line(i))
+    print(f"  Most UNDER-predicted (expected << actual), top {top_n}:")
+    for i in order[:top_n]:
+        print(line(i))
+
+
+def municipality_burn_area_stats(predictions, ground_truth, transform, crs,
+                                 shp_path, name_field='nm_mun',
+                                 code_field='cd_mun', state_field='sigla_uf',
+                                 top_n=5, csv_path=None, plot=None,
+                                 highlight_cd_mun=None):
+    """Compare actual vs expected burn area aggregated by Brazilian municipality.
+
+    The zonal analogue of ``tile_burn_area_stats``: instead of a fixed grid, it
+    rasterizes the municipality polygons from ``shp_path`` onto the prediction
+    grid (given by ``transform`` / ``crs``) and, per municipality that overlaps
+    the scene, sums the ground-truth burned pixels (*actual* burn area) and the
+    predicted fire probabilities (*expected* burn area -- the expected number of
+    burned pixels, **not** a thresholded count). Municipalities are administrative
+    units fire managers act on, so this reports where the model over- or
+    under-predicts the regional burn amount.
+
+    Actual and expected are in units of burned pixels; only municipalities with
+    at least one pixel inside the scene are kept. Runs on ``predictions`` as
+    passed in, before any post-hoc calibration applied by ``calc_stats``.
+
+    Args:
+        predictions: binary scores ``(H, W)`` or multiclass band-first array;
+            converted to P(fire) via ``_fire_probability``.
+        ground_truth: array of integer class labels; burned = ``> 0``.
+        transform: affine transform of the prediction grid (from the raster).
+        crs: CRS of the prediction grid; polygons are reprojected to match.
+        shp_path: path to the municipality shapefile.
+        name_field/code_field/state_field: shapefile columns for the name, IBGE
+            code, and state abbreviation.
+        top_n: how many most over/under-predicted municipalities to print.
+        csv_path: if given, write per-municipality rows there.
+        plot: if given, write an expected-vs-actual scatter PNG there.
+        highlight_cd_mun: optional iterable of ``cd_mun`` codes; matching
+            municipalities are highlighted and name-annotated in the scatter
+            plot and flagged in the CSV via a ``highlighted`` column.
+
+    Returns:
+        dict of aggregate stats (as ``_burn_area_aggregate``) plus
+        ``n_municipalities`` and ``per_municipality`` (a dict of per-municipality
+        arrays), or ``None`` if no municipality overlaps the scene.
+    """
+    import geopandas as gpd
+    from rasterio import features
+    from rasterio.transform import array_bounds
+
+    prob = _fire_probability(predictions)
+    labels = np.asarray(ground_truth) > 0
+    if prob.shape != labels.shape:
+        raise ValueError(f"prediction spatial shape {prob.shape} and "
+                         f"ground-truth shape {labels.shape} differ")
+    height, width = prob.shape
+
+    gdf = gpd.read_file(shp_path)
+    if crs is not None and gdf.crs is not None and str(gdf.crs) != str(crs):
+        gdf = gdf.to_crs(crs)
+    # Restrict to municipalities overlapping the raster's bounding box.
+    left, bottom, right, top = array_bounds(height, width, transform)
+    gdf = gdf.cx[left:right, bottom:top].reset_index(drop=True)
+    if len(gdf) == 0:
+        print("Municipality burn-area analysis: no municipalities overlap the "
+              "prediction extent.")
+        return None
+
+    # Rasterize polygons to zone ids 1..N (0 = outside any polygon) on the
+    # prediction grid, then take zonal sums via weighted bincount.
+    shapes = ((geom, i + 1) for i, geom in enumerate(gdf.geometry))
+    zones = features.rasterize(shapes, out_shape=(height, width),
+                               transform=transform, fill=0, dtype='int32')
+    zones_flat = zones.ravel()
+    n = len(gdf)
+    counts = np.bincount(zones_flat, minlength=n + 1)[1:]
+    actual_all = np.bincount(zones_flat, weights=labels.ravel().astype(np.float64),
+                             minlength=n + 1)[1:]
+    expected_all = np.bincount(zones_flat, weights=prob.ravel().astype(np.float64),
+                               minlength=n + 1)[1:]
+
+    present = counts > 0  # keep only municipalities with pixels in the scene
+    gdf_p = gdf.loc[present]
+    actual = actual_all[present]
+    expected = expected_all[present]
+
+    agg = _burn_area_aggregate(actual, expected)
+    per_muni = {
+        'cd_mun': gdf_p[code_field].to_numpy(),
+        'nm_mun': gdf_p[name_field].to_numpy(),
+        'sigla_uf': gdf_p[state_field].to_numpy(),
+        'n_pixels': counts[present].astype(np.int64),
+        'actual': actual,
+        'expected': expected,
+        'error': expected - actual,
+    }
+
+    highlight_mask = None
+    if highlight_cd_mun:
+        wanted = {str(c).strip() for c in highlight_cd_mun}
+        codes_str = per_muni['cd_mun'].astype(str)
+        highlight_mask = np.isin(codes_str, list(wanted))
+        matched = codes_str[highlight_mask]
+        missing = wanted - set(matched.tolist())
+        print(f"  Highlighting {highlight_mask.sum()} municipalities by cd_mun.")
+        if missing:
+            print(f"  cd_mun not found in scene: {', '.join(sorted(missing))}")
+        per_muni['highlighted'] = highlight_mask
+
+    _print_burn_summary(
+        agg, "Municipality burn-area analysis (units = burned pixels):",
+        "Municipalities", "municipality")
+    _print_extreme_municipalities(per_muni, top_n)
+    if csv_path is not None:
+        _write_burn_csv(per_muni, csv_path, "per-municipality burn areas")
+    if plot is not None:
+        _plot_burn_scatter(
+            actual, expected, plot, "municipalities",
+            highlight_mask=highlight_mask, highlight_labels=per_muni['nm_mun'])
+
+    return {**agg, 'n_municipalities': agg['n'], 'per_municipality': per_muni}
+
+
+def _block_max_pool(arr, block):
+    """Non-overlapping ``block`` x ``block`` max-pool of a 2-D array.
+
+    When H/W are not multiples of ``block`` the array is zero-padded on the
+    bottom/right first. Zero padding is safe for both the fire-probability and
+    the 0/1 label fields because 0 is the minimum possible value, so a partial
+    edge block's max is effectively taken over its real pixels only.
+    """
+    block = int(block)
+    if block <= 1:
+        return np.asarray(arr)
+    arr = np.asarray(arr)
+    height, width = arr.shape
+    pad_h, pad_w = (-height) % block, (-width) % block
+    if pad_h or pad_w:
+        arr = np.pad(arr, ((0, pad_h), (0, pad_w)), constant_values=0)
+    padded_h, padded_w = arr.shape
+    return arr.reshape(padded_h // block, block,
+                       padded_w // block, block).max(axis=(1, 3))
+
+
+def _default_pyramid_blocks(height, width):
+    """Powers-of-two block sizes ``[1, 2, 4, ...]`` up to ``min(H, W)``.
+
+    Stops once a single block would span the whole smaller dimension, since
+    beyond that the pooled grid is a single row/column and the detection metrics
+    degenerate.
+    """
+    limit = max(1, min(height, width))
+    blocks, block = [], 1
+    while block <= limit:
+        blocks.append(block)
+        block *= 2
+    return blocks
+
+
+def _print_pyramid_summary(levels, threshold):
+    """Print the per-level pyramid detection metrics as a compact table."""
+    print(f"Pyramid max-pool detection metrics (threshold={threshold:g}):")
+    print(f"  {'block':>7} {'grid':>13} {'n_pos':>9} {'precision':>10} "
+          f"{'recall':>8} {'f1':>8} {'pr_auc':>8}")
+    for s in levels:
+        grid = f"{s['grid_h']}x{s['grid_w']}"
+        print(f"  {str(s['block']) + 'px':>7} {grid:>13} {s['n_truth']:>9} "
+              f"{s['precision']:>10.4f} {s['recall']:>8.4f} {s['f1']:>8.4f} "
+              f"{s['pr_auc']:>8.4f}")
+
+
+def _plot_pyramid(levels, out_path, threshold):
+    """Save an F1 / PR-AUC vs block-size line plot (log2 x-axis).
+
+    matplotlib is imported lazily; if it is not installed, prints a notice and
+    returns False instead of raising (mirrors ``_plot_burn_scatter``).
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # headless backend, no display required
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print(f"matplotlib not installed; skipping pyramid plot ({out_path}).")
+        return False
+
+    blocks = [s['block'] for s in levels]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(blocks, [s['f1'] for s in levels], 'o-', color='C0', label='F1')
+    ax.plot(blocks, [s['pr_auc'] for s in levels], 's-', color='C1',
+            label='PR AUC')
+    ax.set_xscale('log', base=2)
+    ax.set_xticks(blocks)
+    ax.set_xticklabels([str(b) for b in blocks])
+    ax.set_xlabel('block size (pixels per side)')
+    ax.set_ylabel('score')
+    ax.set_ylim(0, 1)
+    ax.set_title(f'Multi-scale detection (threshold={threshold:g})')
+    ax.legend(loc='lower right')
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    return True
+
+
+def pyramid_pool_stats(predictions, ground_truth, threshold=0.5,
+                       block_sizes=None, csv_path=None, plot=None):
+    """Detection metrics (PR AUC / F1) over a pyramid of max-pooled blocks.
+
+    Builds a spatial pyramid by non-overlapping max-pooling both the predicted
+    fire probability and the 0/1 burned-label field at increasing block sizes
+    (1x1, 2x2, 4x4, ... by default). At each level a block is *positive* if any
+    of its pixels burned (max of the labels), and its predicted score is the max
+    fire probability over the block; PR AUC uses those pooled scores and F1 uses
+    them thresholded at ``threshold``.
+
+    Coarsening this way relaxes the spatial-placement requirement: a model that
+    detects fire in roughly the right neighborhood but misses the exact pixel is
+    penalized at 1x1 yet scores well once the block is large enough to contain
+    both the predicted and actual pixel. The curve of F1 / PR AUC vs block size
+    therefore shows at what spatial scale the model's detections become reliable
+    -- complementary to ``tile_burn_area_stats`` (which checks regional burn
+    *amount*) and to the per-pixel metrics from ``calc_stats``.
+
+    Args:
+        predictions: binary scores ``(H, W)`` or multiclass band-first array
+            ``(num_classes + 1, H, W)``; converted to P(fire) via
+            ``_fire_probability``.
+        ground_truth: array of integer class labels; burned = ``> 0``.
+        threshold: probability threshold for the hard labels used in F1 (the
+            pooled score is compared with ``>`` this value, matching
+            ``calc_stats``).
+        block_sizes: iterable of block side lengths; defaults to powers of two
+            up to ``min(H, W)``.
+        csv_path: if given, write per-level metrics there.
+        plot: if given, write an F1 / PR-AUC vs block-size PNG there.
+
+    Returns:
+        dict with ``threshold``, ``block_sizes``, and ``levels`` (a list of
+        per-level metrics dicts, each the ``_binary_metrics`` output plus
+        ``block``, ``grid_h``, ``grid_w``, ``n_blocks``).
+    """
+    prob = _fire_probability(predictions)
+    labels = np.asarray(ground_truth) > 0
+    if prob.shape != labels.shape:
+        raise ValueError(f"prediction spatial shape {prob.shape} and "
+                         f"ground-truth shape {labels.shape} differ")
+    height, width = prob.shape
+
+    if block_sizes is None:
+        block_sizes = _default_pyramid_blocks(height, width)
+    else:
+        block_sizes = [int(b) for b in block_sizes]
+    labels_f = labels.astype(np.float64)
+
+    levels = []
+    for block in block_sizes:
+        pooled_prob = _block_max_pool(prob, block)
+        pooled_labels = _block_max_pool(labels_f, block) > 0
+        stats = _binary_metrics(pooled_labels, pooled_prob > threshold,
+                                scores=pooled_prob)
+        stats['block'] = block
+        stats['grid_h'], stats['grid_w'] = pooled_prob.shape
+        stats['n_blocks'] = int(pooled_prob.size)
+        levels.append(stats)
+
+    _print_pyramid_summary(levels, threshold)
+    if csv_path is not None:
+        columns = {
+            'block': [s['block'] for s in levels],
+            'grid_h': [s['grid_h'] for s in levels],
+            'grid_w': [s['grid_w'] for s in levels],
+            'n_blocks': [s['n_blocks'] for s in levels],
+            'n_truth': [s['n_truth'] for s in levels],
+            'n_pred': [s['n_pred'] for s in levels],
+            'precision': [s['precision'] for s in levels],
+            'recall': [s['recall'] for s in levels],
+            'f1': [s['f1'] for s in levels],
+            'pr_auc': [s['pr_auc'] for s in levels],
+        }
+        _write_burn_csv(columns, csv_path, "per-level pyramid metrics")
+    if plot is not None:
+        _plot_pyramid(levels, plot, threshold)
+
+    return {'threshold': threshold, 'block_sizes': block_sizes, 'levels': levels}
+
+
+def read_raster_geo(predictions_path):
+    """Return ``(transform, crs)`` for a GeoTIFF path, or ``(None, None)`` for CSV.
+
+    Municipality analysis needs the prediction grid's georeferencing, which
+    ``load_preprocess_inputs`` drops when it returns bare arrays.
+    """
+    if predictions_path.endswith('.csv'):
+        return None, None
+    import rasterio as rio
+    with rio.open(predictions_path) as src:
+        return src.transform, src.crs
+
+
 def load_preprocess_inputs(predictions_path, ground_truth_path):
     """Load and preprocess inputs for evaluation.
 
