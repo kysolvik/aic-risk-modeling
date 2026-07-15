@@ -43,7 +43,7 @@ def create_inputBands(target_year):
 
     #Embeddings from data year
     inputs = (embeddingsCol
-              .filterDate(ee.Date.fromYMD(DataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
+              .filterDate(ee.Date.fromYMD(dataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
               .filterBounds(amazonBounds)
               .mosaic())
 
