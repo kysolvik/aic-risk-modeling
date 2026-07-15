@@ -38,13 +38,12 @@ def addCWD(era5LandImage):
 def create_inputBands(target_year):
     targetYear = ee.Number(target_year)
     dataYear = targetYear.subtract(1)
-    prevDataYear = targetYear.subtract(2)
 
     ### Input Bands
 
-    #Embeddings from 2Y ago
+    #Embeddings from data year
     inputs = (embeddingsCol
-              .filterDate(ee.Date.fromYMD(prevDataYear, 1, 1), ee.Date.fromYMD(dataYear, 1, 1))
+              .filterDate(ee.Date.fromYMD(DataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
               .filterBounds(amazonBounds)
               .mosaic())
 
@@ -85,8 +84,8 @@ def create_inputBands(target_year):
     glad_alertdate = ee.Image('projects/glad/S2alert/alertDate').rename('glad_alertdate').unmask(0);
 
     # ERA5 climate data
-    startMeteo = ee.Date.fromYMD(prevDataYear, 11, 1)
-    endMeteo = ee.Date.fromYMD(dataYear, 11, 1)
+    startMeteo = ee.Date.fromYMD(dataYear, 1, 1)
+    endMeteo = ee.Date.fromYMD(dataYear, 12, 31) #Changed this timelapse too, hope it still works
 
     # ERA5 Ag - Daily, with temp vars and more
     era5Ag = (ee.ImageCollection('projects/climate-engine-pro/assets/ce-ag-era5-v2/daily')
