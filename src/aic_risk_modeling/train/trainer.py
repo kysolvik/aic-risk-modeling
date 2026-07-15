@@ -3,7 +3,9 @@
 This module provides functionality to train a segmentation model for predicting burned areas.
 Models and the training loop are PyTorch; data loading runs via tf.data TFRecord
 pipeline in `data_loader`.
-Training includes checkpointing on best validation PR AUC and early stopping.
+Training includes checkpointing and early stopping on configurable validation
+metrics ('checkpoint_metric' / 'early_stopping_metric'); 'loss' is minimized,
+every other metric is maximized.
 """
 
 import csv
@@ -237,6 +239,26 @@ def _run_epoch(model, dataset, loss_function, device, metrics,
     return results
 
 
+class _BestTracker:
+    """Tracks whether a monitored validation metric has improved.
+
+    `metric` names a key of the per-epoch validation results; 'loss' is
+    minimized, every other metric is maximized. Ties are not improvements.
+    """
+
+    def __init__(self, metric):
+        self.metric = metric
+        self._sign = -1.0 if metric == 'loss' else 1.0
+        self._best = float('-inf')
+
+    def improved(self, results):
+        value = self._sign * results[self.metric]
+        if value > self._best:
+            self._best = value
+            return True
+        return False
+
+
 def run(config):
     # Some options that have defaults
     steps_per_epoch = config.get('steps_per_epoch', 5000)
@@ -248,12 +270,17 @@ def run(config):
     # Positive-class weight for the binary weighted losses; also the default
     # weight for fire pixels of types not explicitly listed in 'sample_weight'.
     pos_weight = config.get('pos_weight', 9.0)
+    # Aggregate burn-area term options, used by 'weighted_bce_area'.
+    area_weight = config.get('area_loss_weight', 1.0)
+    area_block_size = config.get('area_block_size')
 
     # Get loss function
     loss_function = losses.get_loss(config['loss_function'],
                                     num_classes=num_classes,
                                     class_weights=config.get('class_weights'),
-                                    pos_weight=pos_weight)
+                                    pos_weight=pos_weight,
+                                    area_weight=area_weight,
+                                    area_block_size=area_block_size)
 
     # Get datasets
     training_ds = data_loader.build_merged_dataset(
@@ -327,21 +354,35 @@ def run(config):
     # Mixed precision (mirrors the old keras mixed_float16 policy)
     scaler = torch.amp.GradScaler(enabled=device.type == 'cuda')
 
-    # Multi-class tracks a confusion matrix and checkpoints on foreground IoU;
-    # binary keeps the streaming ROC/PR-AUC metrics and checkpoints on PR AUC.
+    # Multi-class tracks a confusion matrix and by default checkpoints on
+    # foreground IoU; binary keeps the streaming ROC/PR-AUC metrics and by
+    # default checkpoints on PR AUC. Any validation results key (e.g. 'loss')
+    # can be configured instead.
     if num_classes > 1:
         train_metrics = MulticlassSegmentationMetrics(num_classes)
         val_metrics = MulticlassSegmentationMetrics(num_classes)
         checkpoint_metric = config.get('checkpoint_metric', 'fire_iou')
     else:
-        train_metrics = SegmentationMetrics()
-        val_metrics = SegmentationMetrics()
+        # The area_ratio metric deflates predictions by pos_weight, but only
+        # for losses that actually train toward the inflated optimum.
+        metric_pos_weight = (
+            pos_weight
+            if config['loss_function'] in losses.POS_WEIGHT_LOSSES else 1.0)
+        train_metrics = SegmentationMetrics(pos_weight=metric_pos_weight)
+        val_metrics = SegmentationMetrics(pos_weight=metric_pos_weight)
         checkpoint_metric = config.get('checkpoint_metric', 'pr_auc')
+
+    # Early stopping watches its own (configurable) metric, defaulting to the
+    # checkpoint metric, so e.g. checkpointing on val loss while stopping on
+    # PR AUC stagnation (or vice versa) is possible.
+    early_stopping_metric = config.get('early_stopping_metric',
+                                       checkpoint_metric)
+    checkpoint_tracker = _BestTracker(checkpoint_metric)
+    early_stop_tracker = _BestTracker(early_stopping_metric)
 
     checkpoint_filepath = './checkpoint.model.pt'
     csv_path = './training.csv'
     history = []
-    best_val_metric = float('-inf')
     epochs_since_improvement = 0
 
     for epoch in range(config['epochs']):
@@ -364,17 +405,17 @@ def run(config):
               " - ".join(f"{k}={v:.6f}" for k, v in row.items() if k != 'epoch'),
               flush=True)
 
-        # Checkpoint on best val checkpoint_metric, with early stopping
-        if val_results[checkpoint_metric] > best_val_metric:
-            best_val_metric = val_results[checkpoint_metric]
-            epochs_since_improvement = 0
+        # Checkpoint on best val checkpoint_metric, stop on early_stopping_metric
+        if checkpoint_tracker.improved(val_results):
             torch.save({'config': config, 'model_state_dict': model.state_dict()},
                        checkpoint_filepath)
+        if early_stop_tracker.improved(val_results):
+            epochs_since_improvement = 0
         else:
             epochs_since_improvement += 1
             if epochs_since_improvement >= patience:
-                print(f"Early stopping: no val_{checkpoint_metric} improvement "
-                      f"in {patience} epochs.")
+                print(f"Early stopping: no val_{early_stopping_metric} "
+                      f"improvement in {patience} epochs.")
                 break
 
     # Load best checkpoint
