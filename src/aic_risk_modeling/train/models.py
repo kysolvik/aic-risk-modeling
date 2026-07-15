@@ -791,7 +791,9 @@ class MTSViTFusion(nn.Module):
                  patch_size=8, temporal_depth=2, spatial_depth=2, num_heads=4,
                  mlp_ratio=2, dropout=0.1, spatial_in_encoder=False,
                  branch_norm=None, branch_norm_exclude=None,
-                 transformer_out_channels=16):
+                 transformer_out_channels=16, climate_film=False,
+                 film_location=None, film_cond_dim=128, film_num_freqs=16,
+                 film_sigma=1.0, film_location_features=2):
         super().__init__()
         self.num_classes = num_classes
         self.embed_dim = embed_dim
@@ -889,7 +891,7 @@ class MTSViTFusion(nn.Module):
         # `transformer_out_channels` floors the halving, setting the width the
         # transformer contributes to the fusion concat (default 16 reproduces
         # the original stack so pre-existing checkpoints load unchanged). This
-        # is the controls how much of the head's channel budget the temporal/
+        # controls how much of the head's channel budget the temporal/
         # weather/climate pathway gets vs the full-res spatial branches.
         upsample = []
         in_ch = embed_dim
@@ -919,11 +921,76 @@ class MTSViTFusion(nn.Module):
         )
         self.out_conv = nn.Conv2d(16, num_classes, 1)
 
+        # Optional climate x location FiLM over the head (the MTSViT port of
+        # the standalone FiLMFusion decoder's mechanism -- kept separate so
+        # that decoder's checkpoints are untouched): the rank-2 context
+        # branches (monthly climate indices) are encoded to a conditioning
+        # vector, optionally gated per tile by the `film_location` coordinates
+        # (random Fourier features, zero-init gate -- ENSO teleconnections are
+        # spatially uneven), and zero-init FiLM layers modulate each head
+        # stage. Identity at init, and `head.*` parameter names are unchanged,
+        # so checkpoints trained without climate_film rebuild and load, and a
+        # rebalance-only checkpoint can warm-start a climate_film run.
+        self.climate_film = climate_film
+        self.film_location = film_location
+        if climate_film:
+            if not temporal_branches:
+                raise ValueError(
+                    "climate_film needs at least one temporal-context input: "
+                    "an identity branch with shape [T, F]")
+            cond_in = sum(b.input_shape[0] * b.input_shape[1]
+                          for b in temporal_branches)
+            self.film_conditioner = nn.Sequential(
+                nn.Linear(cond_in, film_cond_dim), nn.ReLU(),
+                nn.Linear(film_cond_dim, film_cond_dim), nn.ReLU(),
+            )
+            if film_location is not None:
+                matches = [b for b in branch_models
+                           if b.input_name == film_location]
+                if not matches:
+                    raise ValueError(f"film_location '{film_location}' "
+                                     f"matches no input branch")
+                # Non-identity location branches (e.g. coord_fourier) don't
+                # expose input_shape; film_location_features covers them
+                # (md_single's (md_x, md_y) -> 2).
+                loc_shape = getattr(matches[0], "input_shape", None)
+                in_features = (loc_shape[-1] if loc_shape is not None
+                               else film_location_features)
+                self.register_buffer(
+                    "film_freq_proj",
+                    torch.randn(in_features, film_num_freqs) * film_sigma)
+                self.film_loc_encoder = nn.Sequential(
+                    nn.Linear(in_features + 2 * film_num_freqs,
+                              film_cond_dim), nn.ReLU(),
+                    nn.Linear(film_cond_dim, film_cond_dim), nn.ReLU(),
+                )
+                self.film_loc_gate = nn.Linear(film_cond_dim,
+                                               2 * film_cond_dim)
+                nn.init.zeros_(self.film_loc_gate.weight)
+                nn.init.zeros_(self.film_loc_gate.bias)
+            # One FiLM per head stage (the head's conv widths are fixed).
+            self.films = nn.ModuleList(
+                [FiLM(film_cond_dim, c) for c in (128, 64, 32, 16)])
+
         for pos in list(self.temporal_pos.values()) + list(self.context_pos.values()):
             nn.init.trunc_normal_(pos, std=0.02)
         nn.init.trunc_normal_(self.spatial_pos, std=0.02)
         for cls in self.cls_tokens.values():
             nn.init.trunc_normal_(cls, std=0.02)
+
+    def _film_condition(self, inputs):
+        """Climate conditioning vector, optionally gated by tile location
+        (mirrors FiLMFusion._condition)."""
+        flat = [inputs[name].flatten(1) for name in self.context_names]
+        cond = self.film_conditioner(torch.cat(flat, dim=1))
+        if self.film_location is not None:
+            coord = inputs[self.film_location].flatten(1)
+            proj = 2 * math.pi * (coord @ self.film_freq_proj)
+            feats = torch.cat([coord, proj.sin(), proj.cos()], dim=-1)
+            gamma, beta = self.film_loc_gate(
+                self.film_loc_encoder(feats)).chunk(2, dim=1)
+            cond = cond * (1 + gamma) + beta  # location gates climate
+        return cond
 
     def _encode_context(self, inputs):
         if not self.context_names:
@@ -973,7 +1040,18 @@ class MTSViTFusion(nn.Module):
         batch = x.shape[0]
         x = x.permute(0, 2, 1).reshape(batch, self.embed_dim, *self.grid)
         x = self.upsample(x)
-        x = self.head(torch.cat(self.branch_norm([x] + spatial_feats), dim=1))
+        x = torch.cat(self.branch_norm([x] + spatial_feats), dim=1)
+        if self.climate_film:
+            cond = self._film_condition(inputs)
+            # Head layout is [Conv, ReLU, BN] x3 + [Conv, ReLU]; apply one
+            # FiLM at each stage boundary (after indices 2, 5, 8, 10).
+            film_at = {2: 0, 5: 1, 8: 2, 10: 3}
+            for i, module in enumerate(self.head):
+                x = module(x)
+                if i in film_at:
+                    x = self.films[film_at[i]](x, cond)
+        else:
+            x = self.head(x)
         # Head output runs in float32 even under autocast
         with torch.autocast(device_type=x.device.type, enabled=False):
             logits = self.out_conv(x.float())
