@@ -164,7 +164,7 @@ def create_inputBands(target_year):
     #VIIRS Fire Memory
 
     viirs_start_date = ee.Date.fromYMD(dataYear.subtract(4), 1, 1)
-    viirs_end_date = ee.Date.fromYMD(dataYear, 11, 1)
+    viirs_end_date = ee.Date.fromYMD(dataYear, 12, 31)
 
     fiveYFires = (ee.ImageCollection('projects/ksolvik-misc/assets/viirs_snpp_archive').filterDate(viirs_start_date, viirs_end_date))
 
