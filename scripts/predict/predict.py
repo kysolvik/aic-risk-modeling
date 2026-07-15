@@ -156,8 +156,11 @@ def main():
             with torch.autocast(device_type=device.type, dtype=amp_dtype,
                                 enabled=amp_enabled):
                 preds = model(inputs)
-            # Prepend argmax
-            if preds.shape[-1] > 1:
+            # Multiclass preds are (B, H, W, C): prepend the argmax class as an
+            # extra band. Binary preds are (B, H, W) and must not match here
+            # (shape[-1] is W for them, so a bare `shape[-1] > 1` misfires and
+            # corrupts the rasters with an argmax-over-width column).
+            if preds.ndim == 4 and preds.shape[-1] > 1:
                 p = torch.argmax(preds, dim=-1, keepdim=True)
                 preds = torch.cat([p.float(), preds], dim=-1)
 

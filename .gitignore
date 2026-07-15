@@ -232,3 +232,6 @@ notebooks/
 
 # .tar.gz (package dists)
 *.tar.gz
+
+# Output dir
+out/
