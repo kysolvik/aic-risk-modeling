@@ -76,7 +76,8 @@ def set_raw_x_y(features):
 
 
 # dtype to uint8, and specify LZW compression.
-def write_batch(outs, masks, xs, ys, base_transform, profile, output_dir, edge_crop):
+def write_batch(outs, masks, xs, ys, base_transform, profile, output_dir,
+                edge_crop, band_names=None, out_prefix='out', write_mask=True):
     for i in range(len(outs)):
         out =outs[i]
         mask =masks[i]
@@ -100,16 +101,19 @@ def write_batch(outs, masks, xs, ys, base_transform, profile, output_dir, edge_c
                        height=out.shape[0],
                        width=out.shape[1],
                        transform=transform)
-        with rio.open(
-            f'{output_dir}/mask_{x}-{y}.tif', 'w', **profile) as dst_dataset:
-                dst_dataset.write(mask.astype(rio.int8), 1)
+        if write_mask:
+            with rio.open(
+                f'{output_dir}/mask_{x}-{y}.tif', 'w', **profile) as dst_dataset:
+                    dst_dataset.write(mask.astype(rio.int8), 1)
 
         # One band per class (softmax probabilities); single band for binary.
         profile.update(dtype=rio.float32, count=n_bands)
         with rio.open(
-            f'{output_dir}/out_{x}-{y}.tif', 'w', **profile) as dst_dataset:
+            f'{output_dir}/{out_prefix}_{x}-{y}.tif', 'w', **profile) as dst_dataset:
                 for b in range(n_bands):
                     dst_dataset.write(out[:, :, b].astype(rio.float32), b + 1)
+                    if band_names:
+                        dst_dataset.set_band_description(b + 1, band_names[b])
 
 def main():
     args = parse_args()
