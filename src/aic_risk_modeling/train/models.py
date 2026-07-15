@@ -423,6 +423,26 @@ class IdentityModel(nn.Module):
         return x
 
 
+class ProjectionModel(nn.Module):
+    """Linear (1x1) projection of a channels-last input to `out_channels`.
+
+    Adjust width of passthrough branches (e.g. the 64-channel AlphaEarth
+    embedding) so a single branch doesn't dominate the fusion head's channel
+    budget. Intended for rank-3 [H, W, C] inputs, which route to the spatial
+    branches by rank exactly like IdentityModel.
+    """
+
+    def __init__(self, input_shape, input_name=None, out_channels=16):
+        super().__init__()
+        self.input_name = input_name
+        self.input_shape = list(input_shape)
+        self.out_channels = out_channels
+        self.proj = nn.Linear(input_shape[-1], out_channels)
+
+    def forward(self, x):
+        return self.proj(x)
+
+
 class _ScaleGain(nn.Module):
     """Per-source learnable scalar gain (magnitude rescale, distribution kept)."""
 
@@ -770,7 +790,8 @@ class MTSViTFusion(nn.Module):
     def __init__(self, branch_models, num_classes=1, embed_dim=128,
                  patch_size=8, temporal_depth=2, spatial_depth=2, num_heads=4,
                  mlp_ratio=2, dropout=0.1, spatial_in_encoder=False,
-                 branch_norm=None, branch_norm_exclude=None):
+                 branch_norm=None, branch_norm_exclude=None,
+                 transformer_out_channels=16):
         super().__init__()
         self.num_classes = num_classes
         self.embed_dim = embed_dim
@@ -864,12 +885,17 @@ class MTSViTFusion(nn.Module):
             TransformerLayer(embed_dim, num_heads, mlp_ratio, dropout)
             for _ in range(spatial_depth)])
 
-        # Stage 3: upsample tokens back to full resolution
+        # Stage 3: upsample tokens back to full resolution.
+        # `transformer_out_channels` floors the halving, setting the width the
+        # transformer contributes to the fusion concat (default 16 reproduces
+        # the original stack so pre-existing checkpoints load unchanged). This
+        # is the controls how much of the head's channel budget the temporal/
+        # weather/climate pathway gets vs the full-res spatial branches.
         upsample = []
         in_ch = embed_dim
         scale = patch_size
         while scale > 1:
-            out_ch = max(in_ch // 2, 16)
+            out_ch = max(in_ch // 2, transformer_out_channels)
             upsample.append(nn.Upsample(scale_factor=2, mode="bilinear"))
             upsample.append(nn.Conv2d(in_ch, out_ch, 3, padding=1))
             upsample.append(nn.ReLU())
@@ -966,6 +992,10 @@ def get_unet(input_shape, input_name=None, for_fusion=True):
 
 def get_unet_lite(input_shape, input_name=None, for_fusion=True):
     return UNetLite(input_shape, input_name, for_fusion=for_fusion)
+
+
+def get_projection(input_shape, input_name=None, out_channels=16):
+    return ProjectionModel(input_shape, input_name, out_channels=out_channels)
 
 
 def get_mlp(input_shape, input_name=None):
