@@ -8,28 +8,42 @@ batches are accumulated.
 
 import torch
 
+from . import losses
+
 
 class SegmentationMetrics:
-    """Accumulates binary IoU, ROC AUC, and PR AUC over batches.
+    """Accumulates binary IoU, ROC AUC, PR AUC, and area ratio over batches.
 
     `update` takes ground truth (any shape, bool or 0/1) and predicted
     probabilities of the same shape. Histograms live on the same device as
     the predictions, so no per-batch device transfers happen.
+
+    `area_ratio` is total expected positives / total actual positives — the
+    aggregate calibration of the epoch (1.0 = calibrated). Pass the
+    `pos_weight` the loss was built with so predictions are deflated back to
+    the calibrated scale first (see `losses.deflate_probs`); leave it at 1.0
+    for losses that don't inflate probabilities.
     """
 
-    def __init__(self, num_thresholds=512, iou_threshold=0.5):
+    def __init__(self, num_thresholds=512, iou_threshold=0.5, pos_weight=1.0):
         self.num_thresholds = num_thresholds
         self.iou_threshold = iou_threshold
+        self.pos_weight = pos_weight
         self.reset()
 
     def reset(self):
         self.pos_hist = None
         self.neg_hist = None
+        self.pred_sum = 0.0
+        self.true_sum = 0.0
 
     @torch.no_grad()
     def update(self, y_true, y_pred):
         y_pred = y_pred.detach().float().flatten().clamp(0.0, 1.0)
         y_true = y_true.detach().bool().flatten()
+        self.pred_sum += float(
+            losses.deflate_probs(y_pred, self.pos_weight).sum())
+        self.true_sum += float(y_true.sum())
         pos = torch.histc(y_pred[y_true], bins=self.num_thresholds,
                           min=0.0, max=1.0)
         neg = torch.histc(y_pred[~y_true], bins=self.num_thresholds,
@@ -41,11 +55,16 @@ class SegmentationMetrics:
             self.pos_hist += pos
             self.neg_hist += neg
 
+    def _area_ratio(self):
+        return self.pred_sum / self.true_sum if self.true_sum > 0 else 0.0
+
     @torch.no_grad()
     def compute(self):
-        """Returns {'binary_iou', 'roc_auc', 'pr_auc'} as python floats."""
+        """Returns {'binary_iou', 'roc_auc', 'pr_auc', 'area_ratio'} as python
+        floats."""
         if self.pos_hist is None:
-            return {'binary_iou': 0.0, 'roc_auc': 0.0, 'pr_auc': 0.0}
+            return {'binary_iou': 0.0, 'roc_auc': 0.0, 'pr_auc': 0.0,
+                    'area_ratio': self._area_ratio()}
 
         # tp[k]/fp[k]: counts predicted positive at threshold k/num_thresholds,
         # i.e. reverse cumulative sums of the histograms (k = 0..num_thresholds).
@@ -55,7 +74,8 @@ class SegmentationMetrics:
         total_pos = tp[0]
         total_neg = fp[0]
         if total_pos == 0 or total_neg == 0:
-            return {'binary_iou': 0.0, 'roc_auc': 0.0, 'pr_auc': 0.0}
+            return {'binary_iou': 0.0, 'roc_auc': 0.0, 'pr_auc': 0.0,
+                    'area_ratio': self._area_ratio()}
 
         tpr = tp / total_pos
         fpr = fp / total_neg
@@ -75,6 +95,7 @@ class SegmentationMetrics:
             'binary_iou': float(binary_iou),
             'roc_auc': float(roc_auc),
             'pr_auc': float(pr_auc),
+            'area_ratio': self._area_ratio(),
         }
 
 

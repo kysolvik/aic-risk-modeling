@@ -47,6 +47,8 @@ from .data_stats import (
 from .losses import (
     weighted_bce,
     weighted_bce_dice,
+    weighted_bce_area,
+    deflate_probs,
     get_loss
 )
 
@@ -90,6 +92,8 @@ __all__ = [
     "build_merged_dataset",
     "weighted_bce",
     "weighted_bce_dice",
+    "weighted_bce_area",
+    "deflate_probs",
     "get_loss",
     "get_lstm",
     "get_convlstm_bottleneck",

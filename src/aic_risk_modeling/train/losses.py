@@ -78,6 +78,71 @@ def weighted_bce_dice(pos_weight):
     return loss
 
 
+def deflate_probs(y_pred, pos_weight):
+    """Invert the probability inflation caused by a weighted BCE.
+
+    Training with `pos_weight` w drives predictions toward the pointwise
+    optimum q = w*p / (w*p + 1 - p), an inflated version of the calibrated
+    probability p. This maps q back to p = q / (w - (w-1)*q) exactly
+    (identity when pos_weight is 1), so sums of deflated probabilities are
+    comparable to actual positive-pixel counts.
+    """
+    return y_pred / (pos_weight - (pos_weight - 1.0) * y_pred)
+
+
+def area_log_ratio(pos_weight=1.0, block_size=None):
+    """Aggregate burn-area term: squared log-ratio of expected vs actual count.
+
+    Per batch element, compares the expected positive-pixel count (sum of
+    deflated predicted probabilities, see `deflate_probs`) against the actual
+    count, as (log1p(expected) - log1p(actual))**2 — scale-free and finite for
+    empty chips. With `block_size` K the counts are compared per K x K block
+    (K must divide the chip size) instead of per whole chip.
+
+    Per-pixel sample weights don't apply to an aggregate count; the argument
+    is accepted only to keep a uniform loss call signature.
+    """
+    def loss(y_true, y_pred, sample_weight=None):
+        y_true = y_true.float()
+        p_hat = deflate_probs(y_pred.clamp(_EPSILON, 1.0 - _EPSILON),
+                              pos_weight)
+        if block_size:
+            scale = float(block_size * block_size)
+            expected = torch.nn.functional.avg_pool2d(
+                p_hat.unsqueeze(1), block_size) * scale
+            actual = torch.nn.functional.avg_pool2d(
+                y_true.unsqueeze(1), block_size) * scale
+        else:
+            expected = p_hat.flatten(1).sum(1)
+            actual = y_true.flatten(1).sum(1)
+        return (torch.log1p(expected) - torch.log1p(actual)).pow(2).mean()
+    return loss
+
+
+def weighted_bce_area(pos_weight, area_weight=1.0, area_block_size=None):
+    """Weighted BCE plus an aggregate expected-burn-area term.
+
+    The area term ties the summed prediction to the summed label so the
+    aggregate burn level (e.g. year-to-year severity) carries explicit loss
+    pressure instead of only the diffuse per-pixel signal. It always deflates
+    predictions by `pos_weight` first (`deflate_probs`), anchoring the
+    calibrated count so it doesn't fight the WBCE optimum. The trainer calls
+    losses outside autocast on float32 predictions, which the log-ratio term
+    relies on.
+
+    sample_weight applies to the BCE term only; note that a per-type
+    sample_weight map makes the effective per-pixel pos_weight vary, so the
+    scalar deflation is then only approximate.
+    """
+    wbce = weighted_bce(pos_weight)
+    area = area_log_ratio(pos_weight, area_block_size)
+
+    def loss(y_true, y_pred, sample_weight=None):
+        return (wbce(y_true, y_pred, sample_weight)
+                + area_weight * area(y_true, y_pred))
+    return loss
+
+
 def _true_class_prob(y_true, y_pred):
     """Probability the model assigned to each pixel's true class.
 
@@ -111,10 +176,20 @@ LOSSES_DICT = {
     'dice': dice,
     'focal': focal(),
     'weighted_bce_dice': weighted_bce_dice(9.0),
+    'weighted_bce_area': weighted_bce_area(9.0),
 }
 
+# Losses whose predictions are inflated by pos_weight (see deflate_probs);
+# consumers (e.g. the area_ratio metric) should deflate before summing.
+POS_WEIGHT_LOSSES = frozenset({
+    'weighted_binary_crossentropy',
+    'weighted_bce_dice',
+    'weighted_bce_area',
+})
 
-def get_loss(loss_name, num_classes=1, class_weights=None, pos_weight=9.0):
+
+def get_loss(loss_name, num_classes=1, class_weights=None, pos_weight=9.0,
+             area_weight=1.0, area_block_size=None):
     """Retrieves a loss function by name.
 
     Args:
@@ -126,8 +201,13 @@ def get_loss(loss_name, num_classes=1, class_weights=None, pos_weight=9.0):
         class_weights: optional per-class weights (length num_classes) for
             'weighted_categorical_crossentropy'; defaults to all ones.
         pos_weight: positive-class weight for the binary weighted losses
-            ('weighted_binary_crossentropy', 'weighted_bce_dice'). Defaults to
-            9.0 to reproduce the historical hard-coded value.
+            ('weighted_binary_crossentropy', 'weighted_bce_dice',
+            'weighted_bce_area'). Defaults to 9.0 to reproduce the historical
+            hard-coded value.
+        area_weight: weight of the aggregate burn-area term in
+            'weighted_bce_area'.
+        area_block_size: optional K to compare expected-vs-actual counts per
+            K x K block in 'weighted_bce_area' instead of per whole chip.
 
     Returns:
         A loss function called as loss(y_true, y_pred, sample_weight=None).
@@ -161,6 +241,8 @@ def get_loss(loss_name, num_classes=1, class_weights=None, pos_weight=9.0):
     binary_losses = dict(LOSSES_DICT)
     binary_losses['weighted_binary_crossentropy'] = weighted_bce(pos_weight)
     binary_losses['weighted_bce_dice'] = weighted_bce_dice(pos_weight)
+    binary_losses['weighted_bce_area'] = weighted_bce_area(
+        pos_weight, area_weight, area_block_size)
 
     obj = binary_losses.get(loss_name, None)
     if callable(obj):
