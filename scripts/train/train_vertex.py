@@ -32,7 +32,7 @@ aiplatform.init(project=project, location=location, staging_bucket=bucket)
 # https://cloud.google.com/vertex-ai/docs/training/pre-built-containers
 job = aiplatform.CustomPythonPackageTrainingJob(
     display_name=args.display_name,
-    python_package_gcs_uri="gs://aic-amazon/python_packages/aic_risk_modeling-0.2.2.tar.gz",
+    python_package_gcs_uri="gs://aic-amazon/python_packages/aic_risk_modeling-0.2.3.tar.gz",
     python_module_name="aic_risk_modeling.train.trainer",
     container_uri="us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-4.py310:latest",
 )
