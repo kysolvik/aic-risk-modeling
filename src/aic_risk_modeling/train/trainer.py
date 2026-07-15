@@ -100,12 +100,13 @@ def build_decoder(decoder_type, branch_models, decoder_config=None,
     return model
 
 
-def build_model(model_type, input_shape, input_name):
+def build_model(model_type, input_shape, input_name, **model_kwargs):
     function_name = f"get_{model_type}"
     try:
         # Attempt to get the function dynamically
         model_fn = getattr(models, function_name)
-        model = model_fn(input_shape=input_shape, input_name=input_name)
+        model = model_fn(input_shape=input_shape, input_name=input_name,
+                         **model_kwargs)
         print(f"Successfully initialized {model_type} model.")
 
     except AttributeError:
@@ -135,7 +136,11 @@ def build_all_models(inputs_config):
         input_shape = time_dim + input_dict['shape'] + feature_dim
         print(input_shape)
         input_name = input_key
-        all_models.append(build_model(model_type, input_shape, input_name))
+        # Optional per-branch factory kwargs (e.g. a projection branch's
+        # out_channels) from the config's input_features group.
+        model_kwargs = input_dict.get('model_kwargs') or {}
+        all_models.append(
+            build_model(model_type, input_shape, input_name, **model_kwargs))
 
     return all_models
 
