@@ -9,16 +9,20 @@ Original file is located at
 
 import ee
 ee.Authenticate()
-ee.Initialize(project='macedo-lab-general-9051')
+ee.Initialize(project='columbia-research-project')
 
 area = ee.FeatureCollection('projects/ksolvik-misc/assets/Lim_Raisg')
 amazonBounds = area.geometry().simplify(1000) #I had to simplify the area because stratified sampling was failing on the initial complex area
 embeddingsCol = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
-distancePastures = distancePreCalculee5.select(ee.String('distance_').cat(targetYear.format('%d'))).rename('DistancePastures')
+
 distancePreCalculee = ee.Image('projects/columbia-research-project/assets/distanceHumanActivities_Amazon_100m_2017-2023')
-distanceIndigenous = distancePreCalculee4.select('distance_IndigenousAreas').rename('DistanceIndigenousAreas')
 distancePreCalculee2 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m_v2')
 distancePreCalculee3 = ee.Image('projects/columbia-research-project/assets/distanceProtectedAreas_Amazon_100m')
+distancePreCalculee4 = ee.Image('projects/columbia-research-project/assets/DistanceIndigenousAreas_Amazon_100m')
+distancePreCalculee5 = ee.Image('projects/columbia-research-project/assets/DistancePastures_Amazon_100m')
+distanceIndigenous = distancePreCalculee4.select('distance_IndigenousAreas').rename('DistanceIndigenousAreas')
+
+
 
 def addCWD(era5LandImage):
     """Calculate CWD from single image"""
@@ -34,45 +38,54 @@ def addCWD(era5LandImage):
 def create_inputBands(target_year):
     targetYear = ee.Number(target_year)
     dataYear = targetYear.subtract(1)
-    prevDataYear = targetYear.subtract(2)
 
     ### Input Bands
 
-    #Embeddings from 2Y ago
+    #Embeddings from data year
     inputs = (embeddingsCol
-              .filterDate(ee.Date.fromYMD(prevDataYear, 1, 1), ee.Date.fromYMD(dataYear, 1, 1))
+              .filterDate(ee.Date.fromYMD(DataYear, 1, 1), ee.Date.fromYMD(targetYear, 1, 1))
               .filterBounds(amazonBounds)
               .mosaic())
 
     # Target VIIRS Hot Spots
-    viirs_target = ee.Image(ee.String('projects/macedo-lab-general-9051/assets/amazon_fire_dashboard/rasters/amazon_nrt_fire_').cat(targetYear.format('%d')).cat('_raster'))
-    class_band = 'b1'
+    viirs_path = f'projects/ksolvik-misc/assets/amazon_fire_dashboard/rasters/amazon_nrt_fire_{target_year}_raster'
+    viirs_target = ee.Image(viirs_path)
+    fireSize_band = 'b1'
     type_band = 'b2'
     conf_band = 'b3'
 
+    target = (viirs_target.select(fireSize_band)
+                 .gt(0)
+                 .unmask(0)
+                 .rename('class')
+                 .toInt()
+                 .clip(amazonBounds))
 
-    target = viirs_target.select(
-        [class_band, type_band, conf_band],
-        ['class', 'fire_type', 'confidence']
-    )
+
+    fireData = viirs_target.select(
+        [fireSize_band, type_band, conf_band],
+        ['fireSize', 'fire_type', 'confidence']
+    ).toInt()
 
     #Distances
-    distanceBandName = ee.String('distance_').cat(dataYear.format('%d'))
+    target_year_int = int(target_year)
+    data_year_int = target_year_int - 1
+    distancePastures = distancePreCalculee5.select(f'distance_{target_year_int}').rename('DistancePastures')
+    distanceBandName = f'distance_{data_year_int}'
     distanceAuxZonesHumaines = distancePreCalculee.select(distanceBandName).rename('DistanceHumanActivities')
+
     distanceStrictProtectedAreas = distancePreCalculee2.select('Distance_StrictProtected').rename('DistanceStrictProtectedAreas')
     distanceSustainableUseProtectedAreas = distancePreCalculee2.select('Distance_SustainableUse').rename('DistanceSustainableUseProtectedAreas')
     distanceAllProtectedAreas = distancePreCalculee3.select('distance_wdpa').rename('DistanceAllProtectedAreas')
 
     # Deforestation
-var hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
-            .select(['treecover2000', 'loss', 'lossyear'])
-            .rename(['hansen_treecover2000', 'hansen_loss', 'hansen_lossyear']);
+    hansen = ee.Image('UMD/hansen/global_forest_change_2025_v1_13').select(['treecover2000', 'loss', 'lossyear']).rename(['hansen_treecover2000', 'hansen_loss', 'hansen_lossyear']).unmask(0);
 
-var glad_alertdate = ee.Image('projects/glad/S2alert/alertDate').rename('glad_alertdate');
+    glad_alertdate = ee.Image('projects/glad/S2alert/alertDate').rename('glad_alertdate').unmask(0);
 
     # ERA5 climate data
-    startMeteo = ee.Date.fromYMD(prevDataYear, 11, 1)
-    endMeteo = ee.Date.fromYMD(dataYear, 11, 1)
+    startMeteo = ee.Date.fromYMD(dataYear, 1, 1)
+    endMeteo = ee.Date.fromYMD(dataYear, 12, 31) #Changed this timelapse too, hope it still works
 
     # ERA5 Ag - Daily, with temp vars and more
     era5Ag = (ee.ImageCollection('projects/climate-engine-pro/assets/ce-ag-era5-v2/daily')
@@ -151,16 +164,16 @@ var glad_alertdate = ee.Image('projects/glad/S2alert/alertDate').rename('glad_al
     #VIIRS Fire Memory
 
     viirs_start_date = ee.Date.fromYMD(dataYear.subtract(4), 1, 1)
-    viirs_end_date = ee.Date.fromYMD(dataYear, 11, 1)
+    viirs_end_date = ee.Date.fromYMD(dataYear, 12, 31)
 
-    fiveYFires = (ee.ImageCollection('projects/macedo-lab-general-9051/assets/viirs_snpp_archive').filterDate(viirs_start_date, viirs_end_date))
+    fiveYFires = (ee.ImageCollection('projects/ksolvik-misc/assets/viirs_snpp_archive').filterDate(viirs_start_date, viirs_end_date))
 
     def transform_to_year(img):
 
         imageYear = ee.Number.parse(img.date().format('YYYY'))
         masque_feu = img.gt(0)
 
-        return ee.Image.constant(imageYear).updateMask(masque_feu)
+        return ee.Image.constant(imageYear).rename('fire_year').toInt().updateMask(masque_feu)
 
     VIIRSfireMemory = fiveYFires.map(transform_to_year).max().unmask(0).rename('VIIRS_Fire_Memory_5y')
 
@@ -169,6 +182,7 @@ var glad_alertdate = ee.Image('projects/glad/S2alert/alertDate').rename('glad_al
 
     # Fusion
     imageFinale = (inputs.addBands(target)
+        .addBands(fireData)
         .addBands(distanceStrictProtectedAreas)
         .addBands(distanceSustainableUseProtectedAreas)
         .addBands(distanceAllProtectedAreas)
