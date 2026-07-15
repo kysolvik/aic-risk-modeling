@@ -10,13 +10,13 @@ Original file is located at
 #Validation Set
 
 import ee
-from inputBands_Generator import create_inputBands
+from inputbands_generator import create_inputBands
 ee.Authenticate()
-ee.Initialize(project='macedo-lab-general-9051')
+ee.Initialize(project='columbia-research-project')
 area = ee.FeatureCollection('projects/ksolvik-misc/assets/Lim_Raisg')
 amazonBounds = area.geometry().simplify(1000)
 
-targetYears = ee.List([2019, 2020, 2021, 2022, 2023, 2024)
+targetYears = [2019, 2020, 2021, 2022, 2023, 2024]
 
 def extractPointsForYear(year):
     targetYear = ee.Number(year)
@@ -25,7 +25,7 @@ def extractPointsForYear(year):
 
     finalPoints = imageFinale.sample(
         region=amazonBounds,
-        scale=500,
+        scale=550,
         numPixels=10000,
         geometries=True
     )
@@ -34,12 +34,12 @@ def extractPointsForYear(year):
 
 
 # Extraction loop
-listDeCollections = targetYears.map(lambda year: extractPointsForYear(year))
-allTrainingPoints = ee.FeatureCollection(listDeCollections).flatten()
+listDeCollections = [extractPointsForYear(y) for y in targetYears]
+allValidationPoints = ee.FeatureCollection(listDeCollections).flatten()
 
 # EXPORT
 task = ee.batch.Export.table.toAsset(
-    collection=allTrainingPoints,
+    collection=allValidationPoints,
     description='Amazon_ValidationSet',
     assetId='projects/columbia-research-project/assets/ValidationSet' #Feel free to change the name
 )
