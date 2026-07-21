@@ -464,7 +464,7 @@ class BranchNorm(nn.Module):
 
     Modes:
       - ``None`` (default): disabled. ``forward`` returns the list unchanged and
-        the module holds no parameters, so existing checkpoints are unaffected.
+        the module holds no parameters.
       - ``"groupnorm"``: per-source ``GroupNorm(1, C)`` + affine (per-sample
         LayerNorm over ``(C, H, W)``). Robust to any channel count and to the
         spatially-constant broadcast branches (16-ch -> nonzero cross-channel
@@ -781,10 +781,6 @@ class MTSViTFusion(nn.Module):
     temporal context; all other branches provide spatial features to the
     segmentation head (at full resolution) and, when `spatial_in_encoder` is set,
     also to the spatial encoder (patch-embedded).
-
-    `spatial_in_encoder` defaults to False so that checkpoints trained before the
-    option was added rebuild the original architecture and load cleanly; set it
-    in `decoder_config` to feed spatial branches into the spatial transformer.
     """
 
     def __init__(self, branch_models, num_classes=1, embed_dim=128,
@@ -889,8 +885,7 @@ class MTSViTFusion(nn.Module):
 
         # Stage 3: upsample tokens back to full resolution.
         # `transformer_out_channels` floors the halving, setting the width the
-        # transformer contributes to the fusion concat (default 16 reproduces
-        # the original stack so pre-existing checkpoints load unchanged). This
+        # transformer contributes to the fusion concat (default 16). This
         # controls how much of the head's channel budget the temporal/
         # weather/climate pathway gets vs the full-res spatial branches.
         upsample = []
@@ -922,15 +917,12 @@ class MTSViTFusion(nn.Module):
         self.out_conv = nn.Conv2d(16, num_classes, 1)
 
         # Optional climate x location FiLM over the head (the MTSViT port of
-        # the standalone FiLMFusion decoder's mechanism -- kept separate so
-        # that decoder's checkpoints are untouched): the rank-2 context
+        # the standalone FiLMFusion decoder's mechanism. The rank-2 context
         # branches (monthly climate indices) are encoded to a conditioning
         # vector, optionally gated per tile by the `film_location` coordinates
         # (random Fourier features, zero-init gate -- ENSO teleconnections are
         # spatially uneven), and zero-init FiLM layers modulate each head
-        # stage. Identity at init, and `head.*` parameter names are unchanged,
-        # so checkpoints trained without climate_film rebuild and load, and a
-        # rebalance-only checkpoint can warm-start a climate_film run.
+        # stage. Identity at init, and `head.*` parameter names are unchanged.
         self.climate_film = climate_film
         self.film_location = film_location
         if climate_film:
