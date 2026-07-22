@@ -118,9 +118,11 @@ def main():
                                         )
     ds = ds.map(set_raw_x_y)
     normalize_list = arm.train.get_normalize_list(config)
+    robust_features = arm.train.get_robust_normalize_list(config)
     stats_path = args.data_dir.rstrip('/') + '/stats.pbtxt'
     check_stats_coverage(stats_path, normalize_list)
-    norm_func = arm.train.create_normalizer(stats_path, normalize_list)
+    norm_func = arm.train.create_normalizer(
+        stats_path, normalize_list, robust_features=robust_features)
     ds = ds.map(norm_func)
     ds = arm.train.select_bands_transform(
         ds,
