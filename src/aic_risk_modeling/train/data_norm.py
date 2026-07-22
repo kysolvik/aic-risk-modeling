@@ -72,12 +72,44 @@ def get_normalize_list(config):
 
     return normalize_list
 
-def create_normalizer(stats_path, features_to_normalize,
-                      use_median=False, ignore_min=False, ignore_max=False):
+
+def _robust_normalize_single_features_dict(f, robust_list):
+    for fn in f.get('robust_norm', []):
+        if len(f['timesteps']) > 0:
+            robust_list.extend([fn + '_' + str(ts) for ts in f['timesteps']])
+        else:
+            robust_list.append(fn)
+    return robust_list
+
+def get_robust_normalize_list(config):
+    """Retrieve flat list of variable names that should use robust
+    normalization: filters out min NA values (values equal to the feature's
+    global min are replaced) plus median instead of mean centering.
+    """
+    robust_list = []
+
+    for k, f in config['input_features'].items():
+        robust_list = _robust_normalize_single_features_dict(f, robust_list)
+
+    f = config['output_features']
+    robust_list = _robust_normalize_single_features_dict(f, robust_list)
+
+    return robust_list
+
+def create_normalizer(stats_path, features_to_normalize, robust_features=None):
     """Create a normalization function based on provided statistics.
 
     `stats_path` may be a data_stats JSON file (*.json) or a tfdv stats.pbtxt.
+
+    `robust_features` is an iterable of (already timestep-expanded) feature
+    names that should use robust normalization instead of the default: median
+    (rather than mean) centering, and values equal to the feature's global min
+    replaced with that center before scaling. This is meant for features
+    exported with a nodata value (e.g. -32768) baked into the raw values,
+    which otherwise skews the mean/variance used for standardization. See
+    `get_robust_normalize_list` for deriving this from a training config.
     """
+    robust_features = set(robust_features or [])
     norm_constants = {}
     if stats_path.endswith('.json'):
         stats = load_stats_json(stats_path)
@@ -95,24 +127,20 @@ def create_normalizer(stats_path, features_to_normalize,
                 if name in ['md_x_topleft','md_x', 'md_y_topleft',
                             'md_y', 'md_id']:
                     features[f'{name}_raw'] = features[name]
-                if use_median:
+
+                is_robust = name in robust_features
+                if is_robust:
                     center = tf.constant(stats['median'], dtype=tf.float32)
                 else:
                     center = tf.constant(stats['mean'], dtype=tf.float32)
                 std = tf.constant(stats['stddev'], dtype=tf.float32)
 
-                if ignore_min:
+                if is_robust:
                     out_tensor = tf.where(features[name] == stats['min'],
                                           center,
                                           features[name])
-                if ignore_max:
-                    out_tensor = tf.where(features[name] == stats['max'],
-                                          center,
-                                          features[name])
-
-                if not ignore_min and not ignore_max:
+                else:
                     out_tensor = features[name]
-
 
                 if stats['stddev'] == 0:
                     features[name] = (tf.cast(out_tensor, tf.float32) - center)

@@ -312,7 +312,9 @@ def run(config):
     stats_path = config.get(
         'stats_path', _gcs_join(config['data_dirs'][0], 'stats.pbtxt'))
     normalize_list = data_norm.get_normalize_list(config)
-    norm_func = data_norm.create_normalizer(stats_path, normalize_list)
+    robust_features = data_norm.get_robust_normalize_list(config)
+    norm_func = data_norm.create_normalizer(
+        stats_path, normalize_list, robust_features=robust_features)
     training_ds = training_ds.map(norm_func, num_parallel_calls=tf.data.AUTOTUNE)
     validation_ds = validation_ds.map(norm_func, num_parallel_calls=tf.data.AUTOTUNE)
 

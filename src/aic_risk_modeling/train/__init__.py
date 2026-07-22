@@ -36,7 +36,8 @@ from .data_norm import (
     load_stats_json,
     get_norm_stats,
     create_normalizer,
-    get_normalize_list
+    get_normalize_list,
+    get_robust_normalize_list
 )
 
 from .data_stats import (
@@ -86,6 +87,7 @@ __all__ = [
     "load_stats_json",
     "get_norm_stats",
     "get_normalize_list",
+    "get_robust_normalize_list",
     "create_normalizer",
     "compute_stats",
     "write_stats",

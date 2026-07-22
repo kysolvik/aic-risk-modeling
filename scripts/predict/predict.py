@@ -134,7 +134,9 @@ def main():
     ds = ds.map(set_raw_x_y)
     # Normalization
     normalize_list = arm.train.get_normalize_list(config)
-    norm_func = arm.train.create_normalizer(args.data_dir + '/stats.pbtxt', normalize_list)
+    robust_features = arm.train.get_robust_normalize_list(config)
+    norm_func = arm.train.create_normalizer(
+        args.data_dir + '/stats.pbtxt', normalize_list, robust_features=robust_features)
     ds = ds.map(norm_func)
 
     # Select bands (the md_sidecar group stacks md_x_raw/md_y_raw into inputs)
