@@ -12,6 +12,7 @@ var extrapolatedYears = [2023, 2024, 2025]; // Years that are missing data so I 
 
 function computeDistanceForYear(year) {
   var pastureBinary = mapbiomas.select('classification_' + year).eq(15); //15 is the band value for Pasture
+                                                                         //For All human activities, add band 14,15,18,19,20,21,24,35,39,40,41
   var pasture_100m = pastureBinary
     .reduceResolution({reducer: ee.Reducer.max(), maxPixels: 1024})
     .reproject({crs: 'EPSG:4326', scale: workingScale});
