@@ -1,25 +1,32 @@
 """Write per-driver risk-attribution rasters for a trained binary model.
 
-For every chip in a prediction data dir, runs the one-at-a-time occlusion
-attribution from `aic_risk_modeling.eval.attribution` (see its docstring for
-method, baselines, and caveats) and writes one multi-band
-GeoTIFF per chip, `attr_{x}-{y}.tif`, next to the usual prediction naming.
+For every chip in a prediction data dir, runs the driver attribution from
+`aic_risk_modeling.eval.attribution` (see its docstring for method, baselines,
+and caveats) and writes one multi-band GeoTIFF per chip next to the usual
+prediction naming. Default mode is one-at-a-time (OAT) occlusion, written as
+`attr_{x}-{y}.tif`; pass --shapley for Shapley-value attribution, written as
+`shap_{x}-{y}.tif` (same band layout, so the two compare band-for-band).
 
 Bands (descriptions are set, so QGIS shows them):
     1                risk -- deflated (calibrated-scale) burn probability
-    2 .. N+1         delta_<driver> -- contribution of each driver, spec
-                     order; positive = raises risk vs grid-average conditions
-    N+2              residual_interactions -- (risk - band N+3) - sum(deltas)
+    2 .. N+1         delta_<driver> (OAT) / shapley_<driver> (--shapley) --
+                     contribution of each driver, spec order; positive = raises
+                     risk vs grid-average conditions
+    N+2              residual_interactions -- (risk - band N+3) - sum(bands);
+                     ~0 for --shapley (efficiency), the interaction mismatch for
+                     OAT
     N+3              risk_all_drivers_baseline
 
 NOTE: bands are DEFLATED probabilities, while predict.py's out_*.tif hold the raw
 (inflated) model output.
 
-Cost: N+2 model forwards per batch (9 with the 7 default drivers) vs 1 for
-predict.py; measured ~20 s/chip on CPU at batch_size 4 (v11, 2026-07-15), so
-a full-grid year (~2,800 chips) is ~15 CPU-hours. Use --drivers with fewer
-groups, --batch_size, or --max_chips to manage runtime; sharding by tfrecord
-across processes also works.
+Cost: OAT is N+2 model runs per batch (9 with the 7 default drivers) vs 1
+for predict.py; measured ~20 s/chip on CPU at batch_size 4 (v11, 2026-07-15).
+--shapley is 2^N forwards (exact; 128 for the 7 default drivers, ~14x OAT) or
+~N*--shapley_samples (Monte-Carlo). Use --drivers with fewer groups (e.g.
+configs/attribution_drivers_simple.json, 4 groups -> 16 exact forwards),
+--shapley_samples, --batch_size, or --max_chips to manage runtime; sharding by
+tfrecord across processes also works. Prefer GPU for full-grid --shapley runs.
 
 Example (CPU, needs GCS read access):
     python scripts/predict/attribute.py \
@@ -72,6 +79,19 @@ def parse_args():
     parser.add_argument(
         '--write_mask', action='store_true',
         help='also write mask_{x}-{y}.tif ground-truth rasters')
+    parser.add_argument(
+        '--shapley', action='store_true',
+        help='compute Shapley-value attribution (shap_{x}-{y}.tif) instead of '
+             'OAT occlusion; exact over driver groups (2^N forwards) unless '
+             '--shapley_samples is given')
+    parser.add_argument(
+        '--shapley_samples', type=int, default=None,
+        help='estimate Shapley values from this many sampled permutations '
+             '(~N*samples forwards) instead of exact enumeration; needs '
+             '--shapley')
+    parser.add_argument(
+        '--shapley_seed', type=int, default=0,
+        help='RNG seed for --shapley_samples permutation sampling')
     return parser.parse_args()
 
 
@@ -93,6 +113,8 @@ def check_stats_coverage(stats_path, normalize_list):
 
 def main():
     args = parse_args()
+    if args.shapley_samples is not None and not args.shapley:
+        raise SystemExit('--shapley_samples requires --shapley')
     with open(args.config_path, 'r') as f:
         config = json.load(f)
     pos_weight = (args.pos_weight if args.pos_weight is not None
@@ -149,10 +171,16 @@ def main():
     # No autocast even on GPU: deltas can be ~1e-3 and must stay float32.
     # Rasters are written per batch rather than accumulated (10 float32
     # bands per chip adds up over a full grid).
+    out_prefix = 'shap' if args.shapley else 'attr'
     for inputs, labels, _ in tqdm(arm.train.trainer._torch_batches(ds, device),
                                   desc='Attributing', unit='batch'):
-        bands, names = attribution.attribution_bands(
-            model, inputs, driver_spec, baselines, pos_weight)
+        if args.shapley:
+            bands, names = attribution.shapley_bands(
+                model, inputs, driver_spec, baselines, pos_weight,
+                samples=args.shapley_samples, seed=args.shapley_seed)
+        else:
+            bands, names = attribution.attribution_bands(
+                model, inputs, driver_spec, baselines, pos_weight)
 
         # md_sidecar is stacked [batch, 1, 2] -> (md_x_raw, md_y_raw)
         md_sidecar = inputs['md_sidecar']
@@ -161,7 +189,7 @@ def main():
         write_batch(bands.float().cpu().numpy(), labels.cpu().numpy(),
                     md_x_raw, md_y_raw, base_transform, profile,
                     args.output_dir, args.edge_crop,
-                    band_names=names, out_prefix='attr',
+                    band_names=names, out_prefix=out_prefix,
                     write_mask=args.write_mask)
 
         n_chips += labels.shape[0]
