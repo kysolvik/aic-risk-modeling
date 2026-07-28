@@ -29,17 +29,25 @@ tensor-space mean -- mean(transform(x)) != transform(mean(x)) -- so they
 require an explicit `baseline_overrides` entry; `resolve_baselines` raises
 otherwise.
 
+`shapley_bands` is an alternative attribution mode over the same drivers: 
+Shapley values split the interaction term across drivers, but more intensive
+(2^N runs where N is number of variable groups) 
+
 Caveats:
-- OAT deltas are not Shapley values: correlated drivers each absorb their
-  shared signal, so deltas can double-count; the residual band shows the
-  total mismatch against the all-baseline jump.
-- Occluded inputs are off-manifold (grid-average vegetation over real
-  terrain never occurs); deltas reflect model extrapolation there.
+- One-at-a-time deltas are not Shapley values: correlated drivers each absorb
+  their shared signal, so deltas can double-count. The residual band shows 
+  the total mismatch against the all-baseline run. Use `shapley_bands` for a
+  decomposition that redistributes that mismatch fairly across drivers.
+- Some variable deltas involve extrapolation, e.g. average vegation
+  over real terrain never occurs.
 - delta ~= 0 means the *model* does not use the driver, not that the driver
   is physically irrelevant.
 """
 
 import dataclasses
+import itertools
+import math
+import random
 from collections import OrderedDict
 
 import torch
@@ -245,3 +253,97 @@ def attribution_bands(model, inputs, driver_spec, baselines, pos_weight=1.0):
     bands.append(all_baseline)
     names.append('risk_all_drivers_baseline')
     return torch.stack(bands, dim=-1), names
+
+
+@torch.no_grad()
+def shapley_bands(model, inputs, driver_spec, baselines, pos_weight=1.0,
+                  samples=None, seed=0, max_exact_drivers=12):
+    """Shapley-value attribution for one batch, same band layout as OAT.
+
+    The driver groups are players in a cooperative game whose value function is
+    the deflated model probability with every driver NOT in the coalition
+    occluded to baseline:
+
+        v(S) = deflate_probs(model(occlude(inputs, channels not in S)), w)
+
+    so v(all) == the base 'risk' forward and v(none) == the all-drivers-baseline
+    run. Each driver's Shapley value is the standard weighted average of its
+    marginal contributions over coalitions. Efficiency gives sum(shapley) ==
+    risk - risk_all_baseline exactly, so the residual band is ~0 (still included
+    as a check). 
+
+    samples: None or 0 -> exact enumeration of all 2^N coalitions (cached, so
+        2^N forwards). >0 -> seeded permutation Monte-Carlo estimate (~N*samples
+        forwards, cached); efficiency still holds exactly because each sampled
+        permutation's marginals telescope to v(all) - v(none).
+    max_exact_drivers: guard against 2^N blowing up on a fine-grained driver
+        spec; exact mode raises above this and points at `samples`.
+
+    Returns (bands, names): bands is (B, H, W, n_drivers + 3) stacked as
+    ['risk', 'shapley_<driver>' per driver in spec order,
+     'residual_interactions', 'risk_all_drivers_baseline'].
+    """
+    names = list(driver_spec.drivers.keys())
+    n = len(names)
+
+    cache = {}  # frozenset[str] of drivers present -> (B, H, W) deflated probs
+
+    def value(coalition):
+        if coalition not in cache:
+            occluded = [c for name in names if name not in coalition
+                        for c in driver_spec.drivers[name]]
+            cache[coalition] = deflate_probs(
+                model(occlude(inputs, occluded, baselines)), pos_weight)
+        return cache[coalition]
+
+    base = value(frozenset(names))  # occlude nothing -> the 'risk' forward
+    if base.ndim != 3:
+        raise ValueError(
+            f'shapley supports binary (B, H, W) outputs only, '
+            f'got shape {tuple(base.shape)}')
+    all_baseline = value(frozenset())  # occlude everything
+
+    shapley = OrderedDict((name, torch.zeros_like(base)) for name in names)
+    if not samples:
+        if n > max_exact_drivers:
+            raise ValueError(
+                f'exact Shapley over {n} drivers needs 2^{n} forwards; pass '
+                f'samples>0 for a Monte-Carlo estimate or use a coarser '
+                f'--drivers spec (max_exact_drivers={max_exact_drivers})')
+        # weight[s] = |S|! (N-|S|-1)! / N! for a coalition S of size s.
+        weight = [math.factorial(s) * math.factorial(n - s - 1)
+                  / math.factorial(n) for s in range(n)]
+        for name in names:
+            others = [m for m in names if m != name]
+            for size in range(len(others) + 1):
+                for combo in itertools.combinations(others, size):
+                    subset = frozenset(combo)
+                    shapley[name] += weight[size] * (
+                        value(subset | {name}) - value(subset))
+    else:
+        rng = random.Random(seed)
+        perm = list(names)
+        for _ in range(samples):
+            rng.shuffle(perm)
+            coalition = set()
+            prev = all_baseline
+            for name in perm:
+                coalition.add(name)
+                current = value(frozenset(coalition))
+                shapley[name] += current - prev
+                prev = current
+        for name in names:
+            shapley[name] /= samples
+
+    bands = [base]
+    names_out = ['risk']
+    total = torch.zeros_like(base)
+    for name in names:
+        bands.append(shapley[name])
+        names_out.append(f'shapley_{name}')
+        total += shapley[name]
+    bands.append((base - all_baseline) - total)
+    names_out.append('residual_interactions')
+    bands.append(all_baseline)
+    names_out.append('risk_all_drivers_baseline')
+    return torch.stack(bands, dim=-1), names_out
