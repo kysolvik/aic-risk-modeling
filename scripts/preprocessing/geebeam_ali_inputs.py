@@ -228,9 +228,51 @@ def prep_era5_monthly(y_start, y_end):
         years.map(lambda y: months.map(lambda m: get_month(y,m))).flatten()
         )
     new_names = ee.List([bn + '_monthly_' + time for time, bn in itertools.product(MONTH_NAMES, bands)])
-    new_names = ee.List([bn + '_' + time for time, bn in itertools.product(MONTH_NAMES, bands)])
     return era5_monthly.toBands().rename(new_names)
 era5_im = prep_era5_monthly(TARGET_YEAR-1, TARGET_YEAR-1)
+
+# Chirps CWD
+def prep_chirps_monthly(y_start, y_end):
+    chirps_cwd = (ee.ImageCollection('projects/ksolvik-misc/assets/chirps_amazon_cwd')
+              .filter(ee.Filter.calendarRange(y_start,
+                                              y_end,
+                                              'year'))
+    )
+    def get_month(y, m):
+        chirps_filtered = ((
+            chirps_cwd
+            .filter(ee.Filter.calendarRange(y, y, 'year'))
+            .filter(ee.Filter.calendarRange(m, m, 'month'))
+            .first()
+            ).set('month', m).set('year', y)
+        )
+        return chirps_filtered
+
+    months = ee.List.sequence(MONTH_START, MONTH_END)
+    years = ee.List.sequence(y_start, y_end)
+    chirps_monthly = ee.ImageCollection.fromImages(
+        years.map(lambda y: months.map(lambda m: get_month(y,m))).flatten()
+        )
+    new_names = ee.List(['chirps_cwd_monthly_' + time for time in MONTH_NAMES])
+    return chirps_monthly.toBands().rename(new_names)
+
+def prep_chirps_year(y):
+    """Max monthly CWD within year"""
+    chirps_cwd = (
+        ee.ImageCollection('projects/ksolvik-misc/assets/chirps_amazon_cwd')
+        .filter(ee.Filter.calendarRange(y,
+                                        y,
+                                        'year'))
+        .max()
+    )
+
+    band_names = ['chirps_cwd']
+    band_names_new = [f'{b}_{y-TARGET_YEAR}' for b in band_names]
+    return chirps_cwd.rename(band_names_new)
+
+chirps_annual = [prep_chirps_year(y) for y in range(TARGET_YEAR-6, TARGET_YEAR)]
+chirps_monthly = prep_chirps_monthly(TARGET_YEAR-1, TARGET_YEAR-1)
+
 
 # Embeddings
 def prep_embeddings_year(y):
@@ -302,7 +344,7 @@ wdpa_polys = ee.FeatureCollection('WCMC/WDPA/current/polygons').remap(
 wdpa_im = ee.Image().int().paint(wdpa_polys, 'gov_type_numerical').rename(['gov_type'])
 
 # Note that with split processing each will be processed separately
-im_list = mcd64_list + mod13_annual + viirs_memory + [
+im_list = mcd64_list + mod13_annual + chirps_annual + viirs_memory + [
            viirs_target,
            mb_amz_pasture,
            mb_amz_forest,
@@ -318,7 +360,8 @@ im_list = mcd64_list + mod13_annual + viirs_memory + [
            elevation,
            slope,
            nightLights,
-           population
+           population,
+           chirps_monthly
 ]
 
 # Get some climate indices as dict
@@ -336,8 +379,6 @@ print('Ending clim indices')
 if __name__ == '__main__':
     logging.getLogger().setLevel(logging.INFO)
     # Execute
-    # Building and triggering the pipeline is done with a single command:
-
     geebeam.grid_and_run_pipeline(
         image_list = im_list,
         project=PROJECT_ID,
@@ -348,7 +389,7 @@ if __name__ == '__main__':
         tile_coverage='intersect',
         output_type='tfrecord',
         validation_ratio=0.0, # Fraction to select as validation data
-        output_path=f'./local_test/{TARGET_YEAR}',
-        sampling_region='../data/municipios/santarem_PA_BR.shp',
+        output_path=f'gs://woodwell-aic-fire-risk/data/fullgrid/allpreds_{TARGET_YEAR}',
+        sampling_region='../data/Limites_RAISG_2025/Lim_Raisg.shp',
         extra_metadata=md_dict
     )
