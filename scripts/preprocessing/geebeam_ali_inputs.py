@@ -233,7 +233,7 @@ era5_im = prep_era5_monthly(TARGET_YEAR-1, TARGET_YEAR-1)
 
 # Chirps CWD
 def prep_chirps_monthly(y_start, y_end):
-    chirps_cwd = (ee.ImageCollection('projects/ksolvik-misc/assets/chirps_amazon_cwd')
+    chirps_cwd = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_amazon_cwd')
               .filter(ee.Filter.calendarRange(y_start,
                                               y_end,
                                               'year'))
@@ -259,7 +259,7 @@ def prep_chirps_monthly(y_start, y_end):
 def prep_chirps_year(y):
     """Max monthly CWD within year"""
     chirps_cwd = (
-        ee.ImageCollection('projects/ksolvik-misc/assets/chirps_amazon_cwd')
+        ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_amazon_cwd')
         .filter(ee.Filter.calendarRange(y,
                                         y,
                                         'year'))
