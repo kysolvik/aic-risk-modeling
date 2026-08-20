@@ -68,7 +68,7 @@ def prep_viirs_nrt_year(y):
     return viirs_target.select(
         [fireSize_band, type_band, conf_band],
         ['fireSize', 'fire_type', 'confidence']
-    ).toInt()
+    ).unmask(0).toInt()
 
 viirs_target = prep_viirs_nrt_year(TARGET_YEAR)
 
@@ -263,7 +263,8 @@ def prep_chirps_year(y):
         .filter(ee.Filter.calendarRange(y,
                                         y,
                                         'year'))
-        .max()
+        .min()
+        .unmask()
     )
 
     band_names = ['chirps_cwd']
@@ -295,7 +296,7 @@ embeddings_im = prep_embeddings_year(TARGET_YEAR-1)
 
 # Accessibility to cities
 atc_full =  ee.Image('projects/malariaatlasproject/assets/accessibility/accessibility_to_cities/2015_v1_0')
-atc_im = atc_full.select('accessibility')
+atc_im = atc_full.select('accessibility').unmask(5000)
 
 # World Population
 landscanCol = ee.ImageCollection("projects/sat-io/open-datasets/ORNL/LANDSCAN_GLOBAL")
@@ -319,7 +320,7 @@ nightLights = (
 
 # Topography
 terrain = ee.Terrain.products(ee.Image('USGS/SRTMGL1_003'))
-elevation = terrain.select('elevation').rename('Elevation')
+elevation = terrain.select('elevation').rename('Elevation').unmask(0)
 slope = terrain.select('slope').rename('Slope')
 
 
@@ -341,7 +342,7 @@ gov_types_remap = ee.List([ee.Number(int(x)) for x in np.arange(12)+1])
 wdpa_polys = ee.FeatureCollection('WCMC/WDPA/current/polygons').remap(
    gov_types, gov_types_remap, 'GOV_TYPE'
 )
-wdpa_im = ee.Image().int().paint(wdpa_polys, 'gov_type_numerical').rename(['gov_type'])
+wdpa_im = ee.Image().int().paint(wdpa_polys, 'GOV_TYPE').rename(['gov_type'])
 
 # Note that with split processing each will be processed separately
 im_list = mcd64_list + mod13_annual + chirps_annual + viirs_memory + [
