@@ -95,7 +95,7 @@ def prep_viirs_year(y):
                   ).max().unmask().gt(0).rename(f'viirs_snpp_{y-TARGET_YEAR}')
     return viirs_snpp
 
-viirs_memory = [prep_viirs_year(y) for y in range(TARGET_YEAR-6, TARGET_YEAR+1)]
+viirs_memory = [prep_viirs_year(y)for y in range(TARGET_YEAR-1, TARGET_YEAR+1)]
 
 # MB Land-use/land-cover
 mb_amz_lulc_im = (
@@ -309,7 +309,7 @@ population = (
     .rename('Population_Density'))
 
 # Night Lights
-nightLightsCol = ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG")
+nightLightsCol = ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMCFG")
 nightLights = (
     nightLightsCol
     .filterDate(f'{TARGET_YEAR-1}-{MONTH_START}-01', f'{TARGET_YEAR-1}-{MONTH_END}-{DAY_END}')
@@ -346,7 +346,7 @@ wdpa_im = ee.Image().int().paint(wdpa_polys, 'GOV_TYPE').rename(['gov_type'])
 
 # Note that with split processing each will be processed separately
 im_list = mcd64_list + mod13_annual + chirps_annual + viirs_memory + [
-           viirs_target,
+        #    viirs_target,
            mb_amz_pasture,
            mb_amz_forest,
            mb_amz_ag,
@@ -355,7 +355,7 @@ im_list = mcd64_list + mod13_annual + chirps_annual + viirs_memory + [
            mod13_monthly,
            atc_im,
            era5_im,
-           embeddings_im,
+        #    embeddings_im,
            gfc_im,
            wdpa_im,
            elevation,
@@ -388,8 +388,8 @@ if __name__ == '__main__':
         patch_size=128, # Pixel dimensions in each direction
         stride=128,
         tile_coverage='intersect',
-        output_type='tfrecord',
         validation_ratio=0.0, # Fraction to select as validation data
+        output_type='tfrecord',
         output_path=f'gs://woodwell-aic-fire-risk/data/fullgrid/allpreds_{TARGET_YEAR}',
         sampling_region='../data/Limites_RAISG_2025/Lim_Raisg.shp',
         extra_metadata=md_dict
