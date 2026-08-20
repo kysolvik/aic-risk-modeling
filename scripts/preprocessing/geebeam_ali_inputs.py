@@ -68,7 +68,7 @@ def prep_viirs_nrt_year(y):
     return viirs_target.select(
         [fireSize_band, type_band, conf_band],
         ['fireSize', 'fire_type', 'confidence']
-    ).toInt()
+    ).unmask(0).toInt()
 
 viirs_target = prep_viirs_nrt_year(TARGET_YEAR)
 
@@ -95,7 +95,7 @@ def prep_viirs_year(y):
                   ).max().unmask().gt(0).rename(f'viirs_snpp_{y-TARGET_YEAR}')
     return viirs_snpp
 
-viirs_memory = [prep_viirs_year(y) for y in range(TARGET_YEAR-6, TARGET_YEAR+1)]
+viirs_memory = [prep_viirs_year(y)for y in range(TARGET_YEAR-1, TARGET_YEAR+1)]
 
 # MB Land-use/land-cover
 mb_amz_lulc_im = (
@@ -263,7 +263,8 @@ def prep_chirps_year(y):
         .filter(ee.Filter.calendarRange(y,
                                         y,
                                         'year'))
-        .max()
+        .min()
+        .unmask()
     )
 
     band_names = ['chirps_cwd']
@@ -295,7 +296,7 @@ embeddings_im = prep_embeddings_year(TARGET_YEAR-1)
 
 # Accessibility to cities
 atc_full =  ee.Image('projects/malariaatlasproject/assets/accessibility/accessibility_to_cities/2015_v1_0')
-atc_im = atc_full.select('accessibility')
+atc_im = atc_full.select('accessibility').unmask(5000)
 
 # World Population
 landscanCol = ee.ImageCollection("projects/sat-io/open-datasets/ORNL/LANDSCAN_GLOBAL")
@@ -308,7 +309,7 @@ population = (
     .rename('Population_Density'))
 
 # Night Lights
-nightLightsCol = ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG")
+nightLightsCol = ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMCFG")
 nightLights = (
     nightLightsCol
     .filterDate(f'{TARGET_YEAR-1}-{MONTH_START}-01', f'{TARGET_YEAR-1}-{MONTH_END}-{DAY_END}')
@@ -319,7 +320,7 @@ nightLights = (
 
 # Topography
 terrain = ee.Terrain.products(ee.Image('USGS/SRTMGL1_003'))
-elevation = terrain.select('elevation').rename('Elevation')
+elevation = terrain.select('elevation').rename('Elevation').unmask(0)
 slope = terrain.select('slope').rename('Slope')
 
 
@@ -341,11 +342,11 @@ gov_types_remap = ee.List([ee.Number(int(x)) for x in np.arange(12)+1])
 wdpa_polys = ee.FeatureCollection('WCMC/WDPA/current/polygons').remap(
    gov_types, gov_types_remap, 'GOV_TYPE'
 )
-wdpa_im = ee.Image().int().paint(wdpa_polys, 'gov_type_numerical').rename(['gov_type'])
+wdpa_im = ee.Image().int().paint(wdpa_polys, 'GOV_TYPE').rename(['gov_type'])
 
 # Note that with split processing each will be processed separately
 im_list = mcd64_list + mod13_annual + chirps_annual + viirs_memory + [
-           viirs_target,
+        #    viirs_target,
            mb_amz_pasture,
            mb_amz_forest,
            mb_amz_ag,
@@ -354,7 +355,7 @@ im_list = mcd64_list + mod13_annual + chirps_annual + viirs_memory + [
            mod13_monthly,
            atc_im,
            era5_im,
-           embeddings_im,
+        #    embeddings_im,
            gfc_im,
            wdpa_im,
            elevation,
@@ -387,8 +388,8 @@ if __name__ == '__main__':
         patch_size=128, # Pixel dimensions in each direction
         stride=128,
         tile_coverage='intersect',
-        output_type='tfrecord',
         validation_ratio=0.0, # Fraction to select as validation data
+        output_type='tfrecord',
         output_path=f'gs://woodwell-aic-fire-risk/data/fullgrid/allpreds_{TARGET_YEAR}',
         sampling_region='../data/Limites_RAISG_2025/Lim_Raisg.shp',
         extra_metadata=md_dict
