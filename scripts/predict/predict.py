@@ -53,6 +53,10 @@ def parse_args():
         required=False,
         default=0
     )
+    parser.add_argument(
+        '--invert_yres',
+        action='store_true'
+    )
     return parser.parse_args()
 
 
@@ -77,7 +81,7 @@ def set_raw_x_y(features):
 
 # dtype to uint8, and specify LZW compression.
 def write_batch(outs, masks, xs, ys, base_transform, profile, output_dir,
-                edge_crop, band_names=None, out_prefix='out', write_mask=True):
+                edge_crop, invert_yres=False, band_names=None, out_prefix='out', write_mask=True):
     for i in range(len(outs)):
         out =outs[i]
         mask =masks[i]
@@ -87,14 +91,20 @@ def write_batch(outs, masks, xs, ys, base_transform, profile, output_dir,
         # an explicit band axis so we write one raster band per class.
         if out.ndim == 2:
             out = out[:, :, np.newaxis]
-        transform = Affine(base_transform[0], base_transform[1], x,
-                                       base_transform[3], base_transform[4], y)
+        if invert_yres:
+            transform = Affine(base_transform[0], base_transform[1], x,
+                                        base_transform[3], -1*base_transform[4], y)
+            out = np.flip(out, 0)
+            mask = np.flip(mask, 0)
+        else:
+            transform = Affine(base_transform[0], base_transform[1], x,
+                                        base_transform[3], base_transform[4], y)
         if CENTERED:
             transform = transform*rio.Affine.translation(int(-out.shape[0]/2), int(-out.shape[1]/2))
         if edge_crop > 0:
             out =out[edge_crop:-edge_crop, edge_crop:-edge_crop]
             mask =mask[edge_crop:-edge_crop, edge_crop:-edge_crop]
-            transform = transform*rio.Affine.translation(8, 8)
+            transform = transform*rio.Affine.translation(edge_crop, edge_crop)
         n_bands = out.shape[2]
         profile.update(dtype=rio.int8,
                        count=1,
@@ -189,7 +199,8 @@ def main():
 
     for i in range(len(all_outs)):
         write_batch(all_outs[i], all_masks[i], all_x[i], all_y[i],
-                    base_transform, profile, args.output_dir, args.edge_crop)
+                    base_transform, profile, args.output_dir, args.edge_crop,
+                    args.invert_yres)
 
 if __name__ == '__main__':
     main()
