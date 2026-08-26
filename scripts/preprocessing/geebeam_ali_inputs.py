@@ -1,4 +1,3 @@
-
 """Execute GEE tile extraction in Beam + Dataflow"""
 
 import argparse
@@ -95,13 +94,20 @@ def prep_viirs_year(y):
                   ).max().unmask().gt(0).rename(f'viirs_snpp_{y-TARGET_YEAR}')
     return viirs_snpp
 
-viirs_memory = [prep_viirs_year(y)for y in range(TARGET_YEAR-1, TARGET_YEAR+1)]
+viirs_memory = [prep_viirs_year(y) for y in range(TARGET_YEAR-6, TARGET_YEAR+1)]
 
 # MB Land-use/land-cover
-mb_amz_lulc_im = (
-    ee.Image('projects/mapbiomas-public/assets/amazon/lulc/collection6/mapbiomas_collection60_integration_v1')
-    .select([f'classification_{y}' for y in range(TARGET_YEAR-6, TARGET_YEAR)])
+mb_amz_lulc_im = ee.Image('projects/mapbiomas-public/assets/amazon/lulc/collection6/mapbiomas_collection60_integration_v1')
+
+# Add 2024 and 2025
+mb_amz_lulc_im = mb_amz_lulc_im.addBands(
+    mb_amz_lulc_im.select('classification_2023').rename('classification_2024')
+    ).addBands(
+        mb_amz_lulc_im.select('classification_2023').rename('classification_2025')
+    ).select(
+        [f'classification_{y}' for y in range(TARGET_YEAR-6, TARGET_YEAR)]
 )
+
 mb_amz_lulc_bandnames = mb_amz_lulc_im.bandNames().getInfo()
 def replace_y_with_offset(bn):
     bn_base, y = bn.split('_')
@@ -346,7 +352,7 @@ wdpa_im = ee.Image().int().paint(wdpa_polys, 'GOV_TYPE').rename(['gov_type'])
 
 # Note that with split processing each will be processed separately
 im_list = mcd64_list + mod13_annual + chirps_annual + viirs_memory + [
-        #    viirs_target,
+           viirs_target,
            mb_amz_pasture,
            mb_amz_forest,
            mb_amz_ag,
@@ -355,7 +361,7 @@ im_list = mcd64_list + mod13_annual + chirps_annual + viirs_memory + [
            mod13_monthly,
            atc_im,
            era5_im,
-        #    embeddings_im,
+           embeddings_im,
            gfc_im,
            wdpa_im,
            elevation,
