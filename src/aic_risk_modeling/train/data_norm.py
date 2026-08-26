@@ -142,10 +142,19 @@ def create_normalizer(stats_path, features_to_normalize, robust_features=None):
                 else:
                     out_tensor = features[name]
 
+                # Some exported bands carry NaN where the source asset has no
+                # coverage (im_chirps_cwd_monthly is ~4-5% of chips). The stats
+                # exclude NaN from accumulation, so center/std stay finite, but
+                # an unfilled NaN pixel propagates all the way to the loss.
+                # Impute the center so those pixels standardize to 0.
+                out_tensor = tf.cast(out_tensor, tf.float32)
+                out_tensor = tf.where(tf.math.is_finite(out_tensor),
+                                      out_tensor, center)
+
                 if stats['stddev'] == 0:
-                    features[name] = (tf.cast(out_tensor, tf.float32) - center)
+                    features[name] = out_tensor - center
                 else:
-                    features[name] = (tf.cast(out_tensor, tf.float32) - center) / (std + 1e-7)
+                    features[name] = (out_tensor - center) / (std + 1e-7)
 
         return features
 
