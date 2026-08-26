@@ -553,6 +553,20 @@ class FusionDecoder(nn.Module):
             return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
 
 
+def _location_features(branch_models, name, fallback):
+    """Coordinate width of the branch named `name`.
+
+    Non-identity branches (e.g. coord_fourier) don't expose `input_shape`;
+    `fallback` covers them (md_single's (md_x, md_y) -> 2).
+    """
+    matches = [b for b in branch_models if b.input_name == name]
+    if not matches:
+        raise ValueError(f"film_location '{name}' "
+                         f"matches no input branch")
+    shape = getattr(matches[0], "input_shape", None)
+    return shape[-1] if shape is not None else fallback
+
+
 class FiLM(nn.Module):
     """Feature-wise linear modulation (Perez et al. 2018).
 
@@ -727,9 +741,26 @@ class CrossAttnTemporalLayer(nn.Module):
     Operates on per-patch time sequences (batch * patches, T, dim) and lets each
     token additionally attend to context tokens (batch, T_ctx, dim) that are
     shared across patch locations (e.g. monthly climate indices).
+
+    With `loc_dim`, the layer is additionally conditioned on a per-tile location
+    code (see `MTSViTFusion._loc_code`) at two points, which are the two
+    orthogonal axes of a location x climate interaction:
+      - `loc_q_proj` biases the cross-attention query, so *which* months and
+        indices a tile reads out of the climate series depends on where it is
+        (dry-season timing shifts with latitude across the basin);
+      - `loc_gate_proj` scales the attended residual, so *how strongly and in
+        what sign* a tile responds to what it read depends on where it is (the
+        spatially varying coefficient of Chen et al. 2011: ONI drives the
+        eastern Amazon, AMO the south/southwest).
+    Both expansions are zero-initialized, so the conditioned layer is a bitwise
+    identity to the unconditioned one at init. `loc_rank` bottlenecks both,
+    which caps the number of independent spatial modulation patterns
+    ("teleconnection modes") the layer can express.
     """
 
-    def __init__(self, dim, num_heads, mlp_ratio=2, dropout=0.1):
+    def __init__(self, dim, num_heads, mlp_ratio=2, dropout=0.1,
+                 loc_dim=None, loc_rank=4, loc_inject_q=True,
+                 loc_inject_gate=True):
         super().__init__()
         self.ln1 = nn.LayerNorm(dim)
         self.self_attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout,
@@ -743,18 +774,41 @@ class CrossAttnTemporalLayer(nn.Module):
             nn.Linear(dim, mlp_ratio * dim), nn.GELU(), nn.Dropout(dropout),
             nn.Linear(mlp_ratio * dim, dim), nn.Dropout(dropout),
         )
+        # Built only when `loc_dim` is given, so the default layer's parameter
+        # set (and state_dict) is exactly what it was before this option.
+        self.loc_dim = loc_dim
+        if loc_dim is not None:
+            self.loc_down = nn.Linear(loc_dim, loc_rank)
+            self.loc_q_proj = nn.Linear(loc_rank, dim) if loc_inject_q else None
+            self.loc_gate_proj = (nn.Linear(loc_rank, dim) if loc_inject_gate
+                                  else None)
+            for proj in (self.loc_q_proj, self.loc_gate_proj):
+                if proj is not None:
+                    nn.init.zeros_(proj.weight)
+                    nn.init.zeros_(proj.bias)
 
-    def forward(self, x, context):
-        # x: (B*N, T, D); context: (B, T_ctx, D)
+    def forward(self, x, context, loc=None):
+        # x: (B*N, T, D); context: (B, T_ctx, D); loc: (B, loc_dim) or None
         y = self.ln1(x)
         x = x + self.self_attn(y, y, y, need_weights=False)[0]
         # Every patch location attends to the same context, so fold the patch
         # axis into the query token axis instead of expanding key/values.
         bn, t, d = x.shape
         b = context.shape[0]
+        code = (self.loc_down(loc)
+                if (self.loc_dim is not None and loc is not None) else None)
+        # The fold below is tile-major, so a per-tile (B, D) term broadcasts
+        # over the folded token axis -- no per-patch expansion is needed, and
+        # the key/values stay (B, T_ctx, D).
         q = self.ln_q(x).reshape(b, (bn // b) * t, d)
+        if code is not None and self.loc_q_proj is not None:
+            q = q + self.loc_q_proj(code).unsqueeze(1)
         kv = self.ln_kv(context)
         attended = self.cross_attn(q, kv, kv, need_weights=False)[0]
+        if code is not None and self.loc_gate_proj is not None:
+            # Deliberately unbounded: 1 + tanh(g) would forbid the sign
+            # inversion that opposite-signed teleconnections require.
+            attended = attended * (1 + self.loc_gate_proj(code).unsqueeze(1))
         x = x + attended.reshape(bn, t, d)
         return x + self.mlp(self.ln2(x))
 
@@ -766,7 +820,11 @@ class MTSViTFusion(nn.Module):
     frame; a temporal transformer encoder (shared across modalities) runs
     self-attention over each patch location's time series with cross-attention
     to temporal context tokens (e.g. monthly oceanic indices), and a per-
-    modality cls token summarizes the series.
+    modality cls token summarizes the series. With `climate_loc_attn`, that
+    cross-attention is conditioned on the tile's coordinates, so the climate
+    response can vary geographically instead of being one global function
+    (see `CrossAttnTemporalLayer`); `context_dropout` blanks the context for a
+    fraction of training samples to keep that pathway a correction.
     Stage 2 (spatial): modality tokens (optionally plus the patch-embedded
     single-timestep spatial branches, when `spatial_in_encoder`) are fused per
     patch location and mixed by a spatial transformer encoder.
@@ -789,7 +847,9 @@ class MTSViTFusion(nn.Module):
                  branch_norm=None, branch_norm_exclude=None,
                  transformer_out_channels=16, climate_film=False,
                  film_location=None, film_cond_dim=128, film_num_freqs=16,
-                 film_sigma=1.0, film_location_features=2):
+                 film_sigma=1.0, film_location_features=2,
+                 climate_loc_attn=False, loc_dim=64, loc_rank=4,
+                 loc_inject_q=True, loc_inject_gate=True, context_dropout=0.0):
         super().__init__()
         self.num_classes = num_classes
         self.embed_dim = embed_dim
@@ -856,10 +916,30 @@ class MTSViTFusion(nn.Module):
             self.context_pos[name] = nn.Parameter(
                 torch.zeros(steps, embed_dim))
 
+        # Optional per-tile location conditioning of the stage-1 cross-attention
+        # (see CrossAttnTemporalLayer). Off by default; the location code is
+        # read from `film_location`'s raw input, so that branch keeps its normal
+        # route into the spatial branches.
+        self.climate_loc_attn = climate_loc_attn
+        self.context_dropout = context_dropout
+        self.loc_dim = loc_dim if climate_loc_attn else None
+        if climate_loc_attn:
+            if not temporal_branches:
+                raise ValueError(
+                    "climate_loc_attn needs at least one temporal-context "
+                    "input: an identity branch with shape [T, F]")
+            if film_location is None:
+                raise ValueError(
+                    "climate_loc_attn needs film_location (the input key "
+                    "holding the per-tile coordinates, e.g. 'md_single')")
+
         # Stage 1: temporal encoder (cross-attends to context when present)
         if temporal_branches:
             self.temporal_layers = nn.ModuleList([
-                CrossAttnTemporalLayer(embed_dim, num_heads, mlp_ratio, dropout)
+                CrossAttnTemporalLayer(
+                    embed_dim, num_heads, mlp_ratio, dropout,
+                    loc_dim=self.loc_dim, loc_rank=loc_rank,
+                    loc_inject_q=loc_inject_q, loc_inject_gate=loc_inject_gate)
                 for _ in range(temporal_depth)])
         else:
             self.temporal_layers = nn.ModuleList([
@@ -937,17 +1017,8 @@ class MTSViTFusion(nn.Module):
                 nn.Linear(film_cond_dim, film_cond_dim), nn.ReLU(),
             )
             if film_location is not None:
-                matches = [b for b in branch_models
-                           if b.input_name == film_location]
-                if not matches:
-                    raise ValueError(f"film_location '{film_location}' "
-                                     f"matches no input branch")
-                # Non-identity location branches (e.g. coord_fourier) don't
-                # expose input_shape; film_location_features covers them
-                # (md_single's (md_x, md_y) -> 2).
-                loc_shape = getattr(matches[0], "input_shape", None)
-                in_features = (loc_shape[-1] if loc_shape is not None
-                               else film_location_features)
+                in_features = _location_features(branch_models, film_location,
+                                                 film_location_features)
                 self.register_buffer(
                     "film_freq_proj",
                     torch.randn(in_features, film_num_freqs) * film_sigma)
@@ -963,6 +1034,23 @@ class MTSViTFusion(nn.Module):
             # One FiLM per head stage (the head's conv widths are fixed).
             self.films = nn.ModuleList(
                 [FiLM(film_cond_dim, c) for c in (128, 64, 32, 16)])
+
+        # Shared per-tile location encoder feeding the stage-1 cross-attention
+        # layers. Mirrors the film_location encoder above (random Fourier
+        # features over the normalized coordinates) with its own registered
+        # buffer, so the two mechanisms stay independent and each is saved with
+        # the model.
+        if climate_loc_attn:
+            loc_in_features = _location_features(branch_models, film_location,
+                                                 film_location_features)
+            self.register_buffer(
+                "loc_freq_proj",
+                torch.randn(loc_in_features, film_num_freqs) * film_sigma)
+            self.loc_encoder = nn.Sequential(
+                nn.Linear(loc_in_features + 2 * film_num_freqs, loc_dim),
+                nn.ReLU(),
+                nn.Linear(loc_dim, loc_dim), nn.ReLU(),
+            )
 
         for pos in list(self.temporal_pos.values()) + list(self.context_pos.values()):
             nn.init.trunc_normal_(pos, std=0.02)
@@ -984,14 +1072,49 @@ class MTSViTFusion(nn.Module):
             cond = cond * (1 + gamma) + beta  # location gates climate
         return cond
 
+    def _loc_code(self, inputs):
+        """Per-tile location embedding (B, loc_dim) for the stage-1 layers.
+
+        Same random-Fourier recipe as `_film_condition`'s location gate, with
+        its own buffer and encoder.
+        """
+        coord = inputs[self.film_location].flatten(1)
+        proj = 2 * math.pi * (coord @ self.loc_freq_proj)
+        feats = torch.cat([coord, proj.sin(), proj.cos()], dim=-1)
+        return self.loc_encoder(feats)
+
+    @torch.no_grad()
+    def location_gates(self, inputs):
+        """Per-tile stage-1 climate gates, (B, temporal_depth, embed_dim).
+
+        Row norms plotted against the tile coordinates give a map of how
+        strongly each place's temporal encoder responds to the climate context.
+        A partial view only -- it says nothing about the query bias -- so treat
+        `scripts/probe_year_sensitivity.py` as the primary diagnostic.
+        """
+        code = self._loc_code(inputs)
+        return torch.stack([layer.loc_gate_proj(layer.loc_down(code))
+                            for layer in self.temporal_layers], dim=1)
+
     def _encode_context(self, inputs):
         if not self.context_names:
             return None
         tokens = [self.context_projs[name](inputs[name]) + self.context_pos[name]
                   for name in self.context_names]
-        return torch.cat(tokens, dim=1)
+        context = torch.cat(tokens, dim=1)
+        if self.training and self.context_dropout > 0:
+            # Blank the whole climate context for a random subset of samples so
+            # the rest of the model stays predictive without it and the climate
+            # pathway can only earn a correction -- a guard against keying on
+            # the handful of distinct index series in the training years.
+            # Deliberately not rescaled by 1/(1-p): a null context is a state
+            # the model must handle, not an expectation to preserve.
+            keep = (torch.rand(context.shape[0], 1, 1, device=context.device)
+                    >= self.context_dropout).to(context.dtype)
+            context = context * keep
+        return context
 
-    def _encode_temporal(self, x, name, context):
+    def _encode_temporal(self, x, name, context, loc=None):
         # x: (B, T, H, W, C) -> patch tokens (B, N, T, D)
         batch, steps = x.shape[:2]
         x = _time_distributed(self.patch_embeds[name],
@@ -1001,14 +1124,15 @@ class MTSViTFusion(nn.Module):
         cls = self.cls_tokens[name].expand(batch, x.shape[1], 1, -1)
         x = torch.cat([cls, x], dim=2).flatten(0, 1)  # (B*N, T+1, D)
         for layer in self.temporal_layers:
-            x = layer(x, context) if context is not None else layer(x)
+            x = layer(x, context, loc) if context is not None else layer(x)
         return x[:, 0].unflatten(0, (batch, -1))  # cls token: (B, N, D)
 
     def forward(self, inputs):
+        loc = self._loc_code(inputs) if self.climate_loc_attn else None
         context = self._encode_context(inputs)
 
         # Stage 1: temporal encoding per modality
-        tokens = [self._encode_temporal(inputs[name], name, context)
+        tokens = [self._encode_temporal(inputs[name], name, context, loc)
                   for name in self.temporal_names]
 
         # Spatial branches: full-res feature maps (channels-first), computed once
