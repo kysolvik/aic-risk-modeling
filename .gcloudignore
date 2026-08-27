@@ -1,0 +1,21 @@
+# Allowlist, not a denylist. The working tree is ~12 GB (out/ 5.2 G, .venv 3.6 G,
+# .git 1.8 G, local_test/ 1.5 G, notebooks/ 660 M, storage_dump/ 193 M), and a
+# denylist would eventually miss something. Exclude everything, then re-include
+# exactly the build inputs.
+*
+
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src
+!assets
+!docker
+
+!scripts
+
+# Re-exclude noise inside the allowlisted trees.
+**/__pycache__
+**/*.py[cod]
+*.egg-info
+*.swp

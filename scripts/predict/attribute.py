@@ -55,6 +55,7 @@ from aic_risk_modeling.eval import attribution
 from aic_risk_modeling.train import data_norm
 
 from predict import (add_md_sidecar, set_raw_x_y, write_batch,
+                     resolve_stats_path, DEFAULT_PROFILE_TEMPLATE,
                      TFRECORD_PATTERN)
 
 
@@ -76,6 +77,13 @@ def parse_args():
         '--max_chips', type=int, default=None,
         help='stop after this many chips (smoke runs)')
     parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument(
+        '--stats_path', type=str, default=None,
+        help='normalization stats (.json or .pbtxt), local or gs://; default is '
+             "config['stats_path'], else <data_dir>/stats.pbtxt (legacy)")
+    parser.add_argument(
+        '--profile_template', type=str, default=DEFAULT_PROFILE_TEMPLATE,
+        help='GeoTIFF supplying the CRS and pixel size for the output chips')
     parser.add_argument(
         '--write_mask', action='store_true',
         help='also write mask_{x}-{y}.tif ground-truth rasters')
@@ -115,8 +123,8 @@ def main():
     args = parse_args()
     if args.shapley_samples is not None and not args.shapley:
         raise SystemExit('--shapley_samples requires --shapley')
-    with open(args.config_path, 'r') as f:
-        config = json.load(f)
+    # load_config handles gs:// via tf.io.gfile; plain open() does not.
+    config = arm.train.trainer.load_config(args.config_path)
     pos_weight = (args.pos_weight if args.pos_weight is not None
                   else config.get('pos_weight', 9.0))
 
@@ -141,7 +149,8 @@ def main():
     ds = ds.map(set_raw_x_y)
     normalize_list = arm.train.get_normalize_list(config)
     robust_features = arm.train.get_robust_normalize_list(config)
-    stats_path = args.data_dir.rstrip('/') + '/stats.pbtxt'
+    stats_path = resolve_stats_path(args.stats_path, config, args.data_dir)
+    print(f'[attribute] normalizing with stats: {stats_path}', flush=True)
     check_stats_coverage(stats_path, normalize_list)
     norm_func = arm.train.create_normalizer(
         stats_path, normalize_list, robust_features=robust_features)
@@ -157,8 +166,8 @@ def main():
     model = model.to(device)
 
     os.makedirs(args.output_dir, exist_ok=True)
-    src = rio.open('./out/example.tif')
-    profile = src.profile
+    with rio.open(args.profile_template) as src:
+        profile = src.profile
     profile.update(
         dtype=rio.float32,
         count=1,
