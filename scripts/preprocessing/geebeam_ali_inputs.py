@@ -17,12 +17,13 @@ PROJECT_ID = google.auth.default()[1]
 parser = argparse.ArgumentParser()
 parser.add_argument('--target_year', type=int, required=False, default=2024)
 parser.add_argument('--random_seed', type=int, required=False, default=54)
+parser.add_argument('--predict_only', action='store_true')
 # Beam args are leftover after parsing known args
 args, other_args = parser.parse_known_args()
-print(args.target_year)
 
 RANDOM_SEED = args.random_seed
 TARGET_YEAR = args.target_year
+PREDICT_ONLY = args.predict_only
 
 MONTH_START = 1
 MONTH_END = 12
@@ -69,7 +70,7 @@ def prep_viirs_nrt_year(y):
         ['fireSize', 'fire_type', 'confidence']
     ).unmask(0).toInt()
 
-viirs_target = prep_viirs_nrt_year(TARGET_YEAR)
+viirs_target = prep_viirs_nrt_year(TARGET_YEAR - PREDICT_ONLY)
 
 # MODIS MCD64 fire memory
 def prep_mcd64_year(y):
@@ -85,7 +86,11 @@ def prep_mcd64_year(y):
     mcd64 = mcd64.rename(band_names_new)
     return mcd64
 
-mcd64_list = [prep_mcd64_year(y) for y in range(TARGET_YEAR-6, TARGET_YEAR+1)]
+mcd64_list = [prep_mcd64_year(y) for y in range(
+    TARGET_YEAR-6, TARGET_YEAR+(1-PREDICT_ONLY)
+)]
+if PREDICT_ONLY:
+    mcd64_list.append(prep_mcd64_year(TARGET_YEAR-1).rename('BurnDate_0'))
 
 # VIIRS fire memory
 def prep_viirs_year(y):
@@ -94,7 +99,10 @@ def prep_viirs_year(y):
                   ).max().unmask().gt(0).rename(f'viirs_snpp_{y-TARGET_YEAR}')
     return viirs_snpp
 
-viirs_memory = [prep_viirs_year(y) for y in range(TARGET_YEAR-6, TARGET_YEAR+1)]
+viirs_memory = [prep_viirs_year(y) for y in range(
+    TARGET_YEAR-6, TARGET_YEAR+(1-PREDICT_ONLY))]
+if PREDICT_ONLY:
+    viirs_memory.append(prep_viirs_year(TARGET_YEAR-1).rename('viirs_snpp_0'))
 
 # MB Land-use/land-cover
 mb_amz_lulc_im = ee.Image('projects/mapbiomas-public/assets/amazon/lulc/collection6/mapbiomas_collection60_integration_v1')
@@ -133,13 +141,18 @@ mb_amz_ag = (mb_amz_lulc_im
 
 
 # Deforestation
+# Old export topped off at 2025-01-17
+GLAD_CUTOFF_DAY = 2219  # days since 2019-01-01 => 2025-01-27
 gfw_col = 'projects/glad/S2alert'
+gfw_in_snapshot = ee.Image(gfw_col+'/alertDate').lte(GLAD_CUTOFF_DAY)
 gfw_alert = (
     ee.Image(gfw_col+'/alert')
+    .updateMask(gfw_in_snapshot)
     .rename('alert').unmask(0)
     )
 gfw_alert_date = (
     ee.Image(gfw_col+'/alertDate')
+    .updateMask(gfw_in_snapshot)
     .rename('alertdate').unmask(0)
     )
 gfc_im = (ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
@@ -306,13 +319,22 @@ atc_im = atc_full.select('accessibility').unmask(5000)
 
 # World Population
 landscanCol = ee.ImageCollection("projects/sat-io/open-datasets/ORNL/LANDSCAN_GLOBAL")
+# Filter if 2026 is target year, doesn't exist
+if TARGET_YEAR >= 2026:
+    landscan_filtered = (landscanCol
+        .filterDate(f'{TARGET_YEAR-2}-{MONTH_START}-01', f'{TARGET_YEAR-2}-{MONTH_END}-{DAY_END}')
+    )
+else:
+    landscan_filtered = (landscanCol
+        .filterDate(f'{TARGET_YEAR-1}-{MONTH_START}-01', f'{TARGET_YEAR-1}-{MONTH_END}-{DAY_END}')
+    )
 population = (
-    landscanCol
-    .filterDate(f'{TARGET_YEAR-1}-{MONTH_START}-01', f'{TARGET_YEAR-1}-{MONTH_END}-{DAY_END}')
+    landscan_filtered
     .select('b1')
     .mosaic()
     .unmask(0)
-    .rename('Population_Density'))
+    .rename('Population_Density')
+    )
 
 # Night Lights
 nightLightsCol = ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMCFG")
@@ -396,7 +418,7 @@ if __name__ == '__main__':
         tile_coverage='intersect',
         validation_ratio=0.0, # Fraction to select as validation data
         output_type='tfrecord',
-        output_path=f'gs://woodwell-aic-fire-risk/data/fullgrid/allpreds_{TARGET_YEAR}',
+        output_path=f'gs://woodwell-aic-fire-risk/data/fullgrid_v2/allpreds_{TARGET_YEAR}',
         sampling_region='../data/Limites_RAISG_2025/Lim_Raisg.shp',
         extra_metadata=md_dict
     )
