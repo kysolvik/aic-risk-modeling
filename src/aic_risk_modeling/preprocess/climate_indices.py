@@ -2,17 +2,27 @@
 
 import pandas as pd
 
+# NOAA's headers declare their missing value inconsistently.
+# So detecting missingness by magnitude rather than
+# trusting either the header or a single hard-coded constant.
+NODATA_ABS = 60.0
+
+# Set max no data gap to fill with linear interpolation
+MAX_FILL_GAP = 2
+
+
 def download_clim_indices(
         index_name: str,
         year_start: int,
         year_end: int
     ) -> pd.DataFrame:
     """Download non-spatial climate indices from NOAA.
-    
-    Note:
-        This was used for a specific project. It is probably not what you want, and will
-        be removed soon.
-        
+
+    Raises:
+        ValueError: if the index name is unknown, if a requested month is absent
+            from the source entirely, or if missing values remain after
+            interpolation.
+
     Args:
     index_name: one of 'amo', 'soi', 'oni', 'mei', 'tna'.
     year_start: First year to download (but samples are monthly)
@@ -42,7 +52,36 @@ def download_clim_indices(
     df.columns = ['Date', 'metric']
 
     df = df.set_index('Date')
-    indexer = (df.index.year >=year_start) & (df.index.year <= year_end)
-    return df.loc[indexer]
+    df = df[~df.index.duplicated(keep='last')].sort_index()
 
+    wanted = pd.date_range(f'{year_start}-01-01', f'{year_end}-12-01', freq='MS')
+    absent = wanted.difference(df.index)
+    if len(absent):
+        raise ValueError(
+            f'{index_name}: {len(absent)} month(s) of [{year_start}, {year_end}] '
+            f'are not in the source, first {absent[0].date()}. The record '
+            f'ends at {df.index.max().date()}.')
+    df = df.loc[wanted]
 
+    # Filter out nodata
+    df['metric'] = df['metric'].where(df['metric'].abs() <= NODATA_ABS)
+    missing = df.index[df['metric'].isna()]
+    if len(missing):
+        df['metric'] = df['metric'].interpolate(method='time', limit=MAX_FILL_GAP,
+                                                limit_area='inside')
+        still = df.index[df['metric'].isna()]
+        if len(still):
+            raise ValueError(
+                f'{index_name}: {len(still)} month(s) of [{year_start}, {year_end}] '
+                f'are missing and could not be interpolated '
+                f'({still[0].date()} .. {still[-1].date()}); the last usable '
+                f'observation is {df["metric"].last_valid_index().date()}. Either '
+                f'the run exceeds MAX_FILL_GAP={MAX_FILL_GAP} months or it is at '
+                f'the edge of the window, where filling it would be extrapolation.')
+
+    n_expected = 12 * (year_end - year_start + 1)
+    if len(df) != n_expected:
+        raise ValueError(f'{index_name}: got {len(df)} months, expected {n_expected}. '
+                         f'Callers index this positionally; a length change '
+                         f'silently shifts the calendar.')
+    return df
