@@ -1,0 +1,46 @@
+# Build the CPU prediction image and push it to Artifact Registry.
+#
+#   gcloud builds submit --config=cloudbuild.yaml --region=us-east1 \
+#     --project=macedo-lab-general-9051 \
+#     --substitutions=_TAG=$(git rev-parse --short HEAD) .
+substitutions:
+  _REGION: us-east1
+  _REPO: aic-containers
+  _IMAGE: aic-predict
+  _TAG: latest
+
+options:
+  machineType: E2_HIGHCPU_8
+  diskSizeGb: 100
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 3600s
+
+steps:
+  # Warm the layer cache from the previous build. `|| true` so the very first
+  # build, when no :latest exists yet, does not fail here.
+  - name: gcr.io/cloud-builders/docker
+    id: pull-cache
+    entrypoint: bash
+    args:
+      - -c
+      - docker pull ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest || true
+
+  - name: gcr.io/cloud-builders/docker
+    id: build
+    env: ['DOCKER_BUILDKIT=1']
+    args:
+      - build
+      - --build-arg=BUILDKIT_INLINE_CACHE=1
+      - --cache-from=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest
+      - -t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${_TAG}
+      - -t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest
+      - -f=docker/Dockerfile
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    id: push
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}
