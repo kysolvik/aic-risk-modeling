@@ -1,4 +1,6 @@
 
+import os
+
 import numpy as np
 import tensorflow as tf
 import torch
@@ -6,11 +8,16 @@ import aic_risk_modeling as arm
 import rasterio as rio
 from rasterio.transform import Affine
 from tqdm import tqdm
-import json
 import argparse
 
 TFRECORD_PATTERN = '*.tfrecord.gz'
 CENTERED = True# True if x, y are for center for each tile
+
+# GeoTIFF supplying the output CRS and pixel size. Resolved off __file__ rather
+# than the cwd so it works from any working directory, in a container or out.
+_REPO_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir))
+DEFAULT_PROFILE_TEMPLATE = os.path.join(_REPO_ROOT, 'assets', 'example.tif')
 
 # Passthrough feature group injected into the config at runtime so the raw
 # (un-normalized) coordinates ride along in the model inputs dict.
@@ -57,7 +64,52 @@ def parse_args():
         '--invert_yres',
         action='store_true'
     )
+    parser.add_argument(
+        '--stats_path',
+        type=str,
+        default=None,
+        help='normalization stats (.json or .pbtxt), local or gs://; default is '
+             "config['stats_path'], else <data_dir>/stats.pbtxt (legacy)"
+    )
+    parser.add_argument(
+        '--profile_template',
+        type=str,
+        default=DEFAULT_PROFILE_TEMPLATE,
+        help='GeoTIFF supplying the CRS and pixel size for the output chips'
+    )
+    parser.add_argument(
+        '--tfrecord_pattern',
+        type=str,
+        default=TFRECORD_PATTERN
+    )
+    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument(
+        '--max_chips', type=int, default=None,
+        help='stop after this many chips (smoke runs)')
+    parser.add_argument(
+        '--seed', type=int, default=None,
+        help='seed the tfrecord listing/interleave order; without it chip order '
+             'varies run to run, which matters only for --max_chips and A/B runs')
     return parser.parse_args()
+
+
+def resolve_stats_path(explicit, config, data_dir):
+    """Pick the normalization stats file.
+
+    Precedence: --stats_path > config['stats_path'] > <data_dir>/stats.pbtxt.
+
+    Prediction must normalize with the same statistics the model trained on.
+    The per-data_dir fallback re-centers every prediction year independently,
+    which erases the year-to-year offset the model learned; it is kept only so
+    older invocations that relied on it keep working. Note the GCS allpreds_*
+    directories carry no stats.pbtxt at all, so the fallback cannot serve them.
+    """
+    if explicit:
+        return explicit
+    if config.get('stats_path'):
+        return config['stats_path']
+    # rstrip: 'gs://b/d//stats.pbtxt' is a different object from 'gs://b/d/stats.pbtxt'
+    return data_dir.rstrip('/') + '/stats.pbtxt'
 
 
 def add_md_sidecar(config):
@@ -127,18 +179,21 @@ def write_batch(outs, masks, xs, ys, base_transform, profile, output_dir,
 
 def main():
     args = parse_args()
-    with open(args.config_path, 'r') as f:
-        config = json.load(f)
+    # load_config handles gs:// via tf.io.gfile; plain open() does not.
+    config = arm.train.trainer.load_config(args.config_path)
+    stats_path = resolve_stats_path(args.stats_path, config, args.data_dir)
+    print(f'[predict] normalizing with stats: {stats_path}', flush=True)
     # Add the md_sidecar passthrough group at runtime (carries md_x_raw/md_y_raw).
     config = add_md_sidecar(config)
 
     # Merged dataset test, merging along features-axis
     ds = arm.train.build_merged_dataset([args.data_dir],
-                                        TFRECORD_PATTERN,
-                                        batch_size=4,
+                                        args.tfrecord_pattern,
+                                        batch_size=args.batch_size,
                                         cache=False,
                                         axis='examples',
-                                        shuffle=False
+                                        shuffle=False,
+                                        seed=args.seed
                                         )
     # Stash raw lat/lon before normalization so they survive as md_x_raw/md_y_raw
     ds = ds.map(set_raw_x_y)
@@ -146,7 +201,7 @@ def main():
     normalize_list = arm.train.get_normalize_list(config)
     robust_features = arm.train.get_robust_normalize_list(config)
     norm_func = arm.train.create_normalizer(
-        args.data_dir + '/stats.pbtxt', normalize_list, robust_features=robust_features)
+        stats_path, normalize_list, robust_features=robust_features)
     ds = ds.map(norm_func)
 
     # Select bands (the md_sidecar group stacks md_x_raw/md_y_raw into inputs)
@@ -158,14 +213,24 @@ def main():
     # Load checkpoint
     model = arm.train.trainer.load_model(args.checkpoint)
 
-    all_outs = []
-    all_x = []
-    all_y = []
-    all_masks = []
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
     amp_enabled = device.type == 'cuda'
     amp_dtype = torch.float16 if amp_enabled else torch.bfloat16
+
+    # Set the output profile up before the loop: rasters are written per batch
+    # rather than accumulated, so a full grid stays flat in memory (a 5-class
+    # model writes num_classes+1 bands per chip, which adds up).
+    os.makedirs(args.output_dir, exist_ok=True)
+    with rio.open(args.profile_template) as src:
+        profile = src.profile
+    profile.update(
+        dtype=rio.float32,
+        count=1,
+        compress='lzw')
+    base_transform = profile['transform']
+
+    n_chips = 0
     with torch.no_grad():
         for inputs, labels, weights in tqdm(arm.train.trainer._torch_batches(ds, device),
                                    desc='Predicting', unit='batch'):
@@ -184,23 +249,16 @@ def main():
             md_sidecar = inputs['md_sidecar']
             md_x_raw = md_sidecar[:, 0, 0].cpu().numpy()
             md_y_raw = md_sidecar[:, 0, 1].cpu().numpy()
-            all_x.append(md_x_raw)
-            all_y.append(md_y_raw)
-            all_masks.append(labels.cpu().numpy())
-            all_outs.append(preds.float().cpu().numpy())
 
-    src = rio.open('./out/example.tif')
-    profile = src.profile
-    profile.update(
-        dtype=rio.float32,
-        count=1,
-        compress='lzw')
-    base_transform = profile['transform']
+            write_batch(preds.float().cpu().numpy(), labels.cpu().numpy(),
+                        md_x_raw, md_y_raw, base_transform, profile,
+                        args.output_dir, args.edge_crop, args.invert_yres)
 
-    for i in range(len(all_outs)):
-        write_batch(all_outs[i], all_masks[i], all_x[i], all_y[i],
-                    base_transform, profile, args.output_dir, args.edge_crop,
-                    args.invert_yres)
+            n_chips += int(labels.shape[0])
+            if args.max_chips and n_chips >= args.max_chips:
+                break
+
+    print(f'[predict] wrote {n_chips} chips to {args.output_dir}', flush=True)
 
 if __name__ == '__main__':
     main()
