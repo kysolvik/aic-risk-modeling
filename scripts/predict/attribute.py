@@ -37,7 +37,6 @@ Example (CPU, needs GCS read access):
 """
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -67,6 +66,10 @@ def parse_args():
     parser.add_argument('--output_dir', type=str, required=True)
     parser.add_argument('--edge_crop', type=int, default=0)
     parser.add_argument(
+        '--invert_yres', action='store_true',
+        help='flip rows / negate y-resolution so the rasters georeference the '
+             'same way predict.py writes them (entrypoint default INVERT_YRES=1)')
+    parser.add_argument(
         '--drivers', type=str, default=None,
         help='driver-spec JSON (see configs/attribution_drivers_default.json);'
              ' default = built-in DEFAULT_DRIVERS')
@@ -77,6 +80,14 @@ def parse_args():
         '--max_chips', type=int, default=None,
         help='stop after this many chips (smoke runs)')
     parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument(
+        '--tfrecord_pattern', type=str, default=TFRECORD_PATTERN,
+        help='narrow the run to a subset of shards (parity with predict.py; '
+             'e.g. one shard for a smoke run or per-task sharding)')
+    parser.add_argument(
+        '--seed', type=int, default=None,
+        help='seed the tfrecord listing/interleave order so a --max_chips smoke '
+             'run samples the same chips each time (parity with predict.py)')
     parser.add_argument(
         '--stats_path', type=str, default=None,
         help='normalization stats (.json or .pbtxt), local or gs://; default is '
@@ -130,21 +141,23 @@ def main():
 
     # Resolve drivers against the real input groups BEFORE injecting the
     # md_sidecar passthrough group, so it can never be named as a driver.
+    # load_config handles gs:// via tf.io.gfile; plain open() does not. The spec
+    # lives on GCS because configs/ is not copied into the prediction image.
     spec_json = None
     if args.drivers:
-        with open(args.drivers, 'r') as f:
-            spec_json = json.load(f)
+        spec_json = arm.train.trainer.load_config(args.drivers)
     driver_spec = attribution.resolve_driver_spec(
         spec_json, config['input_features'])
     baselines = attribution.resolve_baselines(driver_spec, config)
     config = add_md_sidecar(config)
 
     ds = arm.train.build_merged_dataset([args.data_dir],
-                                        TFRECORD_PATTERN,
+                                        args.tfrecord_pattern,
                                         batch_size=args.batch_size,
                                         cache=False,
                                         axis='examples',
-                                        shuffle=False
+                                        shuffle=False,
+                                        seed=args.seed
                                         )
     ds = ds.map(set_raw_x_y)
     normalize_list = arm.train.get_normalize_list(config)
@@ -198,6 +211,7 @@ def main():
         write_batch(bands.float().cpu().numpy(), labels.cpu().numpy(),
                     md_x_raw, md_y_raw, base_transform, profile,
                     args.output_dir, args.edge_crop,
+                    invert_yres=args.invert_yres,
                     band_names=names, out_prefix=out_prefix,
                     write_mask=args.write_mask)
 
