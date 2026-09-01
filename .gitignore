@@ -235,3 +235,7 @@ notebooks/
 
 # Output dir
 out/
+
+# Template GeoTIFF seeding the predict/attribute output profile (CRS + 0.005-deg
+# pixel size). Negates the blanket *.tif above so it ships in the container image.
+!assets/*.tif

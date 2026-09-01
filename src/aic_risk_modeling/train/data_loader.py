@@ -280,6 +280,31 @@ def _stack_vars(features, input_keys, exclude_keys: Optional[List[str]] = None):
 
     return stacked_tensor
 
+
+def _combine_output_bands(stacked, mode):
+    """Reduce the trailing feature axis of a stacked output to one channel.
+
+    Lets several label bands be merged into a single binary target, e.g. a
+    union of two fire sensors that each miss fire the other sees. ``'any'``
+    is the union (positive where any source band is positive), ``'all'`` the
+    intersection. Boolean only.
+
+    Args:
+        stacked: tensor whose last axis indexes the source bands, as returned
+            by `_stack_vars`.
+        mode: 'any' or 'all'.
+
+    Returns:
+        Tensor with the trailing axis reduced away, same dtype as `stacked`.
+    """
+    reduce_fn = {'any': tf.reduce_any, 'all': tf.reduce_all}.get(mode)
+    if reduce_fn is None:
+        raise ValueError(
+            f"Unknown output combine mode {mode!r}. Expected 'any' or 'all'.")
+    combined = reduce_fn(tf.cast(stacked, tf.bool), axis=-1)
+    return tf.cast(combined, stacked.dtype)
+
+
 def _prep_metadata(example):
     """Just coords for now"""
     return tf.stack([example['md_y'], example['md_x']], axis=-1)
@@ -369,19 +394,21 @@ def _to_tuple_transform(
             input_feature_config[feat_group]
         )
 
-    # Return outputs based on number of output bands
-    if len(output_feature_config['feature_names']) == 1:
+    # Return outputs based on the combine mode and number of output bands
+    prepped_outputs = _single_feature_group_prep(
+        example,
+        output_feature_config
+    )
+    combine = output_feature_config.get('combine')
+    if combine is not None:
+        # Several bands merged into one binary target (e.g. a two-sensor union)
+        outputs = _combine_output_bands(prepped_outputs, combine)
+    elif len(output_feature_config['feature_names']) == 1:
         # Single output: return as tensor
-        outputs = _single_feature_group_prep(
-            example,
-            output_feature_config
-        )[...,0]
+        outputs = prepped_outputs[...,0]
     else:
         # Multiple outputs: return as dict
-        outputs = _single_feature_group_prep(
-            example,
-            output_feature_config
-        )
+        outputs = prepped_outputs
 
     if sample_weight_config is None:
         return inputs, outputs
