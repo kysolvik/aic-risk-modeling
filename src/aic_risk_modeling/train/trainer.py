@@ -128,12 +128,17 @@ def build_all_models(inputs_config):
     all_models = []
     for input_key, input_dict in inputs_config.items():
         model_type = input_dict['model_type']
-        if len(input_dict['timesteps']) > 0:
-            time_dim = [len(input_dict['timesteps'])]
+        n_timesteps = len(input_dict['timesteps'])
+        n_features = len(input_dict['feature_names'])
+        if n_timesteps > 0 and input_dict.get('stack_timesteps'):
+            # (T, ...spatial, C): the loader keeps time as its own axis.
+            input_shape = [n_timesteps] + input_dict['shape'] + [n_features]
+        elif n_timesteps > 0:
+            # stack_timesteps false: the loader folds time into the channel axis
+            # (feature x timestep), so there is no separate time dim.
+            input_shape = input_dict['shape'] + [n_features * n_timesteps]
         else:
-            time_dim = []
-        feature_dim = [len(input_dict['feature_names'])]
-        input_shape = time_dim + input_dict['shape'] + feature_dim
+            input_shape = input_dict['shape'] + [n_features]
         print(input_shape)
         input_name = input_key
         # Optional per-branch factory kwargs (e.g. a projection branch's

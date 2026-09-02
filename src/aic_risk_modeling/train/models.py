@@ -116,26 +116,33 @@ def _time_distributed(module, x):
 # ---------------------------------------------------------------------------
 
 class UNet(nn.Module):
-    def __init__(self, input_shape, input_name=None, for_fusion=True):
+    def __init__(self, input_shape, input_name=None, for_fusion=True,
+                 base_filters=64):
         super().__init__()
         self.input_name = input_name
         self.for_fusion = for_fusion
         in_channels = input_shape[-1]
-        self.e1 = EncoderBlock(in_channels, 64)
-        self.e2 = EncoderBlock(64, 128)
-        self.e3 = EncoderBlock(128, 256)
-        self.e4 = EncoderBlock(256, 512)
-        self.bottleneck = ConvBlock(512, 1024)
-        self.d1 = DecoderBlock(1024, 512, 512)
-        self.d2 = DecoderBlock(512, 256, 256)
-        self.d3 = DecoderBlock(256, 128, 128)
-        self.d4 = DecoderBlock(128, 64, 64)
+        # Width-parametric: channels double each level from `base_filters`. The
+        # bottleneck ConvTranspose scales ~quadratically with width, so lowering
+        # base_filters (e.g. 48) shrinks the model substantially with the same
+        # 4-level depth. Default 64 preserves the original UNet exactly.
+        b = base_filters
+        c1, c2, c3, c4, cb = b, 2 * b, 4 * b, 8 * b, 16 * b
+        self.e1 = EncoderBlock(in_channels, c1)
+        self.e2 = EncoderBlock(c1, c2)
+        self.e3 = EncoderBlock(c2, c3)
+        self.e4 = EncoderBlock(c3, c4)
+        self.bottleneck = ConvBlock(c4, cb)
+        self.d1 = DecoderBlock(cb, c4, c4)
+        self.d2 = DecoderBlock(c4, c3, c3)
+        self.d3 = DecoderBlock(c3, c2, c2)
+        self.d4 = DecoderBlock(c2, c1, c1)
         if for_fusion:
-            # Expose the 64-channel decoder feature map as fusion features
+            # Expose the base-width decoder feature map as fusion features
             # instead of collapsing to a single channel.
-            self.out_channels = 64
+            self.out_channels = c1
         else:
-            self.out_conv = nn.Conv2d(64, 1, 1)
+            self.out_conv = nn.Conv2d(c1, 1, 1)
             self.out_channels = 1
 
     def forward(self, x):
@@ -216,6 +223,39 @@ class MLPForFusion(nn.Module):
         x = self.net(x)
         x = x.reshape(x.shape[0], 1, 1, self.out_channels)
         return x.expand(-1, PATCH_SIZE, PATCH_SIZE, -1)
+
+
+class PixelMLP(nn.Module):
+    """Per-pixel (pointwise) MLP over a channels-last spatial input.
+
+    Applies the same small MLP independently at every pixel:
+    ``(B, H, W, C_in) -> (B, H, W, out_channels)`` with no spatial mixing --
+    ``nn.Linear`` acts on the last axis, so this is equivalent to a stack of 1x1
+    convolutions. The neural analogue of the tabular random-forest baseline (each
+    pixel classified from its own stacked band/timestep values), exposed as a
+    fusion branch so it shares the decoder head with the other baselines. Unlike
+    ``MLPForFusion`` (which collapses a flat per-tile vector and broadcasts it),
+    this keeps full spatial resolution.
+    """
+
+    def __init__(self, input_shape, input_name=None, hidden=(128, 64),
+                 out_channels=32, dropout=0.3):
+        super().__init__()
+        self.input_name = input_name
+        dims = [input_shape[-1], *hidden, out_channels]
+        layers = []
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            if i < len(dims) - 2:
+                layers.append(nn.ReLU())
+                layers.append(nn.Dropout(dropout))
+        layers.append(nn.ReLU())
+        self.net = nn.Sequential(*layers)
+        self.out_channels = out_channels
+
+    def forward(self, x):
+        # x: (B, H, W, C_in); Linear over the last axis == per-pixel MLP.
+        return self.net(x)
 
 
 class CoordFourierForFusion(nn.Module):
@@ -373,6 +413,38 @@ class LSTMModel(nn.Module):
         h = self.dropout(seq[:, -1])
         h = h.reshape(h.shape[0], 1, 1, self.out_channels)
         return h.expand(-1, PATCH_SIZE, PATCH_SIZE, -1)
+
+
+class PixelLSTM(nn.Module):
+    """Per-pixel temporal LSTM over a spatio-temporal input.
+
+    Runs an LSTM over time independently at every pixel:
+    ``(B, T, H, W, C) -> (B, H, W, hidden)``, taking the final hidden state. No
+    spatial mixing -- the LSTM analogue of ConvLSTM, and the sequence
+    counterpart of ``PixelMLP``. Unlike ``LSTMModel`` (which consumes a
+    non-spatial ``(B, T, F)`` sequence and broadcasts one vector across the
+    grid), this preserves full spatial resolution. Exposed as a fusion branch so
+    it shares the decoder head with the other baselines.
+    """
+
+    def __init__(self, input_shape, input_name=None, hidden=32, num_layers=2,
+                 dropout=0.2):
+        super().__init__()
+        self.input_name = input_name
+        in_features = input_shape[-1]
+        self.hidden = hidden
+        self.lstm = nn.LSTM(in_features, hidden, num_layers=num_layers,
+                            batch_first=True,
+                            dropout=dropout if num_layers > 1 else 0.0)
+        self.out_channels = hidden
+
+    def forward(self, x):
+        # x: (B, T, H, W, C) -> per-pixel sequences (B*H*W, T, C)
+        b, t, h, w, c = x.shape
+        x = x.permute(0, 2, 3, 1, 4).reshape(b * h * w, t, c)
+        seq, _ = self.lstm(x)
+        last = seq[:, -1]                          # (B*H*W, hidden)
+        return last.reshape(b, h, w, self.hidden)
 
 
 class TransformerModel(nn.Module):
@@ -1180,8 +1252,9 @@ class MTSViTFusion(nn.Module):
 # Factories (looked up dynamically by trainer.build_model / build_decoder)
 # ---------------------------------------------------------------------------
 
-def get_unet(input_shape, input_name=None, for_fusion=True):
-    return UNet(input_shape, input_name, for_fusion=for_fusion)
+def get_unet(input_shape, input_name=None, for_fusion=True, base_filters=64):
+    return UNet(input_shape, input_name, for_fusion=for_fusion,
+                base_filters=base_filters)
 
 
 def get_unet_lite(input_shape, input_name=None, for_fusion=True):
@@ -1202,6 +1275,14 @@ def get_mlp_for_fusion(input_shape, input_name=None):
 
 def get_coord_fourier(input_shape, input_name=None):
     return CoordFourierForFusion(input_shape, input_name)
+
+
+def get_pixel_mlp(input_shape, input_name=None, out_channels=32):
+    return PixelMLP(input_shape, input_name, out_channels=out_channels)
+
+
+def get_pixel_lstm(input_shape, input_name=None, hidden=32):
+    return PixelLSTM(input_shape, input_name, hidden=hidden)
 
 
 def get_multi_scale_mlp_head(input_shape, input_name=None, hidden=128):
