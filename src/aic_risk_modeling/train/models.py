@@ -162,22 +162,29 @@ class UNet(nn.Module):
 
 
 class UNetLite(nn.Module):
-    def __init__(self, input_shape, input_name=None, for_fusion=True):
+    def __init__(self, input_shape, input_name=None, for_fusion=True,
+                 base_filters=16):
         super().__init__()
         self.input_name = input_name
         self.for_fusion = for_fusion
         in_channels = input_shape[-1]
-        self.e1 = EncoderBlock(in_channels, 16)
-        self.e2 = EncoderBlock(16, 32)
-        self.bottleneck = ConvBlock(32, 64)
-        self.d1 = DecoderBlock(64, 32, 32)
-        self.d2 = DecoderBlock(32, 16, 16)
+        # Width-parametric like `UNet`, at this module's 2-level depth. For a
+        # fusion branch `base_filters` *is* the width handed to the decoder
+        # head, so it sets how much full-resolution detail the head sees next
+        # to the wider pooled/upsampled sources it is concatenated with.
+        # Default 16 preserves the original UNetLite exactly.
+        b = base_filters
+        self.e1 = EncoderBlock(in_channels, b)
+        self.e2 = EncoderBlock(b, 2 * b)
+        self.bottleneck = ConvBlock(2 * b, 4 * b)
+        self.d1 = DecoderBlock(4 * b, 2 * b, 2 * b)
+        self.d2 = DecoderBlock(2 * b, b, b)
         if for_fusion:
-            # Expose the 16-channel decoder feature map as fusion features
+            # Expose the base-width decoder feature map as fusion features
             # instead of collapsing to a single channel.
-            self.out_channels = 16
+            self.out_channels = b
         else:
-            self.out_conv = nn.Conv2d(16, 1, 1)
+            self.out_conv = nn.Conv2d(b, 1, 1)
             self.out_channels = 1
 
     def forward(self, x):
@@ -1257,8 +1264,10 @@ def get_unet(input_shape, input_name=None, for_fusion=True, base_filters=64):
                 base_filters=base_filters)
 
 
-def get_unet_lite(input_shape, input_name=None, for_fusion=True):
-    return UNetLite(input_shape, input_name, for_fusion=for_fusion)
+def get_unet_lite(input_shape, input_name=None, for_fusion=True,
+                  base_filters=16):
+    return UNetLite(input_shape, input_name, for_fusion=for_fusion,
+                    base_filters=base_filters)
 
 
 def get_projection(input_shape, input_name=None, out_channels=16):
