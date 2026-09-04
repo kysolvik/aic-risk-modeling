@@ -57,6 +57,11 @@ ENV PATH=/opt/venv/bin:$PATH \
 
 WORKDIR /app
 COPY scripts/predict ./scripts/predict
+# scripts/train/baseline_rf.py (tabular RF baseline) and
+# scripts/analysis/compare_baselines.py (eval table) run in the same container
+# as a Cloud Run job -- CPU-only, GCS in/out, no checkpoint.
+COPY scripts/train ./scripts/train
+COPY scripts/analysis ./scripts/analysis
 COPY assets ./assets
 COPY docker/entrypoint.sh /usr/local/bin/predict-entrypoint
 
