@@ -1311,8 +1311,13 @@ def get_coord_fourier(input_shape, input_name=None):
     return CoordFourierForFusion(input_shape, input_name)
 
 
-def get_pixel_mlp(input_shape, input_name=None, out_channels=32):
-    return PixelMLP(input_shape, input_name, out_channels=out_channels)
+def get_pixel_mlp(input_shape, input_name=None, hidden=(128, 64), out_channels=32,
+                  dropout=0.3):
+    # `hidden`/`dropout` pass through so a pixel_mlp branch can be capacity-matched
+    # to the pixel_temporal encoder it replaces (factored_v1_pixelmlp). Defaults are
+    # PixelMLP's own, so every existing config is unaffected.
+    return PixelMLP(input_shape, input_name, hidden=hidden,
+                    out_channels=out_channels, dropout=dropout)
 
 
 def get_pixel_lstm(input_shape, input_name=None, hidden=32):
