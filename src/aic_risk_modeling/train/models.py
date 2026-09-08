@@ -596,23 +596,48 @@ class FusionDecoder(nn.Module):
     """
 
     def __init__(self, branch_models, num_classes=1, branch_norm=None,
-                 branch_norm_exclude=None):
+                 branch_norm_exclude=None, head_kernel=3, head_dilation=1):
+        """Receptive field of the shared head = 1 + 4 * (head_kernel - 1) * head_dilation.
+
+        This head is shared by every branch encoder in the comparison suite, so it
+        -- not the encoder -- sets how much spatial context each "architecture"
+        actually sees. Defaults (3, 1) give 9x9 = 5.0 km at 556 m/px and reproduce
+        existing checkpoints exactly.
+
+        Prefer `head_dilation` over `head_kernel` when sweeping the receptive field:
+        dilation changes the reach at IDENTICAL parameter count, so the sweep
+        isolates spatial context instead of confounding it with capacity
+        (k=5 has 2.8x the head parameters of k=3; k=3,d=2 has exactly as many).
+        """
         super().__init__()
+        if head_kernel < 1 or head_kernel % 2 == 0:
+            raise ValueError(f"head_kernel must be a positive odd int, got {head_kernel}")
+        if head_dilation < 1:
+            raise ValueError(f"head_dilation must be >= 1, got {head_dilation}")
         self.num_classes = num_classes
+        self.head_kernel = head_kernel
+        self.head_dilation = head_dilation
         self.branches = nn.ModuleList(branch_models)
         self.branch_norm = BranchNorm(
             [m.out_channels for m in branch_models],
             [m.input_name for m in branch_models],
             mode=branch_norm, exclude=branch_norm_exclude)
         in_channels = sum(m.out_channels for m in branch_models)
-        self.conv1 = nn.Conv2d(in_channels, 128, 3, padding=1)
+        k, d = head_kernel, head_dilation
+        pad = d * (k // 2)
+        self.conv1 = nn.Conv2d(in_channels, 128, k, padding=pad, dilation=d)
         self.bn1 = nn.BatchNorm2d(128)
-        self.conv2 = nn.Conv2d(128, 64, 3, padding=1)
+        self.conv2 = nn.Conv2d(128, 64, k, padding=pad, dilation=d)
         self.bn2 = nn.BatchNorm2d(64)
-        self.conv3 = nn.Conv2d(64, 32, 3, padding=1)
+        self.conv3 = nn.Conv2d(64, 32, k, padding=pad, dilation=d)
         self.bn3 = nn.BatchNorm2d(32)
-        self.conv4 = nn.Conv2d(32, 16, 3, padding=1)
+        self.conv4 = nn.Conv2d(32, 16, k, padding=pad, dilation=d)
         self.out_conv = nn.Conv2d(16, num_classes, 1)
+
+    @property
+    def receptive_field(self):
+        """Effective receptive field of the head, in pixels."""
+        return 1 + 4 * (self.head_kernel - 1) * self.head_dilation
 
     def forward(self, inputs):
         # Channels-first per branch, normalize, then concat (equivalent to the
@@ -1286,8 +1311,13 @@ def get_coord_fourier(input_shape, input_name=None):
     return CoordFourierForFusion(input_shape, input_name)
 
 
-def get_pixel_mlp(input_shape, input_name=None, out_channels=32):
-    return PixelMLP(input_shape, input_name, out_channels=out_channels)
+def get_pixel_mlp(input_shape, input_name=None, hidden=(128, 64), out_channels=32,
+                  dropout=0.3):
+    # `hidden`/`dropout` pass through so a pixel_mlp branch can be capacity-matched
+    # to the pixel_temporal encoder it replaces (factored_v1_pixelmlp). Defaults are
+    # PixelMLP's own, so every existing config is unaffected.
+    return PixelMLP(input_shape, input_name, hidden=hidden,
+                    out_channels=out_channels, dropout=dropout)
 
 
 def get_pixel_lstm(input_shape, input_name=None, hidden=32):
@@ -1325,7 +1355,7 @@ def get_identity(input_shape, input_name=None):
 def decoder_fusion(branch_models, num_classes=1, **kwargs):
     """branch_models: list of branch modules (e.g. [lstm_branch, cnn_branch]).
 
-    kwargs come from config['decoder_config'] (e.g. branch_norm)."""
+    kwargs come from config['decoder_config'] (e.g. branch_norm, head_kernel)."""
     return FusionDecoder(branch_models, num_classes=num_classes, **kwargs)
 
 
@@ -1337,3 +1367,27 @@ def decoder_mtsvit(branch_models, num_classes=1, **kwargs):
 def decoder_film(branch_models, num_classes=1, **kwargs):
     """Climate(×location)-conditioned spatial fusion; kwargs from config['decoder_config']."""
     return FiLMFusion(branch_models, num_classes=num_classes, **kwargs)
+
+
+# --- Factored two-scale model (src/aic_risk_modeling/train/factored.py) --------
+# Thin wrappers so trainer.build_model / build_decoder find these by name via
+# getattr(models, ...). The imports are function-local on purpose: factored.py
+# imports TransformerLayer from this module, so a module-level import here would
+# be circular.
+
+def get_pixel_temporal(input_shape, input_name=None, **kwargs):
+    """Per-pixel temporal transformer; full resolution, no patch tokenization."""
+    from .factored import PixelTemporalEncoder
+    return PixelTemporalEncoder(input_shape, input_name=input_name, **kwargs)
+
+
+def get_coarse_temporal(input_shape, input_name=None, **kwargs):
+    """Temporal transformer on a pooled grid, for natively-coarse (>=4 km) bands."""
+    from .factored import CoarseTemporalEncoder
+    return CoarseTemporalEncoder(input_shape, input_name=input_name, **kwargs)
+
+
+def decoder_factored(branch_models, num_classes=1, **kwargs):
+    """logit = gamma(t) + m(x,t) + s(x,t) + c(x,t); kwargs from config['decoder_config']."""
+    from .factored import FactoredFireModel
+    return FactoredFireModel(branch_models, num_classes=num_classes, **kwargs)

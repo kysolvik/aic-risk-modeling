@@ -34,6 +34,20 @@ torch.manual_seed(SEED)
 tf.random.set_seed(SEED)
 
 
+def set_seed(seed):
+    """Re-seed torch / numpy / tf, and return the seed for the data pipeline.
+
+    Same-config runs differ by ~0.0107 PR-AUC, which is larger than most effects
+    worth chasing here, so a run's seed has to be part of its config rather than a
+    module constant. Pass `seed` in the config to get a distinct replicate.
+    """
+    global RNG
+    RNG = np.random.default_rng(seed)
+    torch.manual_seed(seed)
+    tf.random.set_seed(seed)
+    return seed
+
+
 def upload_file_to_gcs(local_path, gcs_uri):
     """
     Upload a local file to Google Cloud Storage.
@@ -271,6 +285,7 @@ class _BestTracker:
 
 def run(config):
     # Some options that have defaults
+    seed = set_seed(config.get('seed', SEED))
     steps_per_epoch = config.get('steps_per_epoch', 5000)
     weight_decay = config.get('weight_decay', 0.01)
     patience = config.get('early_stopping_patience', 4)
@@ -300,7 +315,7 @@ def run(config):
         rename_dict=config.get('rename_dict', None),
         axis=config['merge_axis'],
         batch_size=config['batch_size'],
-        seed=SEED,
+        seed=seed,
     )
     validation_ds = data_loader.build_merged_dataset(
         data_dirs=config['val_data_dirs'],
@@ -309,7 +324,7 @@ def run(config):
         rename_dict=config.get('rename_dict', None),
         axis=config['merge_axis'],
         batch_size=config['batch_size'],
-        seed=SEED,
+        seed=seed,
     )
 
     # Normalize. Prefer an explicit stats file (e.g. pooled stats.json from
