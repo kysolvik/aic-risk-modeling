@@ -131,6 +131,44 @@ def _best_f1(labels, scores):
     return float(f1[i]), float(prec[i]), float(rec[i]), t
 
 
+def _best_kappa(labels, scores):
+    """Best achievable Cohen's kappa over all thresholds, plus that threshold.
+
+    Kappa is threshold-dependent (unlike PR-AUC / ROC-AUC), so -- exactly as for
+    `_best_f1` -- the threshold is swept rather than fixed at 0.5, otherwise the
+    weighted-BCE models (inflated probabilities) and the natural-scale baselines
+    would be compared on calibration, not agreement. Vectorised over the sorted
+    scores: for every distinct cut, predict-positive = {score >= cut} and read
+    kappa = (p_o - p_e) / (1 - p_e) off the running confusion counts.
+    """
+    y = (np.asarray(labels) > 0).astype(np.int64)
+    s = np.asarray(scores, dtype=np.float64)
+    n = y.size
+    n_pos = int(y.sum())
+    n_neg = n - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return 0.0, float("inf")  # kappa undefined with one class; no skill = 0
+    order = np.argsort(-s, kind="mergesort")
+    s_sorted = s[order]
+    tp = np.cumsum(y[order]).astype(np.float64)   # positives among the top k
+    k = np.arange(1, n + 1, dtype=np.float64)      # predicted-positive count
+    tn = n_neg - (k - tp)
+    p_o = (tp + tn) / n
+    p_e = (k / n) * (n_pos / n) + ((n - k) / n) * (n_neg / n)
+    denom = 1.0 - p_e
+    kappa = np.where(denom > 0, (p_o - p_e) / np.where(denom > 0, denom, 1.0), 0.0)
+    # Only cuts at a distinct-score boundary are real operating points (ties must
+    # move together); predicting the all-negative side always scores kappa 0.
+    boundary = np.ones(n, dtype=bool)
+    boundary[:-1] = s_sorted[1:] != s_sorted[:-1]
+    kappa_at_cut = np.where(boundary, kappa, -np.inf)
+    i = int(np.argmax(kappa_at_cut))
+    best = float(kappa[i])
+    if best <= 0.0:
+        return 0.0, float("inf")
+    return best, float(s_sorted[i])
+
+
 def _pool(arr, block, how):
     return _block_max_pool(arr, block) if how == "max" else _block_mean_pool(arr, block)
 
@@ -140,9 +178,18 @@ def chip_inventory(directory):
 
     The year is the basename of the chip's parent directory, matching the
     layout the predict runbook writes (``<model>/<year>/out_*.tif``).
+
+    Only the two documented layouts are accepted: chips directly in `directory`
+    (flat holdout) or one level down in a per-year subdirectory. Anything deeper
+    (e.g. a stray ``<model>/<year>/chips/out_*.tif``) is ignored, so an unrelated
+    nested export can't leak into a validation figure.
     """
-    out_paths = sorted(glob.glob(os.path.join(directory, "**", "out_*.tif"),
-                                 recursive=True))
+    root = os.path.normpath(directory)
+    out_paths = sorted(
+        p for p in glob.glob(os.path.join(directory, "**", "out_*.tif"),
+                             recursive=True)
+        if os.path.dirname(os.path.normpath(p)) == root
+        or os.path.dirname(os.path.dirname(os.path.normpath(p))) == root)
     if not out_paths:
         raise FileNotFoundError(f"no out_*.tif chips under {directory}")
     items = []
@@ -173,16 +220,27 @@ def _levels_from_chips(score_iter, blocks, prauc_pool, f1_pool, threshold,
         f1_s = np.concatenate(acc[b]["f1_s"])
         prev = float(y.mean())
         pa = _binary_metrics(y, pa_s > threshold, scores=pa_s)
+        try:
+            from sklearn.metrics import roc_auc_score
+            roc = float(roc_auc_score(y, pa_s)) if 0.0 < prev < 1.0 else float("nan")
+        except Exception:
+            roc = float("nan")
         if f1_mode == "best":
             f1_val, f1_p, f1_r, f1_thr = _best_f1(y, f1_s)
         else:
             m = _binary_metrics(y, f1_s > threshold, scores=f1_s)
             f1_val, f1_p, f1_r, f1_thr = (float(m["f1"]), float(m["precision"]),
                                           float(m["recall"]), threshold)
+        # Best-kappa on the SAME mean-pooled score PR-AUC/ROC-AUC use, so the
+        # figure keeps one score convention across panels; threshold swept for
+        # the same calibration reason as best-F1.
+        kappa_val, kappa_thr = _best_kappa(y, pa_s)
         levels.append({
             "block": b, "km": round(b * KM_PER_PIXEL, 3), "n_blocks": int(y.size),
             "prevalence": prev,
             "pr_auc": float(pa["pr_auc"]),
+            "roc_auc": roc,
+            "kappa": kappa_val, "kappa_threshold": kappa_thr,
             "lift": float(pa["pr_auc"]) / prev if prev > 0 else float("nan"),
             "f1": f1_val, "precision": f1_p, "recall": f1_r,
             "f1_threshold": f1_thr,
@@ -251,8 +309,9 @@ def baseline_levels(reference_dir, kind, label_dir, clim_path, blocks,
 def write_csv(rows, path):
     import csv
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    cols = ["model", "block", "km", "n_blocks", "prevalence", "pr_auc", "lift",
-            "f1", "precision", "recall", "f1_threshold"]
+    cols = ["model", "block", "km", "n_blocks", "prevalence", "pr_auc", "roc_auc",
+            "kappa", "kappa_threshold", "lift", "f1", "precision", "recall",
+            "f1_threshold"]
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
