@@ -953,12 +953,31 @@ class MTSViTFusion(nn.Module):
                  film_location=None, film_cond_dim=128, film_num_freqs=16,
                  film_sigma=1.0, film_location_features=2,
                  climate_loc_attn=False, loc_dim=64, loc_rank=4,
-                 loc_inject_q=True, loc_inject_gate=True, context_dropout=0.0):
+                 loc_inject_q=True, loc_inject_gate=True, context_dropout=0.0,
+                 year_group=None, year_offset=None):
         super().__init__()
         self.num_classes = num_classes
         self.embed_dim = embed_dim
         self.patch_size = patch_size
         self.spatial_in_encoder = spatial_in_encoder
+
+        # Frozen gamma(t): the same additive log-odds year offset the factored
+        # model carries (see factored.YearOffset). The md_year group is pulled out
+        # of branch routing here -- its identity branch has a rank-2 shape and would
+        # otherwise mis-route as (T, F) temporal context -- and only the raw
+        # inputs[year_group] value is read, in forward, just before the sigmoid.
+        self.year_group = year_group
+        if year_offset is not None and num_classes != 1:
+            raise ValueError(
+                "MTSViTFusion year_offset is an additive log-odds term and is "
+                f"binary-only; got num_classes={num_classes}. Use a fusion decoder "
+                "for multiclass.")
+        # Local import: factored.py imports TransformerLayer from this module, so a
+        # module-level import here would be circular (mirrors the factories below).
+        from .factored import build_year_offset
+        self.year = build_year_offset(year_offset, year_group)
+        if year_group is not None:
+            branch_models = [b for b in branch_models if b.input_name != year_group]
 
         spatiotemporal_branches = []
         temporal_branches = []
@@ -1276,6 +1295,9 @@ class MTSViTFusion(nn.Module):
         with torch.autocast(device_type=x.device.type, enabled=False):
             logits = self.out_conv(x.float())
             if self.num_classes == 1:
+                if self.year is not None:
+                    # gamma(t): frozen (B,1,1,1) log-odds offset, broadcasts over (B,1,H,W)
+                    logits = logits + self.year(inputs[self.year_group])
                 return torch.sigmoid(logits).squeeze(1)
             return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
 

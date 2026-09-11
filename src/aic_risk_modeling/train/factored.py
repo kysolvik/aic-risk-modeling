@@ -197,6 +197,32 @@ class YearOffset(nn.Module):
         return self.table[idx].reshape(-1, 1, 1, 1)
 
 
+def build_year_offset(spec, year_group):
+    """Build a `YearOffset` from a decoder_config `year_offset` block, or None.
+
+    Architecture-agnostic on purpose: any log-odds-additive decoder (the factored
+    model, and now MTSViT) can bolt on the same frozen gamma(t). `spec` accepts
+    exactly one of `coeffs_path` (a JSON with `per_year_offset`) or inline
+    `offsets`, plus optional `trainable`/`strict`; `terms` is documentation only.
+    """
+    if not spec:
+        return None
+    if not year_group:
+        raise ValueError("year_offset given but year_group is unset")
+    spec = dict(spec)
+    path = spec.pop("coeffs_path", None)
+    spec.pop("terms", None)                 # documentation only; the table is authoritative
+    offsets = spec.pop("offsets", None)
+    kw = {k: spec.pop(k) for k in ("trainable", "strict") if k in spec}
+    if spec:
+        raise ValueError(f"unknown year_offset keys: {sorted(spec)}")
+    if (path is None) == (offsets is None):
+        raise ValueError("year_offset needs exactly one of coeffs_path / offsets")
+    if path is not None:
+        return YearOffset.from_json(path, input_name=year_group, **kw)
+    return YearOffset(offsets, input_name=year_group, **kw)
+
+
 class PixelSusceptibility(nn.Module):
     """`s`: strictly pointwise (1x1) logit contribution over the full-res stack.
 
@@ -391,22 +417,7 @@ class FactoredFireModel(nn.Module):
 
     @staticmethod
     def _build_year_offset(spec, year_group):
-        if not spec:
-            return None
-        if not year_group:
-            raise ValueError("year_offset given but year_group is unset")
-        spec = dict(spec)
-        path = spec.pop("coeffs_path", None)
-        spec.pop("terms", None)                 # documentation only; the table is authoritative
-        offsets = spec.pop("offsets", None)
-        kw = {k: spec.pop(k) for k in ("trainable", "strict") if k in spec}
-        if spec:
-            raise ValueError(f"unknown year_offset keys: {sorted(spec)}")
-        if (path is None) == (offsets is None):
-            raise ValueError("year_offset needs exactly one of coeffs_path / offsets")
-        if path is not None:
-            return YearOffset.from_json(path, input_name=year_group, **kw)
-        return YearOffset(offsets, input_name=year_group, **kw)
+        return build_year_offset(spec, year_group)
 
     @property
     def receptive_field(self):
