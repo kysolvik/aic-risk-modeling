@@ -1302,6 +1302,132 @@ class MTSViTFusion(nn.Module):
             return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
 
 
+class VanillaViT(nn.Module):
+    """Textbook Vision Transformer segmentation baseline (no domain structure).
+
+    Deliberately the naive-practitioner reference point for the architecture
+    comparison: every branch is expected to be an ``identity`` (or
+    ``projection``) branch, so there are NO per-modality encoders. Any other
+    branch kind raises -- that structure is exactly what this baseline exists to
+    do without.
+
+    Spatial branches (rank-3 ``[H, W, C]`` input_shape; time is folded into the
+    channel axis via ``stack_timesteps: false``) are concatenated on the channel
+    axis. Non-spatial branches (e.g. per-tile coordinates ``[1, F]`` or a
+    climate-index series ``[T, F]``) are flattened per sample and broadcast as
+    spatially constant channels, so scalar covariates simply enter as extra
+    image channels.
+
+    The stacked channel image is patch-embedded with a single strided conv, a
+    learned position embedding is added, ``depth`` standard (joint) self-
+    attention layers mix all patches, and each token is linearly decoded back to
+    its ``patch_size x patch_size`` output block (a transposed patch embed).
+    There is no convolutional segmentation head -- that absence is the point of
+    the vanilla baseline, and a known confound vs the other decoders (whose
+    shared conv head supplies most of their fine-scale spatial context) when the
+    result is reported.
+
+    With num_classes == 1 (binary) returns (batch, H, W) sigmoid probabilities;
+    with num_classes > 1 returns (batch, H, W, num_classes) softmax
+    probabilities -- matching FusionDecoder / MTSViTFusion.
+    """
+
+    def __init__(self, branch_models, num_classes=1, embed_dim=128,
+                 patch_size=8, depth=4, num_heads=4, mlp_ratio=2, dropout=0.1):
+        super().__init__()
+        self.num_classes = num_classes
+        self.embed_dim = embed_dim
+        self.patch_size = patch_size
+        self.branches = nn.ModuleList(branch_models)
+
+        # Route branches by the rank of the input they consume. Only identity /
+        # projection branches expose `input_shape`; a branch without one is a
+        # per-modality encoder, which this vanilla baseline forbids on purpose.
+        self.broadcast_names = set()
+        height = width = None
+        spatial_channels = 0
+        broadcast_channels = 0
+        for branch in branch_models:
+            shape = getattr(branch, "input_shape", None)
+            if shape is None:
+                raise ValueError(
+                    f"decoder_vit expects identity/projection branches only "
+                    f"(no per-modality encoders); branch '{branch.input_name}' "
+                    f"is a {type(branch).__name__}")
+            if len(shape) == 3:
+                h, w, _ = shape
+                if height is None:
+                    height, width = h, w
+                elif (h, w) != (height, width):
+                    raise ValueError(
+                        "All spatial inputs must share H, W; got "
+                        f"({h}, {w}) vs ({height}, {width})")
+                spatial_channels += branch.out_channels
+            else:
+                # Flattened per-sample width: the product of every non-batch dim
+                # (e.g. a [T, F] series -> T*F spatially constant channels).
+                self.broadcast_names.add(branch.input_name)
+                broadcast_channels += math.prod(shape)
+        if height is None:
+            raise ValueError(
+                "decoder_vit needs at least one spatial input: an identity "
+                "branch with shape [H, W] (stack_timesteps false folds time "
+                "into channels)")
+        if height % patch_size or width % patch_size:
+            raise ValueError(f"patch_size {patch_size} must divide H, W "
+                             f"({height}, {width})")
+        self.height, self.width = height, width
+        self.grid = (height // patch_size, width // patch_size)
+        num_patches = self.grid[0] * self.grid[1]
+
+        in_channels = spatial_channels + broadcast_channels
+        self.patch_embed = nn.Conv2d(in_channels, embed_dim, patch_size,
+                                     stride=patch_size)
+        self.pos = nn.Parameter(torch.zeros(num_patches, embed_dim))
+        self.layers = nn.ModuleList([
+            TransformerLayer(embed_dim, num_heads, mlp_ratio, dropout)
+            for _ in range(depth)])
+        self.decode_norm = nn.LayerNorm(embed_dim)
+        self.decode = nn.Linear(embed_dim,
+                                patch_size * patch_size * num_classes)
+        nn.init.trunc_normal_(self.pos, std=0.02)
+
+    def forward(self, inputs):
+        h, w = self.height, self.width
+        feats = []
+        for branch in self.branches:
+            out = branch(inputs[branch.input_name])
+            if branch.input_name in self.broadcast_names:
+                # (B, ...) -> (B, K) -> (B, K, H, W) spatially constant channels
+                flat = out.reshape(out.shape[0], -1)
+                feats.append(flat[:, :, None, None].expand(-1, -1, h, w))
+            else:
+                # (B, H, W, C) -> (B, C, H, W)
+                feats.append(out.permute(0, 3, 1, 2))
+        x = torch.cat(feats, dim=1)
+
+        # Patchify -> tokens, add position embedding, joint self-attention.
+        batch = x.shape[0]
+        x = self.patch_embed(x)                       # (B, D, gh, gw)
+        x = x.flatten(2).permute(0, 2, 1) + self.pos  # (B, N, D)
+        for layer in self.layers:
+            x = layer(x)
+
+        # Linear patch-decode: each token -> its p x p x num_classes block,
+        # reassembled into a full-resolution map (a transposed patch embed).
+        gh, gw = self.grid
+        p, c = self.patch_size, self.num_classes
+        x = self.decode(self.decode_norm(x))          # (B, N, p*p*c)
+        x = x.reshape(batch, gh, gw, p, p, c)
+        x = x.permute(0, 5, 1, 3, 2, 4).reshape(batch, c, gh * p, gw * p)
+        # Head output runs in float32 even under autocast (matches other decoders).
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            logits = x.float()
+            if self.num_classes == 1:
+                return torch.sigmoid(logits).squeeze(1)
+            return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
+
+
 # ---------------------------------------------------------------------------
 # Factories (looked up dynamically by trainer.build_model / build_decoder)
 # ---------------------------------------------------------------------------
@@ -1389,6 +1515,11 @@ def decoder_mtsvit(branch_models, num_classes=1, **kwargs):
 def decoder_film(branch_models, num_classes=1, **kwargs):
     """Climate(×location)-conditioned spatial fusion; kwargs from config['decoder_config']."""
     return FiLMFusion(branch_models, num_classes=num_classes, **kwargs)
+
+
+def decoder_vit(branch_models, num_classes=1, **kwargs):
+    """Vanilla Vision Transformer baseline; kwargs come from config['decoder_config']."""
+    return VanillaViT(branch_models, num_classes=num_classes, **kwargs)
 
 
 # --- Factored two-scale model (src/aic_risk_modeling/train/factored.py) --------
