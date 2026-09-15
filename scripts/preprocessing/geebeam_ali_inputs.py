@@ -371,14 +371,26 @@ population = (
     )
 
 # Night Lights
-nightLightsCol = ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMCFG")
-nightLights = (
-    nightLightsCol
-    .filterDate(f'{TARGET_YEAR-1}-{MONTH_START}-01', f'{TARGET_YEAR-1}-{MONTH_END}-{DAY_END}')
-    .select('avg_rad')
-    .mean()
-    .unmask(0)
-    .rename('Nighttime_Lights'))
+def prep_nightlights_year(y):
+    nightLightsCol = (ee.ImageCollection('NOAA/VIIRS/DNB/ANNUAL_V21')
+                      .merge(ee.ImageCollection('NOAA/VIIRS/DNB/ANNUAL_V22')))
+    nightLights = (
+        nightLightsCol
+        .filter(ee.Filter.calendarRange(y,
+                                        y,
+                                        'year'))
+        .select(['median_masked', 'maximum', 'cf_cvg'])
+        .unmask(0)
+    )
+    band_names = nightLights.bandNames().getInfo()
+    band_names_new = [f'{b}_{y-TARGET_YEAR}' for b in band_names]
+    return nightLights.rename(band_names_new)
+
+if TARGET_YEAR == 2013:
+    nightLights = prep_nightlights_year(2014)
+else:
+    nightLights = prep_nightlights_year(TARGET_YEAR-1)
+
 
 # Topography
 terrain = ee.Terrain.products(ee.Image('USGS/SRTMGL1_003'))
