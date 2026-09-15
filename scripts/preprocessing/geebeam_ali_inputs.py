@@ -411,14 +411,14 @@ if __name__ == '__main__':
     geebeam.grid_and_run_pipeline(
         image_list = im_list,
         project=PROJECT_ID,
-        crs="EPSG:4326",
-        align_transform=[0.005, 0.0, -85, 0.0, -0.005, 10.0],
+        crs="SR-ORG:6974",
+        align_transform=[463.312716527777980, 0.0, -8886337.903002781793475, 0.0, -463.312716527777980, 1167548.045650000451133],
         patch_size=128, # Pixel dimensions in each direction
         stride=128,
         tile_coverage='intersect',
         validation_ratio=0.0, # Fraction to select as validation data
         output_type='tfrecord',
-        output_path=f'gs://woodwell-aic-fire-risk/data/fullgrid_v2/allpreds_{TARGET_YEAR}',
+        output_path=f'gs://woodwell-aic-fire-risk/data/fullgrid_v3/allpreds_{TARGET_YEAR}',
         sampling_region='../data/Limites_RAISG_2025/Lim_Raisg.shp',
         extra_metadata=md_dict
     )
