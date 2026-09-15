@@ -419,7 +419,7 @@ wdpa_polys = ee.FeatureCollection('WCMC/WDPA/current/polygons').remap(
 wdpa_im = ee.Image().int().paint(wdpa_polys, 'GOV_TYPE').rename(['gov_type'])
 
 # Note that with split processing each will be processed separately
-im_list = mcd64_list + mod13_annual + chirps_annual + viirs_memory + [
+im_list = mcd64_list + mod13_annual + chirps_annual + viirs_memory + mod14_memory + [
            viirs_target,
            mb_amz_pasture,
            mb_amz_forest,
