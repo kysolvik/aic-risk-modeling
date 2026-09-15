@@ -94,7 +94,7 @@ if PREDICT_ONLY:
 
 # VIIRS fire memory
 def prep_viirs_year(y):
-    viirs_snpp = (ee.ImageCollection('projects/ksolvik-misc/assets/viirs_snpp_archive')
+    viirs_snpp = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/viirs_snpp_archive_msgrid')
                   .filter(ee.Filter.calendarRange(y, y, 'year'))
                   ).max().unmask().gt(0).rename(f'viirs_snpp_{y-TARGET_YEAR}')
     return viirs_snpp
@@ -103,6 +103,17 @@ viirs_memory = [prep_viirs_year(y) for y in range(
     TARGET_YEAR-6, TARGET_YEAR+(1-PREDICT_ONLY))]
 if PREDICT_ONLY:
     viirs_memory.append(prep_viirs_year(TARGET_YEAR-1).rename('viirs_snpp_0'))
+
+def prep_mod14_year(y):
+    mod14 = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/mod14_archive_msgrid')
+             .filter(ee.Filter.calendarRange(y, y, 'year'))
+             ).max().unmask().gt(0).rename(f'mod14_{y-TARGET_YEAR}')
+    return mod14
+
+mod14_memory = [prep_mod14_year(y) for y in range(
+    TARGET_YEAR-6, TARGET_YEAR+(1-PREDICT_ONLY))]
+if PREDICT_ONLY:
+    mod14_memory.append(prep_mod14_year(TARGET_YEAR-1).rename('mod14_0'))
 
 # MB Land-use/land-cover
 mb_amz_lulc_im = ee.Image('projects/mapbiomas-public/assets/amazon/lulc/collection6/mapbiomas_collection60_integration_v1')
