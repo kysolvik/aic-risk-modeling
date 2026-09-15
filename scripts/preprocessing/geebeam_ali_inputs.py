@@ -250,22 +250,33 @@ def prep_era5_monthly(y_start, y_end):
     return era5_monthly.toBands().rename(new_names)
 era5_im = prep_era5_monthly(TARGET_YEAR-1, TARGET_YEAR-1)
 
-# Chirps CWD
+### Chirps CWD ###
+# Monthly
 def prep_chirps_monthly(y_start, y_end):
-    chirps_cwd = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_amazon_cwd')
+    chirps_amz_cwd = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_amazon_cwd')
               .filter(ee.Filter.calendarRange(y_start,
                                               y_end,
-                                              'year'))
-    )
+                                              'year')))
+    chirps_crd_cwd = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_cerrado_cwd')
+              .filter(ee.Filter.calendarRange(y_start,
+                                              y_end,
+                                              'year')))
     def get_month(y, m):
-        chirps_filtered = ((
-            chirps_cwd
+        chirps_amz_filtered = ((
+            chirps_amz_cwd
             .filter(ee.Filter.calendarRange(y, y, 'year'))
             .filter(ee.Filter.calendarRange(m, m, 'month'))
             .first()
             ).set('month', m).set('year', y)
         )
-        return chirps_filtered
+        chirps_crd_filtered = ((
+            chirps_crd_cwd
+            .filter(ee.Filter.calendarRange(y, y, 'year'))
+            .filter(ee.Filter.calendarRange(m, m, 'month'))
+            .first()
+            ).set('month', m).set('year', y)
+        )
+        return ee.ImageCollection([chirps_amz_filtered, chirps_crd_filtered]).mosaic().unmask()
 
     months = ee.List.sequence(MONTH_START, MONTH_END)
     years = ee.List.sequence(y_start, y_end)
@@ -275,20 +286,32 @@ def prep_chirps_monthly(y_start, y_end):
     new_names = ee.List(['chirps_cwd_monthly_' + time for time in MONTH_NAMES])
     return chirps_monthly.toBands().rename(new_names)
 
+# Annual
 def prep_chirps_year(y):
     """Max monthly CWD within year"""
-    chirps_cwd = (
+    chirps_amz_cwd = (
         ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_amazon_cwd')
         .filter(ee.Filter.calendarRange(y,
                                         y,
                                         'year'))
         .min()
+    )
+    chirps_crd_cwd = (
+        ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_cerrado_cwd')
+        .filter(ee.Filter.calendarRange(y,
+                                        y,
+                                        'year'))
+        .min()
+    )
+    chirps_cwd_full = (
+        ee.ImageCollection([chirps_amz_cwd, chirps_crd_cwd])
+        .mosaic()
         .unmask()
     )
 
     band_names = ['chirps_cwd']
     band_names_new = [f'{b}_{y-TARGET_YEAR}' for b in band_names]
-    return chirps_cwd.rename(band_names_new)
+    return chirps_cwd_full.rename(band_names_new)
 
 chirps_annual = [prep_chirps_year(y) for y in range(TARGET_YEAR-6, TARGET_YEAR)]
 chirps_monthly = prep_chirps_monthly(TARGET_YEAR-1, TARGET_YEAR-1)
