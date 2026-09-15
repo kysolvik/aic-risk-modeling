@@ -371,7 +371,7 @@ population = (
     )
 
 # Night Lights
-def prep_nightlights_year(y):
+def prep_nightlights_year(y, name_year=None):
     nightLightsCol = (ee.ImageCollection('NOAA/VIIRS/DNB/ANNUAL_V21')
                       .merge(ee.ImageCollection('NOAA/VIIRS/DNB/ANNUAL_V22')))
     nightLights = (
@@ -383,11 +383,14 @@ def prep_nightlights_year(y):
         .unmask(0)
     )
     band_names = nightLights.bandNames().getInfo()
-    band_names_new = [f'{b}_{y-TARGET_YEAR}' for b in band_names]
+    if name_year is not None:
+        band_names_new = [f'{b}_{name_year-TARGET_YEAR}' for b in band_names]
+    else:
+        band_names_new = [f'{b}_{y-TARGET_YEAR}' for b in band_names]
     return nightLights.rename(band_names_new)
 
 if TARGET_YEAR == 2013:
-    nightLights = prep_nightlights_year(2014)
+    nightLights = prep_nightlights_year(2013, name_year=2012)
 else:
     nightLights = prep_nightlights_year(TARGET_YEAR-1)
 
