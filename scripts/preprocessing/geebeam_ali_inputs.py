@@ -379,6 +379,7 @@ def prep_nightlights_year(y, name_year=None):
         .filter(ee.Filter.calendarRange(y,
                                         y,
                                         'year'))
+        .first()
         .select(['median_masked', 'maximum', 'cf_cvg'])
         .unmask(0)
     )
@@ -457,17 +458,32 @@ print('Ending clim indices')
 if __name__ == '__main__':
     logging.getLogger().setLevel(logging.INFO)
     # Execute
+    # geebeam.grid_and_run_pipeline(
+    #     image_list = im_list,
+    #     project=PROJECT_ID,
+    #     crs="SR-ORG:6974",
+    #     align_transform=[463.312716527777980, 0.0, -8886337.903002781793475, 0.0, -463.312716527777980, 1167548.045650000451133],
+    #     patch_size=128, # Pixel dimensions in each direction
+    #     stride=128,
+    #     tile_coverage='intersect',
+    #     validation_ratio=0.0, # Fraction to select as validation data
+    #     output_type='tfrecord',
+    #     output_path=f'gs://woodwell-aic-fire-risk/data/fullgrid_v3/allpreds_{TARGET_YEAR}',
+    #     sampling_region='../data/Limites_RAISG_2025/Lim_Raisg.shp',
+    #     extra_metadata=md_dict
+    # )
+
     geebeam.grid_and_run_pipeline(
         image_list = im_list,
         project=PROJECT_ID,
         crs="SR-ORG:6974",
-        align_transform=[463.312716527777980, 0.0, -8886337.903002781793475, 0.0, -463.312716527777980, 1167548.045650000451133],
+        align_transform=[463.312716528, 0.0, -20015109.354, 0.0, -463.312716528, 10007554.677],
         patch_size=128, # Pixel dimensions in each direction
         stride=128,
         tile_coverage='intersect',
         validation_ratio=0.0, # Fraction to select as validation data
-        output_type='tfrecord',
-        output_path=f'gs://woodwell-aic-fire-risk/data/fullgrid_v3/allpreds_{TARGET_YEAR}',
-        sampling_region='../data/Limites_RAISG_2025/Lim_Raisg.shp',
+        output_type='tiff',
+        output_path=f'local_test/tifs_alignfromrecord/allpreds_{TARGET_YEAR}',
+        sampling_region='../data/municipios/santarem_PA_BR.shp',
         extra_metadata=md_dict
     )
