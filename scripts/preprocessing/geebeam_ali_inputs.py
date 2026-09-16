@@ -79,7 +79,6 @@ def prep_mcd64_year(y):
              .filter(ee.Filter.calendarRange(y, y, 'year'))
              .max()
              .unmask()
-             .gt(0)
              )
     band_names = mcd64.bandNames().getInfo()
     band_names_new = [f'{b}_{y-TARGET_YEAR}' for b in band_names]
@@ -96,7 +95,7 @@ if PREDICT_ONLY:
 def prep_viirs_year(y):
     viirs_snpp = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/viirs_snpp_archive_msgrid')
                   .filter(ee.Filter.calendarRange(y, y, 'year'))
-                  ).max().unmask().gt(0).rename(f'viirs_snpp_{y-TARGET_YEAR}')
+                  ).max().unmask().rename(f'viirs_snpp_{y-TARGET_YEAR}')
     return viirs_snpp
 
 viirs_memory = [prep_viirs_year(y) for y in range(
@@ -107,7 +106,7 @@ if PREDICT_ONLY:
 def prep_mod14_year(y):
     mod14 = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/mod14_archive_msgrid')
              .filter(ee.Filter.calendarRange(y, y, 'year'))
-             ).max().unmask().gt(0).rename(f'mod14_{y-TARGET_YEAR}')
+             ).max().unmask().rename(f'mod14_{y-TARGET_YEAR}')
     return mod14
 
 mod14_memory = [prep_mod14_year(y) for y in range(
