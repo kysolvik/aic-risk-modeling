@@ -150,6 +150,21 @@ mb_amz_ag = (mb_amz_lulc_im
                  .reduceResolution('mean', maxPixels=400)
 ).rename([bn.replace('classification', 'ag') for bn in mb_amz_lulc_bandnames_new])
 
+mb_amz_urban = (mb_amz_lulc_im
+                 .eq(24)
+                 .reduceResolution('mean', maxPixels=400)
+).rename([bn.replace('classification', 'urban') for bn in mb_amz_lulc_bandnames_new])
+
+mb_amz_mining = (mb_amz_lulc_im
+                 .eq(30)
+                 .reduceResolution('mean', maxPixels=400)
+).rename([bn.replace('classification', 'mining') for bn in mb_amz_lulc_bandnames_new])
+
+mb_amz_water = (mb_amz_lulc_im
+                 .eq(33)
+                 .reduceResolution('mean', maxPixels=400)
+).rename([bn.replace('classification', 'water') for bn in mb_amz_lulc_bandnames_new])
+
 
 # Deforestation
 # Old export topped off at 2025-01-17
@@ -441,6 +456,9 @@ im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_
            mb_amz_pasture,
            mb_amz_forest,
            mb_amz_ag,
+           mb_amz_urban,
+           mb_amz_mining,
+           mb_amz_water,
            gfw_alert,
            gfw_alert_date,
            mod13_monthly,
