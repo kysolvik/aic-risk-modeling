@@ -381,6 +381,8 @@ population = (
     )
 
 # Night Lights
+NIGHTLIGHTS_START_YEAR = 2013  # No VIIRS nightlights data before this year
+
 def prep_nightlights_year(y, name_year=None):
     nightLightsCol = (ee.ImageCollection('NOAA/VIIRS/DNB/ANNUAL_V21')
                       .merge(ee.ImageCollection('NOAA/VIIRS/DNB/ANNUAL_V22')))
@@ -400,10 +402,11 @@ def prep_nightlights_year(y, name_year=None):
         band_names_new = [f'{b}_{y-TARGET_YEAR}' for b in band_names]
     return nightLights.rename(band_names_new)
 
-if TARGET_YEAR == 2013:
-    nightLights = prep_nightlights_year(2013, name_year=2012)
-else:
-    nightLights = prep_nightlights_year(TARGET_YEAR-1)
+# y-1 and y-2; years before NIGHTLIGHTS_START_YEAR fall back to that year's data
+nightlights_list = [
+    prep_nightlights_year(max(y, NIGHTLIGHTS_START_YEAR), name_year=y)
+    for y in (TARGET_YEAR - 2, TARGET_YEAR - 1)
+]
 
 
 # Topography
@@ -433,7 +436,7 @@ wdpa_polys = ee.FeatureCollection('WCMC/WDPA/current/polygons').remap(
 wdpa_im = ee.Image().int().paint(wdpa_polys, 'GOV_TYPE').rename(['gov_type'])
 
 # Note that with split processing each will be processed separately
-im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_memory + mod14_memory + [
+im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_memory + mod14_memory + nightlights_list + [
            viirs_target,
            mb_amz_pasture,
            mb_amz_forest,
@@ -448,7 +451,6 @@ im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_
            wdpa_im,
            elevation,
            slope,
-           nightLights,
            population,
            chirps_monthly,
            chirps_monthly_amz
