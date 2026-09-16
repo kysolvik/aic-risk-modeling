@@ -264,6 +264,11 @@ era5_im = prep_era5_monthly(TARGET_YEAR-1, TARGET_YEAR-1)
 ### Chirps CWD ###
 # Monthly
 def prep_chirps_monthly(y_start, y_end):
+    """Returns (merged, amazon_only) monthly CHIRPS CWD images.
+
+    Both outputs reuse the same per-(year,month) Amazon image object so the
+    Amazon filter/reduce is only computed once, not once per output.
+    """
     chirps_amz_cwd = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_amazon_cwd')
               .filter(ee.Filter.calendarRange(y_start,
                                               y_end,
@@ -272,34 +277,38 @@ def prep_chirps_monthly(y_start, y_end):
               .filter(ee.Filter.calendarRange(y_start,
                                               y_end,
                                               'year')))
-    def get_month(y, m):
-        chirps_amz_filtered = ((
-            chirps_amz_cwd
-            .filter(ee.Filter.calendarRange(y, y, 'year'))
-            .filter(ee.Filter.calendarRange(m, m, 'month'))
-            .first()
-            ).set('month', m).set('year', y)
-        )
-        chirps_crd_filtered = ((
-            chirps_crd_cwd
-            .filter(ee.Filter.calendarRange(y, y, 'year'))
-            .filter(ee.Filter.calendarRange(m, m, 'month'))
-            .first()
-            ).set('month', m).set('year', y)
-        )
-        return ee.ImageCollection([chirps_amz_filtered, chirps_crd_filtered]).mosaic().unmask()
+    merged_images = []
+    amz_images = []
+    for y in range(y_start, y_end + 1):
+        for m in range(MONTH_START, MONTH_END + 1):
+            chirps_amz_filtered = ((
+                chirps_amz_cwd
+                .filter(ee.Filter.calendarRange(y, y, 'year'))
+                .filter(ee.Filter.calendarRange(m, m, 'month'))
+                .first()
+                ).set('month', m).set('year', y)
+            )
+            chirps_crd_filtered = ((
+                chirps_crd_cwd
+                .filter(ee.Filter.calendarRange(y, y, 'year'))
+                .filter(ee.Filter.calendarRange(m, m, 'month'))
+                .first()
+                ).set('month', m).set('year', y)
+            )
+            merged_images.append(
+                ee.ImageCollection([chirps_amz_filtered, chirps_crd_filtered]).mosaic().unmask()
+            )
+            amz_images.append(chirps_amz_filtered.unmask())
 
-    months = ee.List.sequence(MONTH_START, MONTH_END)
-    years = ee.List.sequence(y_start, y_end)
-    chirps_monthly = ee.ImageCollection.fromImages(
-        years.map(lambda y: months.map(lambda m: get_month(y,m))).flatten()
-        )
-    new_names = ee.List(['chirps_cwd_monthly_' + time for time in MONTH_NAMES])
-    return chirps_monthly.toBands().rename(new_names)
+    merged_names = ee.List(['chirps_cwd_monthly_' + time for time in MONTH_NAMES])
+    amz_names = ee.List(['chirps_cwd_amz_monthly_' + time for time in MONTH_NAMES])
+    merged = ee.ImageCollection(merged_images).toBands().rename(merged_names)
+    amz_only = ee.ImageCollection(amz_images).toBands().rename(amz_names)
+    return merged, amz_only
 
 # Annual
 def prep_chirps_year(y):
-    """Max monthly CWD within year"""
+    """Max monthly CWD within year. Returns (merged, amazon_only)."""
     chirps_amz_cwd = (
         ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_amazon_cwd')
         .filter(ee.Filter.calendarRange(y,
@@ -314,18 +323,19 @@ def prep_chirps_year(y):
                                         'year'))
         .min()
     )
-    chirps_cwd_full = (
+    merged = (
         ee.ImageCollection([chirps_amz_cwd, chirps_crd_cwd])
         .mosaic()
         .unmask()
+        .rename(f'chirps_cwd_{y-TARGET_YEAR}')
     )
+    amz_only = chirps_amz_cwd.unmask().rename(f'chirps_cwd_amz_{y-TARGET_YEAR}')
+    return merged, amz_only
 
-    band_names = ['chirps_cwd']
-    band_names_new = [f'{b}_{y-TARGET_YEAR}' for b in band_names]
-    return chirps_cwd_full.rename(band_names_new)
-
-chirps_annual = [prep_chirps_year(y) for y in range(TARGET_YEAR-6, TARGET_YEAR)]
-chirps_monthly = prep_chirps_monthly(TARGET_YEAR-1, TARGET_YEAR-1)
+chirps_annual_pairs = [prep_chirps_year(y) for y in range(TARGET_YEAR-6, TARGET_YEAR)]
+chirps_annual = [pair[0] for pair in chirps_annual_pairs]
+chirps_annual_amz = [pair[1] for pair in chirps_annual_pairs]
+chirps_monthly, chirps_monthly_amz = prep_chirps_monthly(TARGET_YEAR-1, TARGET_YEAR-1)
 
 
 # Embeddings
@@ -423,7 +433,7 @@ wdpa_polys = ee.FeatureCollection('WCMC/WDPA/current/polygons').remap(
 wdpa_im = ee.Image().int().paint(wdpa_polys, 'GOV_TYPE').rename(['gov_type'])
 
 # Note that with split processing each will be processed separately
-im_list = mcd64_list + mod13_annual + chirps_annual + viirs_memory + mod14_memory + [
+im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_memory + mod14_memory + [
            viirs_target,
            mb_amz_pasture,
            mb_amz_forest,
@@ -440,7 +450,8 @@ im_list = mcd64_list + mod13_annual + chirps_annual + viirs_memory + mod14_memor
            slope,
            nightLights,
            population,
-           chirps_monthly
+           chirps_monthly,
+           chirps_monthly_amz
 ]
 
 # Get some climate indices as dict
