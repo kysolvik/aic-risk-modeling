@@ -167,20 +167,6 @@ mb_amz_water = (mb_amz_lulc_im
 
 
 # Deforestation
-# Old export topped off at 2025-01-17
-GLAD_CUTOFF_DAY = 2219  # days since 2019-01-01 => 2025-01-27
-gfw_col = 'projects/glad/S2alert'
-gfw_in_snapshot = ee.Image(gfw_col+'/alertDate').lte(GLAD_CUTOFF_DAY)
-gfw_alert = (
-    ee.Image(gfw_col+'/alert')
-    .updateMask(gfw_in_snapshot)
-    .rename('alert').unmask(0)
-    )
-gfw_alert_date = (
-    ee.Image(gfw_col+'/alertDate')
-    .updateMask(gfw_in_snapshot)
-    .rename('alertdate').unmask(0)
-    )
 gfc_im = (ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
           .select(['treecover2000', 'loss', 'lossyear'])
           .reduceResolution('mean', maxPixels=400)
@@ -459,8 +445,6 @@ im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_
            mb_amz_urban,
            mb_amz_mining,
            mb_amz_water,
-           gfw_alert,
-           gfw_alert_date,
            mod13_monthly,
            atc_im,
            era5_im,
@@ -514,7 +498,7 @@ if __name__ == '__main__':
         tile_coverage='intersect',
         validation_ratio=0.0, # Fraction to select as validation data
         output_type='tiff',
-        output_path=f'local_test/tifs_alignfromrecord/allpreds_{TARGET_YEAR}',
+        output_path=f'local_test/tifs_full/allpreds_{TARGET_YEAR}',
         sampling_region='../data/municipios/santarem_PA_BR.shp',
         extra_metadata=md_dict
     )
