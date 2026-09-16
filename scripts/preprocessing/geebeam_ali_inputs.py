@@ -339,6 +339,8 @@ chirps_monthly, chirps_monthly_amz = prep_chirps_monthly(TARGET_YEAR-1, TARGET_Y
 
 
 # Embeddings
+EMBEDDINGS_START_YEAR = 2017  # No AlphaEarth annual embeddings before this year
+
 def prep_embeddings_year(y):
     embeddings = (
                 ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
@@ -355,7 +357,11 @@ def prep_embeddings_year(y):
     embeddings = embeddings.rename(band_names_new)
     return embeddings
 
-embeddings_im = prep_embeddings_year(TARGET_YEAR-1)
+# Only export embeddings when y-1 has data (AlphaEarth starts EMBEDDINGS_START_YEAR)
+if TARGET_YEAR - 1 >= EMBEDDINGS_START_YEAR:
+    embeddings_im = prep_embeddings_year(TARGET_YEAR-1)
+else:
+    embeddings_im = None
 
 # Accessibility to cities
 atc_full =  ee.Image('projects/malariaatlasproject/assets/accessibility/accessibility_to_cities/2015_v1_0')
@@ -447,7 +453,6 @@ im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_
            mod13_monthly,
            atc_im,
            era5_im,
-           embeddings_im,
            gfc_im,
            wdpa_im,
            elevation,
@@ -456,6 +461,10 @@ im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_
            chirps_monthly,
            chirps_monthly_amz
 ]
+
+# Append embeddings only if available for y-1 (see EMBEDDINGS_START_YEAR)
+if embeddings_im is not None:
+    im_list.append(embeddings_im)
 
 # Get some climate indices as dict
 print('Starting clim indices')
