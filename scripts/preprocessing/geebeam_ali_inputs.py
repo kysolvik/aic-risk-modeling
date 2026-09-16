@@ -86,7 +86,7 @@ def prep_mcd64_year(y):
     return mcd64
 
 mcd64_list = [prep_mcd64_year(y) for y in range(
-    TARGET_YEAR-6, TARGET_YEAR+(1-PREDICT_ONLY)
+    TARGET_YEAR-10, TARGET_YEAR+(1-PREDICT_ONLY)
 )]
 if PREDICT_ONLY:
     mcd64_list.append(prep_mcd64_year(TARGET_YEAR-1).rename('BurnDate_0'))
@@ -99,7 +99,7 @@ def prep_viirs_year(y):
     return viirs_snpp
 
 viirs_memory = [prep_viirs_year(y) for y in range(
-    TARGET_YEAR-6, TARGET_YEAR+(1-PREDICT_ONLY))]
+    TARGET_YEAR-1, TARGET_YEAR+(1-PREDICT_ONLY))]
 if PREDICT_ONLY:
     viirs_memory.append(prep_viirs_year(TARGET_YEAR-1).rename('viirs_snpp_0'))
 
@@ -110,7 +110,7 @@ def prep_mod14_year(y):
     return mod14
 
 mod14_memory = [prep_mod14_year(y) for y in range(
-    TARGET_YEAR-6, TARGET_YEAR+(1-PREDICT_ONLY))]
+    TARGET_YEAR-10, TARGET_YEAR+(1-PREDICT_ONLY))]
 if PREDICT_ONLY:
     mod14_memory.append(prep_mod14_year(TARGET_YEAR-1).rename('mod14_0'))
 
@@ -123,7 +123,7 @@ mb_amz_lulc_im = mb_amz_lulc_im.addBands(
     ).addBands(
         mb_amz_lulc_im.select('classification_2023').rename('classification_2025')
     ).select(
-        [f'classification_{y}' for y in range(TARGET_YEAR-6, TARGET_YEAR)]
+        [f'classification_{y}' for y in range(TARGET_YEAR-10, TARGET_YEAR)]
 )
 
 mb_amz_lulc_bandnames = mb_amz_lulc_im.bandNames().getInfo()
@@ -209,7 +209,7 @@ def prep_modis13_monthly(y_start, y_end, bands):
     new_names = ee.List([bn + '_monthly_' + time for time, bn in itertools.product(MONTH_NAMES, bands)])
     return modmyd13_all.toBands().rename(new_names)
 
-mod13_annual = [prep_mod13_year(y) for y in range(TARGET_YEAR-6, TARGET_YEAR)]
+mod13_annual = [prep_mod13_year(y) for y in range(TARGET_YEAR-10, TARGET_YEAR)]
 mod13_monthly = prep_modis13_monthly(TARGET_YEAR-1, TARGET_YEAR-1, ['NDVI','EVI'])
 
 # Climate
@@ -332,7 +332,7 @@ def prep_chirps_year(y):
     amz_only = chirps_amz_cwd.unmask().rename(f'chirps_cwd_amz_{y-TARGET_YEAR}')
     return merged, amz_only
 
-chirps_annual_pairs = [prep_chirps_year(y) for y in range(TARGET_YEAR-6, TARGET_YEAR)]
+chirps_annual_pairs = [prep_chirps_year(y) for y in range(TARGET_YEAR-10, TARGET_YEAR)]
 chirps_annual = [pair[0] for pair in chirps_annual_pairs]
 chirps_annual_amz = [pair[1] for pair in chirps_annual_pairs]
 chirps_monthly, chirps_monthly_amz = prep_chirps_monthly(TARGET_YEAR-1, TARGET_YEAR-1)
@@ -463,7 +463,7 @@ md_dict = {}
 for ci in ['amo', 'tna','mei','soi','oni']:
     print(ci)
     md_dict[ci] = download_clim_indices(
-        ci, year_start=TARGET_YEAR-6, year_end=TARGET_YEAR-1).values[:,0]
+        ci, year_start=TARGET_YEAR-10, year_end=TARGET_YEAR-1).values[:,0]
 # Add target year as metadata
 md_dict['year'] = TARGET_YEAR
 print('Ending clim indices')
