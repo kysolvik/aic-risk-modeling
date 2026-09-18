@@ -70,7 +70,14 @@ def prep_viirs_nrt_year(y):
         ['fireSize', 'fire_type', 'confidence']
     ).unmask(0).toInt()
 
-viirs_target = prep_viirs_nrt_year(TARGET_YEAR - PREDICT_ONLY)
+FIRE_ATLAS_START_YEAR = 2018  # amazon_nrt_fire_{y}_raster does not exist before this
+
+# Only build the fire-atlas target (fireSize/fire_type/confidence) when the
+# raster exists for the needed year (see FIRE_ATLAS_START_YEAR)
+if TARGET_YEAR - PREDICT_ONLY >= FIRE_ATLAS_START_YEAR:
+    viirs_target = prep_viirs_nrt_year(TARGET_YEAR - PREDICT_ONLY)
+else:
+    viirs_target = None
 
 # MODIS MCD64 fire memory
 def prep_mcd64_year(y):
@@ -443,7 +450,6 @@ wdpa_im = ee.Image().int().paint(wdpa_polys, 'GOV_TYPE').rename(['gov_type'])
 
 # Note that with split processing each will be processed separately
 im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_memory + mod14_memory + nightlights_list + [
-           viirs_target,
            mb_amz_pasture,
            mb_amz_forest,
            mb_amz_ag,
@@ -461,6 +467,10 @@ im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_
            chirps_monthly,
            chirps_monthly_amz
 ]
+
+# Append the fire-atlas target only when it exists for the year (see FIRE_ATLAS_START_YEAR)
+if viirs_target is not None:
+    im_list.append(viirs_target)
 
 # Append embeddings only if available for y-1 (see EMBEDDINGS_START_YEAR)
 if embeddings_im is not None:
