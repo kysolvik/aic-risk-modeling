@@ -20,6 +20,39 @@ def load_stats_json(path):
     with tf.io.gfile.GFile(path, 'r') as f:
         return json.load(f)
 
+def _robust_scale_from_quantiles(num_stats):
+    """Robust scale (IQR / 1.349) from a tfdv QUANTILES histogram.
+
+    1.349 = 2 * 0.6745, so for normally distributed data this matches the
+    standard deviation. Robust normalization uses this instead of std_dev so a
+    nodata value baked into the raw values (e.g. AgERA5 temperature
+    unmask(0), whose 0 K pixels inflate std_dev ~10x and squash the band)
+    cannot corrupt the scale. As long as no data is below a25 or above q75,
+     should be fairly robust. Returns None when no usable quantile
+    histogram is present or the IQR is degenerate.
+    """
+    from tensorflow_metadata.proto.v0 import statistics_pb2
+    for hist in num_stats.histograms:
+        if hist.type != statistics_pb2.Histogram.QUANTILES or not hist.buckets:
+            continue
+        edges = [hist.buckets[0].low_value] + [b.high_value for b in hist.buckets]
+        n = len(edges) - 1  # number of equal-count buckets (deciles => 10)
+        if n < 1:
+            continue
+
+        def quantile(pct):
+            pos = pct * n
+            lo = int(pos)
+            if lo >= n:
+                return edges[n]
+            return edges[lo] + (pos - lo) * (edges[lo + 1] - edges[lo])
+
+        iqr = quantile(0.75) - quantile(0.25)
+        if iqr > 0:
+            return iqr / 1.349
+    return None
+
+
 def get_norm_stats(stats_list, target_feature):
     """Extract normalization statistics for a given feature.
 
@@ -39,6 +72,7 @@ def get_norm_stats(stats_list, target_feature):
                     'min': num_stats.min,
                     'max': num_stats.max,
                     'median': num_stats.median,
+                    'robust_scale': _robust_scale_from_quantiles(num_stats),
                 }
     return None
 
@@ -130,10 +164,18 @@ def create_normalizer(stats_path, features_to_normalize, robust_features=None):
 
                 is_robust = name in robust_features
                 if is_robust:
-                    center = tf.constant(stats['median'], dtype=tf.float32)
+                    center_val = stats['median']
+                    # Scale by a robust spread (IQR/1.349) when the stats source
+                    # provides quantiles, so a nodata sentinel baked into the
+                    # raw values cannot inflate the scale and squash the band.
+                    # Falls back to std_dev for sources without quantiles
+                    # (e.g. data_stats JSON), preserving prior behavior.
+                    scale_val = stats.get('robust_scale') or stats['stddev']
                 else:
-                    center = tf.constant(stats['mean'], dtype=tf.float32)
-                std = tf.constant(stats['stddev'], dtype=tf.float32)
+                    center_val = stats['mean']
+                    scale_val = stats['stddev']
+                center = tf.constant(center_val, dtype=tf.float32)
+                scale = tf.constant(scale_val, dtype=tf.float32)
 
                 if is_robust:
                     out_tensor = tf.where(features[name] == stats['min'],
@@ -144,17 +186,17 @@ def create_normalizer(stats_path, features_to_normalize, robust_features=None):
 
                 # Some exported bands carry NaN where the source asset has no
                 # coverage (im_chirps_cwd_monthly is ~4-5% of chips). The stats
-                # exclude NaN from accumulation, so center/std stay finite, but
+                # exclude NaN from accumulation, so center/scale stay finite, but
                 # an unfilled NaN pixel propagates all the way to the loss.
                 # Impute the center so those pixels standardize to 0.
                 out_tensor = tf.cast(out_tensor, tf.float32)
                 out_tensor = tf.where(tf.math.is_finite(out_tensor),
                                       out_tensor, center)
 
-                if stats['stddev'] == 0:
+                if scale_val == 0:
                     features[name] = out_tensor - center
                 else:
-                    features[name] = (out_tensor - center) / (std + 1e-7)
+                    features[name] = (out_tensor - center) / (scale + 1e-7)
 
         return features
 
