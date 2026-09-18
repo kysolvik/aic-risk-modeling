@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Rasterize VIIRS S-NPP hotspot detection points into annual geotiffs.
+"""Rasterize VIIRS or MODIS hotspot detection points into annual geotiffs.
 
 Reads a shapefile of VIIRS hotspot detections and burns them onto a raster
 grid, one geotiff per year, where each cell holds the *minimum* (earliest)

@@ -12,7 +12,8 @@ import numpy as np
 import geebeam
 
 # Get default project id from environment (or specify PROJECT_ID manually)
-PROJECT_ID = google.auth.default()[1]
+DF_PROJECT_ID = google.auth.default()[1]
+EE_PROJECT_ID = 'tropics-woodwell'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--target_year', type=int, required=False, default=2024)
@@ -30,7 +31,7 @@ MONTH_END = 12
 DAY_END = '31' # Set to num days in MONTH_END
 MONTH_NAMES=(np.arange(MONTH_END) - MONTH_END).astype(str)
 
-ee.Initialize(project=PROJECT_ID)
+ee.Initialize(project=EE_PROJECT_ID)
 
 # Water deficit
 def addCWD(era5LandImage):
@@ -70,7 +71,14 @@ def prep_viirs_nrt_year(y):
         ['fireSize', 'fire_type', 'confidence']
     ).unmask(0).toInt()
 
-viirs_target = prep_viirs_nrt_year(TARGET_YEAR - PREDICT_ONLY)
+FIRE_ATLAS_START_YEAR = 2018  # amazon_nrt_fire_{y}_raster does not exist before this
+
+# Only build the fire-atlas target (fireSize/fire_type/confidence) when the
+# raster exists for the needed year (see FIRE_ATLAS_START_YEAR)
+if TARGET_YEAR - PREDICT_ONLY >= FIRE_ATLAS_START_YEAR:
+    viirs_target = prep_viirs_nrt_year(TARGET_YEAR - PREDICT_ONLY)
+else:
+    viirs_target = None
 
 # MODIS MCD64 fire memory
 def prep_mcd64_year(y):
@@ -79,7 +87,6 @@ def prep_mcd64_year(y):
              .filter(ee.Filter.calendarRange(y, y, 'year'))
              .max()
              .unmask()
-             .gt(0)
              )
     band_names = mcd64.bandNames().getInfo()
     band_names_new = [f'{b}_{y-TARGET_YEAR}' for b in band_names]
@@ -87,22 +94,33 @@ def prep_mcd64_year(y):
     return mcd64
 
 mcd64_list = [prep_mcd64_year(y) for y in range(
-    TARGET_YEAR-6, TARGET_YEAR+(1-PREDICT_ONLY)
+    TARGET_YEAR-10, TARGET_YEAR+(1-PREDICT_ONLY)
 )]
 if PREDICT_ONLY:
     mcd64_list.append(prep_mcd64_year(TARGET_YEAR-1).rename('BurnDate_0'))
 
 # VIIRS fire memory
 def prep_viirs_year(y):
-    viirs_snpp = (ee.ImageCollection('projects/ksolvik-misc/assets/viirs_snpp_archive')
+    viirs_snpp = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/viirs_snpp_archive_msgrid')
                   .filter(ee.Filter.calendarRange(y, y, 'year'))
-                  ).max().unmask().gt(0).rename(f'viirs_snpp_{y-TARGET_YEAR}')
+                  ).max().unmask().rename(f'viirs_snpp_{y-TARGET_YEAR}')
     return viirs_snpp
 
 viirs_memory = [prep_viirs_year(y) for y in range(
-    TARGET_YEAR-6, TARGET_YEAR+(1-PREDICT_ONLY))]
+    TARGET_YEAR-1, TARGET_YEAR+(1-PREDICT_ONLY))]
 if PREDICT_ONLY:
     viirs_memory.append(prep_viirs_year(TARGET_YEAR-1).rename('viirs_snpp_0'))
+
+def prep_mod14_year(y):
+    mod14 = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/mod14_archive_msgrid')
+             .filter(ee.Filter.calendarRange(y, y, 'year'))
+             ).max().unmask().rename(f'mod14_{y-TARGET_YEAR}')
+    return mod14
+
+mod14_memory = [prep_mod14_year(y) for y in range(
+    TARGET_YEAR-10, TARGET_YEAR+(1-PREDICT_ONLY))]
+if PREDICT_ONLY:
+    mod14_memory.append(prep_mod14_year(TARGET_YEAR-1).rename('mod14_0'))
 
 # MB Land-use/land-cover
 mb_amz_lulc_im = ee.Image('projects/mapbiomas-public/assets/amazon/lulc/collection6/mapbiomas_collection60_integration_v1')
@@ -113,7 +131,7 @@ mb_amz_lulc_im = mb_amz_lulc_im.addBands(
     ).addBands(
         mb_amz_lulc_im.select('classification_2023').rename('classification_2025')
     ).select(
-        [f'classification_{y}' for y in range(TARGET_YEAR-6, TARGET_YEAR)]
+        [f'classification_{y}' for y in range(TARGET_YEAR-10, TARGET_YEAR)]
 )
 
 mb_amz_lulc_bandnames = mb_amz_lulc_im.bandNames().getInfo()
@@ -139,22 +157,23 @@ mb_amz_ag = (mb_amz_lulc_im
                  .reduceResolution('mean', maxPixels=400)
 ).rename([bn.replace('classification', 'ag') for bn in mb_amz_lulc_bandnames_new])
 
+mb_amz_urban = (mb_amz_lulc_im
+                 .eq(24)
+                 .reduceResolution('mean', maxPixels=400)
+).rename([bn.replace('classification', 'urban') for bn in mb_amz_lulc_bandnames_new])
+
+mb_amz_mining = (mb_amz_lulc_im
+                 .eq(30)
+                 .reduceResolution('mean', maxPixels=400)
+).rename([bn.replace('classification', 'mining') for bn in mb_amz_lulc_bandnames_new])
+
+mb_amz_water = (mb_amz_lulc_im
+                 .eq(33)
+                 .reduceResolution('mean', maxPixels=400)
+).rename([bn.replace('classification', 'water') for bn in mb_amz_lulc_bandnames_new])
+
 
 # Deforestation
-# Old export topped off at 2025-01-17
-GLAD_CUTOFF_DAY = 2219  # days since 2019-01-01 => 2025-01-27
-gfw_col = 'projects/glad/S2alert'
-gfw_in_snapshot = ee.Image(gfw_col+'/alertDate').lte(GLAD_CUTOFF_DAY)
-gfw_alert = (
-    ee.Image(gfw_col+'/alert')
-    .updateMask(gfw_in_snapshot)
-    .rename('alert').unmask(0)
-    )
-gfw_alert_date = (
-    ee.Image(gfw_col+'/alertDate')
-    .updateMask(gfw_in_snapshot)
-    .rename('alertdate').unmask(0)
-    )
 gfc_im = (ee.Image('UMD/hansen/global_forest_change_2025_v1_13')
           .select(['treecover2000', 'loss', 'lossyear'])
           .reduceResolution('mean', maxPixels=400)
@@ -198,7 +217,7 @@ def prep_modis13_monthly(y_start, y_end, bands):
     new_names = ee.List([bn + '_monthly_' + time for time, bn in itertools.product(MONTH_NAMES, bands)])
     return modmyd13_all.toBands().rename(new_names)
 
-mod13_annual = [prep_mod13_year(y) for y in range(TARGET_YEAR-6, TARGET_YEAR)]
+mod13_annual = [prep_mod13_year(y) for y in range(TARGET_YEAR-10, TARGET_YEAR)]
 mod13_monthly = prep_modis13_monthly(TARGET_YEAR-1, TARGET_YEAR-1, ['NDVI','EVI'])
 
 # Climate
@@ -250,51 +269,86 @@ def prep_era5_monthly(y_start, y_end):
     return era5_monthly.toBands().rename(new_names)
 era5_im = prep_era5_monthly(TARGET_YEAR-1, TARGET_YEAR-1)
 
-# Chirps CWD
+### Chirps CWD ###
+# Monthly
 def prep_chirps_monthly(y_start, y_end):
-    chirps_cwd = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_amazon_cwd')
+    """Returns (merged, amazon_only) monthly CHIRPS CWD images.
+
+    Both outputs reuse the same per-(year,month) Amazon image object so the
+    Amazon filter/reduce is only computed once, not once per output.
+    """
+    chirps_amz_cwd = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_amazon_cwd')
               .filter(ee.Filter.calendarRange(y_start,
                                               y_end,
-                                              'year'))
-    )
-    def get_month(y, m):
-        chirps_filtered = ((
-            chirps_cwd
-            .filter(ee.Filter.calendarRange(y, y, 'year'))
-            .filter(ee.Filter.calendarRange(m, m, 'month'))
-            .first()
-            ).set('month', m).set('year', y)
-        )
-        return chirps_filtered
+                                              'year')))
+    chirps_crd_cwd = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_cerrado_cwd')
+              .filter(ee.Filter.calendarRange(y_start,
+                                              y_end,
+                                              'year')))
+    merged_images = []
+    amz_images = []
+    for y in range(y_start, y_end + 1):
+        for m in range(MONTH_START, MONTH_END + 1):
+            chirps_amz_filtered = ((
+                chirps_amz_cwd
+                .filter(ee.Filter.calendarRange(y, y, 'year'))
+                .filter(ee.Filter.calendarRange(m, m, 'month'))
+                .first()
+                ).set('month', m).set('year', y)
+            )
+            chirps_crd_filtered = ((
+                chirps_crd_cwd
+                .filter(ee.Filter.calendarRange(y, y, 'year'))
+                .filter(ee.Filter.calendarRange(m, m, 'month'))
+                .first()
+                ).set('month', m).set('year', y)
+            )
+            merged_images.append(
+                ee.ImageCollection([chirps_amz_filtered, chirps_crd_filtered]).mosaic().unmask()
+            )
+            amz_images.append(chirps_amz_filtered.unmask())
 
-    months = ee.List.sequence(MONTH_START, MONTH_END)
-    years = ee.List.sequence(y_start, y_end)
-    chirps_monthly = ee.ImageCollection.fromImages(
-        years.map(lambda y: months.map(lambda m: get_month(y,m))).flatten()
-        )
-    new_names = ee.List(['chirps_cwd_monthly_' + time for time in MONTH_NAMES])
-    return chirps_monthly.toBands().rename(new_names)
+    merged_names = ee.List(['chirps_cwd_monthly_' + time for time in MONTH_NAMES])
+    amz_names = ee.List(['chirps_cwd_amz_monthly_' + time for time in MONTH_NAMES])
+    merged = ee.ImageCollection(merged_images).toBands().rename(merged_names)
+    amz_only = ee.ImageCollection(amz_images).toBands().rename(amz_names)
+    return merged, amz_only
 
+# Annual
 def prep_chirps_year(y):
-    """Max monthly CWD within year"""
-    chirps_cwd = (
+    """Max monthly CWD within year. Returns (merged, amazon_only)."""
+    chirps_amz_cwd = (
         ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_amazon_cwd')
         .filter(ee.Filter.calendarRange(y,
                                         y,
                                         'year'))
         .min()
-        .unmask()
     )
+    chirps_crd_cwd = (
+        ee.ImageCollection('projects/mmacedo-reservoirid/assets/chirps_cerrado_cwd')
+        .filter(ee.Filter.calendarRange(y,
+                                        y,
+                                        'year'))
+        .min()
+    )
+    merged = (
+        ee.ImageCollection([chirps_amz_cwd, chirps_crd_cwd])
+        .mosaic()
+        .unmask()
+        .rename(f'chirps_cwd_{y-TARGET_YEAR}')
+    )
+    amz_only = chirps_amz_cwd.unmask().rename(f'chirps_cwd_amz_{y-TARGET_YEAR}')
+    return merged, amz_only
 
-    band_names = ['chirps_cwd']
-    band_names_new = [f'{b}_{y-TARGET_YEAR}' for b in band_names]
-    return chirps_cwd.rename(band_names_new)
-
-chirps_annual = [prep_chirps_year(y) for y in range(TARGET_YEAR-6, TARGET_YEAR)]
-chirps_monthly = prep_chirps_monthly(TARGET_YEAR-1, TARGET_YEAR-1)
+chirps_annual_pairs = [prep_chirps_year(y) for y in range(TARGET_YEAR-10, TARGET_YEAR)]
+chirps_annual = [pair[0] for pair in chirps_annual_pairs]
+chirps_annual_amz = [pair[1] for pair in chirps_annual_pairs]
+chirps_monthly, chirps_monthly_amz = prep_chirps_monthly(TARGET_YEAR-1, TARGET_YEAR-1)
 
 
 # Embeddings
+EMBEDDINGS_START_YEAR = 2017  # No AlphaEarth annual embeddings before this year
+
 def prep_embeddings_year(y):
     embeddings = (
                 ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
@@ -311,7 +365,11 @@ def prep_embeddings_year(y):
     embeddings = embeddings.rename(band_names_new)
     return embeddings
 
-embeddings_im = prep_embeddings_year(TARGET_YEAR-1)
+# Only export embeddings when y-1 has data (AlphaEarth starts EMBEDDINGS_START_YEAR)
+if TARGET_YEAR - 1 >= EMBEDDINGS_START_YEAR:
+    embeddings_im = prep_embeddings_year(TARGET_YEAR-1)
+else:
+    embeddings_im = None
 
 # Accessibility to cities
 atc_full =  ee.Image('projects/malariaatlasproject/assets/accessibility/accessibility_to_cities/2015_v1_0')
@@ -337,14 +395,33 @@ population = (
     )
 
 # Night Lights
-nightLightsCol = ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMCFG")
-nightLights = (
-    nightLightsCol
-    .filterDate(f'{TARGET_YEAR-1}-{MONTH_START}-01', f'{TARGET_YEAR-1}-{MONTH_END}-{DAY_END}')
-    .select('avg_rad')
-    .mean()
-    .unmask(0)
-    .rename('Nighttime_Lights'))
+NIGHTLIGHTS_START_YEAR = 2013  # No VIIRS nightlights data before this year
+
+def prep_nightlights_year(y, name_year=None):
+    nightLightsCol = (ee.ImageCollection('NOAA/VIIRS/DNB/ANNUAL_V21')
+                      .merge(ee.ImageCollection('NOAA/VIIRS/DNB/ANNUAL_V22')))
+    nightLights = (
+        nightLightsCol
+        .filter(ee.Filter.calendarRange(y,
+                                        y,
+                                        'year'))
+        .first()
+        .select(['median_masked', 'maximum', 'cf_cvg'])
+        .unmask(0)
+    )
+    band_names = nightLights.bandNames().getInfo()
+    if name_year is not None:
+        band_names_new = [f'{b}_{name_year-TARGET_YEAR}' for b in band_names]
+    else:
+        band_names_new = [f'{b}_{y-TARGET_YEAR}' for b in band_names]
+    return nightLights.rename(band_names_new)
+
+# y-1 and y-2; years before NIGHTLIGHTS_START_YEAR fall back to that year's data
+nightlights_list = [
+    prep_nightlights_year(max(y, NIGHTLIGHTS_START_YEAR), name_year=y)
+    for y in (TARGET_YEAR - 2, TARGET_YEAR - 1)
+]
+
 
 # Topography
 terrain = ee.Terrain.products(ee.Image('USGS/SRTMGL1_003'))
@@ -373,25 +450,32 @@ wdpa_polys = ee.FeatureCollection('WCMC/WDPA/current/polygons').remap(
 wdpa_im = ee.Image().int().paint(wdpa_polys, 'GOV_TYPE').rename(['gov_type'])
 
 # Note that with split processing each will be processed separately
-im_list = mcd64_list + mod13_annual + chirps_annual + viirs_memory + [
-           viirs_target,
+im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_memory + mod14_memory + nightlights_list + [
            mb_amz_pasture,
            mb_amz_forest,
            mb_amz_ag,
-           gfw_alert,
-           gfw_alert_date,
+           mb_amz_urban,
+           mb_amz_mining,
+           mb_amz_water,
            mod13_monthly,
            atc_im,
            era5_im,
-           embeddings_im,
            gfc_im,
            wdpa_im,
            elevation,
            slope,
-           nightLights,
            population,
-           chirps_monthly
+           chirps_monthly,
+           chirps_monthly_amz
 ]
+
+# Append the fire-atlas target only when it exists for the year (see FIRE_ATLAS_START_YEAR)
+if viirs_target is not None:
+    im_list.append(viirs_target)
+
+# Append embeddings only if available for y-1 (see EMBEDDINGS_START_YEAR)
+if embeddings_im is not None:
+    im_list.append(embeddings_im)
 
 # Get some climate indices as dict
 print('Starting clim indices')
@@ -399,7 +483,7 @@ md_dict = {}
 for ci in ['amo', 'tna','mei','soi','oni']:
     print(ci)
     md_dict[ci] = download_clim_indices(
-        ci, year_start=TARGET_YEAR-6, year_end=TARGET_YEAR-1).values[:,0]
+        ci, year_start=TARGET_YEAR-10, year_end=TARGET_YEAR-1).values[:,0]
 # Add target year as metadata
 md_dict['year'] = TARGET_YEAR
 print('Ending clim indices')
@@ -410,15 +494,16 @@ if __name__ == '__main__':
     # Execute
     geebeam.grid_and_run_pipeline(
         image_list = im_list,
-        project=PROJECT_ID,
-        crs="EPSG:4326",
-        align_transform=[0.005, 0.0, -85, 0.0, -0.005, 10.0],
+        project=EE_PROJECT_ID,
+        dataflow_project=DF_PROJECT_ID,
+        crs="SR-ORG:6974",
+        align_transform=[463.312716528, 0.0, -20015109.354, 0.0, -463.312716528, 10007554.677],
         patch_size=128, # Pixel dimensions in each direction
         stride=128,
         tile_coverage='intersect',
         validation_ratio=0.0, # Fraction to select as validation data
         output_type='tfrecord',
-        output_path=f'gs://woodwell-aic-fire-risk/data/fullgrid_v2/allpreds_{TARGET_YEAR}',
+        output_path=f'gs://woodwell-aic-fire-risk/data/fullgrid_v3/allpreds_{TARGET_YEAR}',
         sampling_region='../data/Limites_RAISG_2025/Lim_Raisg.shp',
         extra_metadata=md_dict
     )
