@@ -70,7 +70,7 @@ MONTHLY_BANDS = [
 
 ANNUAL_BANDS = [
     "im_ag", "im_pasture", "im_forest",
-    "im_BurnDate", "im_viirs_snpp",
+    "im_BurnDate", "im_viirs_snpp", "im_mod14",
     "im_EVI", "im_NDVI",
 ]
 
@@ -126,7 +126,7 @@ def wanted_features():
         timestepped(MONTHLY_BANDS, MONTHLY_TIMESTEPS)
         + timestepped(ANNUAL_BANDS, ANNUAL_TIMESTEPS)
         + STATIC_BANDS
-        + ["im_fire_type", "im_BurnDate_0", "im_viirs_snpp_0"]
+        + ["im_fire_type", "im_BurnDate_0", "im_viirs_snpp_0", "im_mod14_0"]
         + SCALAR_MD
         + CLIM_INDICES
     )
@@ -242,6 +242,11 @@ def reduce_record(rec):
                       if "im_BurnDate_0" in rec else np.nan)
     row["burn_snpp"] = (int((rec["im_viirs_snpp_0"] > 0).sum())
                         if "im_viirs_snpp_0" in rec else np.nan)
+    # MODIS active fire (MOD14). Present in every v3 year (2013-2022), unlike
+    # im_viirs_snpp (merged archive >2017) and im_fire_type (2018+), so it is the
+    # one fire-detection label with full temporal coverage.
+    row["burn_mod14"] = (int((rec["im_mod14_0"] > 0).sum())
+                         if "im_mod14_0" in rec else np.nan)
     row["n_pixels"] = PATCH_PIXELS
     # Valid area must be constant per chip across years; if it is not, a
     # year-varying nodata footprint would manufacture a year effect.
@@ -440,12 +445,13 @@ def combine(output_dir):
     # The check that catches a broken extraction: these must match the per-year
     # TFDV means (im_BurnDate_0 was 0.017346 in 2023 and 0.034581 in 2024).
     print("\nbasin-mean burned fraction by year (compare to TFDV stats):")
-    print(f"  {'year':<6}{'burn_bd':>12}{'burn_snpp':>12}{'burn_ft':>12}"
-          f"{'sentinel px':>14}")
+    print(f"  {'year':<6}{'burn_bd':>12}{'burn_snpp':>12}{'burn_mod14':>12}"
+          f"{'burn_ft':>12}{'sentinel px':>14}")
     for year, g in df.groupby("year"):
         denom = g["n_pixels"].sum()
         print(f"  {year:<6}{g['burn_bd'].sum() / denom:>12.6f}"
               f"{g['burn_snpp'].sum() / denom:>12.6f}"
+              f"{g['burn_mod14'].sum() / denom:>12.6f}"
               f"{g['burn_ft'].sum() / denom:>12.6f}"
               f"{int(g['n_sentinel'].sum()):>14d}")
     return out_path
