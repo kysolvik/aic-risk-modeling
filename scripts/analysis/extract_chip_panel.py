@@ -96,9 +96,22 @@ NODATA = {
 FIRE_TYPE_SENTINEL = -1e9  # im_fire_type nodata is -2147483648
 
 CLIM_INDICES = ["md_amo", "md_mei", "md_oni", "md_soi", "md_tna"]
-# 72 values = 6 years x 12 months for Y-6..Y-1, chronological. Index 60..71 is
-# Jan..Dec of Y-1; 69..71 is Oct..Dec, the state closest to a January issue date.
-CLIM_SLICES = {"y1": slice(60, 72), "y1ond": slice(69, 72), "y2": slice(48, 60)}
+# The climate-index vectors are 12*N chronological months ending at Dec(Y-1):
+# fullgrid_v2 exported N=6 (length 72), fullgrid_v3 exports N=10 (length 120).
+# The months we want are anchored to the END of the array, not to a fixed index,
+# so slices are counted back from the tail: y1 = the last 12 months (Jan..Dec Y-1),
+# y1ond = the last 3 (Oct..Dec Y-1, closest to a January issue date), y2 = the 12
+# before that (Y-2). Hard-coding length-72 offsets silently reads the wrong year on
+# a length-120 export (it grabbed OND of Y-5), which zeroes out the SOI term.
+CLIM_SLICES_FROM_END = {"y1": (12, 0), "y1ond": (3, 0), "y2": (24, 12)}
+
+
+def clim_slice(length, months_back, months_forward):
+    """slice for series[length-months_back : length-months_forward] (0 => tail)."""
+    if length < 24 or length % 12:
+        raise ValueError(f"climate index length {length} is not a whole number of "
+                         "years >= 2; cannot anchor y1/y1ond/y2 to Dec(Y-1)")
+    return slice(length - months_back, length - months_forward if months_forward else length)
 
 SCALAR_MD = ["md_id", "md_year", "md_x", "md_y"]
 
@@ -285,12 +298,12 @@ def reduce_record(rec):
 
     for name in CLIM_INDICES:
         if name not in rec:
-            for label in CLIM_SLICES:
+            for label in CLIM_SLICES_FROM_END:
                 row[f"{name}_{label}"] = np.nan
             continue
         series = rec[name].reshape(-1)
-        for label, sl in CLIM_SLICES.items():
-            values, _ = _clean(series[sl])
+        for label, (back, fwd) in CLIM_SLICES_FROM_END.items():
+            values, _ = _clean(series[clim_slice(series.size, back, fwd)])
             row[f"{name}_{label}"] = _mean_or_nan(values)
 
     return row
@@ -348,12 +361,23 @@ def validate_panel(df):
     """
     problems = []
 
+    # The chip grid grew between exports (fullgrid_v2 = 1813 chips, fullgrid_v3 =
+    # 2556), so the expected id set is derived from the data rather than hard-coded:
+    # md_id must be exactly the contiguous block 0..N-1, identical in every year.
+    all_ids = set(df["md_id"].dropna().astype(int))
+    n_chips = len(all_ids)
+    expected = set(range(n_chips))
+    if all_ids != expected:
+        problems.append(
+            f"md_id across the panel is not contiguous 0..{n_chips - 1} "
+            f"(n={n_chips}, gaps/extras={len(all_ids ^ expected)})")
+
     for year, g in df.groupby("year"):
         ids = set(g["md_id"].astype(int))
-        if ids != set(range(1813)):
+        if ids != expected:
             problems.append(
-                f"{year}: md_id is not exactly 0..1812 "
-                f"(n={len(ids)}, missing={len(set(range(1813)) - ids)})")
+                f"{year}: md_id is not exactly 0..{n_chips - 1} "
+                f"(n={len(ids)}, missing={len(expected - ids)})")
         bad_year = g["md_year"].dropna()
         if len(bad_year) and not (bad_year.astype(int) == year).all():
             problems.append(f"{year}: md_year disagrees with the directory year")
