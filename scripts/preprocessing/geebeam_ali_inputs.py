@@ -12,7 +12,8 @@ import numpy as np
 import geebeam
 
 # Get default project id from environment (or specify PROJECT_ID manually)
-PROJECT_ID = google.auth.default()[1]
+DF_PROJECT_ID = google.auth.default()[1]
+EE_PROJECT_ID = 'tropics-woodwell'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--target_year', type=int, required=False, default=2024)
@@ -30,7 +31,7 @@ MONTH_END = 12
 DAY_END = '31' # Set to num days in MONTH_END
 MONTH_NAMES=(np.arange(MONTH_END) - MONTH_END).astype(str)
 
-ee.Initialize(project=PROJECT_ID)
+ee.Initialize(project=EE_PROJECT_ID)
 
 # Water deficit
 def addCWD(era5LandImage):
@@ -493,7 +494,8 @@ if __name__ == '__main__':
     # Execute
     geebeam.grid_and_run_pipeline(
         image_list = im_list,
-        project=PROJECT_ID,
+        project=EE_PROJECT_ID,
+        dataflow_project=DF_PROJECT_ID,
         crs="SR-ORG:6974",
         align_transform=[463.312716528, 0.0, -20015109.354, 0.0, -463.312716528, 10007554.677],
         patch_size=128, # Pixel dimensions in each direction
