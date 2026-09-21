@@ -423,6 +423,19 @@ def combine(output_dir):
     if dup:
         raise ValueError(f"{dup} duplicate (year, md_id) rows -- shards overlap?")
 
+    # Guard against combining per-shard parquets written by an OLDER extractor.
+    # Every shard extracted by the current reduce_record emits these columns (as
+    # NaN where the band is absent, e.g. mod14 in fullgrid_v2), so a missing one
+    # means some parquets are stale -- concatenating them would silently drop the
+    # column (and stale same-shaped columns like md_soi_y1ond keep wrong values).
+    stale = [c for c in ("burn_bd", "burn_snpp", "burn_mod14", "burn_ft")
+             if c not in df.columns]
+    if stale:
+        raise ValueError(
+            f"per-shard parquets are missing {stale}; they predate the current "
+            f"extractor. Re-extract with --overwrite (same --data_dirs) so every "
+            f"shard is recomputed, then re-run --combine.")
+
     if "export_source" not in df.columns:
         df["export_source"] = np.nan
     df["export_source"] = df["export_source"].fillna("fullgrid_v2")
