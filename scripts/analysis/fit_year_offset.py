@@ -5,10 +5,9 @@
     gamma(t) = b0 + b_soi * z(SOI_{Aug-Oct, Y-1}) + b_prev * z(log basin burn_{Y-1})
 
 Why offline and low-dof: the network sees ~360 year-constant scalars against 10-13
-distinct year-values, so a learned year head fits without identifying (see
-`notes/ceiling_test_findings.txt` section 19 -- in-sample-best predictors have the
-WRONG out-of-sample sign, Spearman rho = +0.297). Fitting <=3 parameters offline on
-the chip-year panel is well-conditioned; letting the network do it is not.
+distinct year-values, so a learned year head fits without fully identifying the year
+Fitting <=3 parameters offline on the chip-year panel is well-conditioned;
+letting the network do it is not.
 
 Why global rather than spatially varying: a mean-zero spatial basis multiplied by a
 year scalar has zero basin mean, so it is ORTHOGONAL to the year effect and cannot
@@ -21,7 +20,7 @@ term would. `--check` pins the sign, and the fit refuses to emit if it flips.
 The emitted offsets are MEAN-CENTERED over the fit years. Under weighted BCE the
 model's optimal output is inflated (logit(q) ~= logit(p) + log(pos_weight) for small
 p), so the level is absorbed by the network's own bias while the year-to-year
-component -- the part we care about -- passes through unchanged. Centering makes
+component passes through unchanged. Centering makes
 gamma independent of `pos_weight`.
 
 Usage:

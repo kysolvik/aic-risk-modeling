@@ -30,7 +30,11 @@ than an arbitrary partition of a sum.
 
 `gamma` is a frozen, global, offline-fit per-year offset -- see
 scripts/analysis/fit_year_offset.py for why it is not learned in-network and why
-it is not spatially varying.
+its AMPLITUDE is not learned. An optional `year_gain` term makes the year effect
+spatially explicit without touching that amplitude: the year contribution becomes
+`gamma(t)*(1 + g_res(x)) = gamma(t) + gamma(t)*g_res(x)`, where `g_res(x)` (the
+`year_gain` term) is a per-chip loading of the LOCATION CODE ONLY, mean-centred so
+the basin-aggregate amplitude stays exactly `gamma(t)` -- see SpatialYearGain.
 """
 
 import json
@@ -223,6 +227,85 @@ def build_year_offset(spec, year_group):
     return YearOffset(offsets, input_name=year_group, **kw)
 
 
+class SpatialYearGain(nn.Module):
+    """Per-chip loading `g_res(x)` that makes the frozen `gamma(t)` spatially explicit.
+
+    The year contribution becomes `gamma(t)*(1 + g_res(x)) = gamma(t) + gamma(t)*g_res(x)`;
+    this module supplies `g_res`, added into the decomposition as the separate `year_gain`
+    term (`gamma * g_res`). `g_res` is a function of the LOCATION CODE ONLY -- the raw
+    per-chip coordinate (`md_single` = (md_x, md_y)) through fixed random Fourier features
+    (Tancik et al. 2020) + a small MLP -- and never sees the pixel feature stack, so it is a
+    pure location x year interaction rather than a re-derivation of `s`/`c`/`m`.
+
+    Two properties keep it identifiable and consistent with "gamma's amplitude is global"
+    (see YearOffset and scripts/analysis/fit_year_offset.py):
+
+      * ZERO-INIT: the final Linear is zeroed, so `g_res == 0` at start and the `year_gain`
+        term is an exact no-op -- the model is identical to the global-gamma factored model
+        at init, mirroring `LocalContext`'s zero-init.
+      * MEAN-CENTRED (amplitude-preserving): `g_res` is centred so its basin mean is ~0,
+        hence `mean_x[gamma*(1 + g_res)] == gamma`. The gain only redistributes WHICH chips
+        carry the year signal; it cannot move the basin-aggregate amplitude the offline gamma
+        fit sets. Only the spatial LOADING is learned (from many chips), never the temporal
+        profile. Centring uses the batch mean in train mode and a frozen running-mean buffer
+        at eval, so a chip's prediction never depends on batch composition.
+
+    The location code is per-chip -- there is no per-pixel coordinate grid -- so `g_res` is
+    one scalar per example `(B, 1, 1, 1)`, constant within the 128x128 tile. That matches the
+    finding that the year signal is a chip-level amplitude (within-chip reshuffle is ~noise).
+    """
+
+    def __init__(self, input_name="md_single", loc_features=2, num_freqs=16, sigma=1.0,
+                 hidden=64, momentum=0.1):
+        super().__init__()
+        self.input_name = input_name
+        self.loc_features = loc_features
+        self.momentum = momentum
+        # Fixed random projection, saved with the model so encoding is stable across save/load.
+        self.register_buffer("freq_proj", torch.randn(loc_features, num_freqs) * sigma)
+        self.register_buffer("running_mean", torch.zeros(1))
+        feat_dim = loc_features + 2 * num_freqs                 # raw coords + sin/cos
+        self.body = nn.Sequential(nn.Linear(feat_dim, hidden), nn.ReLU())
+        self.out = nn.Linear(hidden, 1)
+        nn.init.zeros_(self.out.weight)                         # g_res == 0 at init -> no-op
+        nn.init.zeros_(self.out.bias)
+
+    def forward(self, coords):
+        coords = coords.reshape(coords.shape[0], -1)[:, :self.loc_features]
+        proj = 2 * math.pi * (coords @ self.freq_proj)
+        feats = torch.cat([coords, proj.sin(), proj.cos()], dim=-1)
+        raw = self.out(self.body(feats))                        # (B, 1)
+        if self.training:
+            batch_mean = raw.mean()
+            with torch.no_grad():
+                self.running_mean.mul_(1 - self.momentum).add_(self.momentum * batch_mean)
+            centre = batch_mean
+        else:
+            centre = self.running_mean
+        return (raw - centre).reshape(-1, 1, 1, 1)
+
+
+def build_year_gain(spec, year_gain_group):
+    """Build a `SpatialYearGain` from a decoder_config `year_gain` block, or None.
+
+    `spec` accepts optional `loc_features` / `num_freqs` / `sigma` / `hidden` / `momentum`.
+    Requires `year_gain_group` (the location group carrying the coordinates, e.g. `md_single`)
+    to be set; it is read directly from the input dict, like `year_group` for `YearOffset`.
+    Enabled whenever `spec` is not None (an empty `{}` means "on, with default hypers");
+    pass `null`/None to disable.
+    """
+    if spec is None:
+        return None
+    if not year_gain_group:
+        raise ValueError("year_gain given but year_gain_group is unset")
+    spec = dict(spec)
+    kw = {k: spec.pop(k)
+          for k in ("loc_features", "num_freqs", "sigma", "hidden", "momentum") if k in spec}
+    if spec:
+        raise ValueError(f"unknown year_gain keys: {sorted(spec)}")
+    return SpatialYearGain(input_name=year_gain_group, **kw)
+
+
 class PixelSusceptibility(nn.Module):
     """`s`: strictly pointwise (1x1) logit contribution over the full-res stack.
 
@@ -367,7 +450,8 @@ class FactoredFireModel(nn.Module):
     def __init__(self, branch_models, num_classes=1, pixel_groups=None,
                  context_groups=None, year_group=None, local_kernel=9, coarse_grid=4,
                  susceptibility_hidden=(128, 64), susceptibility_dropout=0.0,
-                 local_hidden=64, local_dilation=1, coarse_hidden=64, year_offset=None):
+                 local_hidden=64, local_dilation=1, coarse_hidden=64, year_offset=None,
+                 year_gain_group=None, year_gain=None):
         super().__init__()
         if num_classes != 1:
             raise ValueError(
@@ -414,6 +498,11 @@ class FactoredFireModel(nn.Module):
         self.coarse = CoarseIntensity(pixel_channels, context_dim=context_dim,
                                       grid=coarse_grid, hidden=coarse_hidden)
         self.year = self._build_year_offset(year_offset, year_group)
+        self.year_gain = build_year_gain(year_gain, year_gain_group)
+        if self.year_gain is not None and self.year is None:
+            raise ValueError(
+                "year_gain requires year_offset: the per-location gain multiplies gamma(t), "
+                "so it is meaningless without a year offset.")
 
     @staticmethod
     def _build_year_offset(spec, year_group):
@@ -447,11 +536,21 @@ class FactoredFireModel(nn.Module):
         }
         terms["gamma"] = (self.year(inputs[self.year.input_name]) if self.year is not None
                           else x.new_zeros(x.shape[0], 1, 1, 1))
+        # year_gain = gamma(t) * g_res(x): the spatially-explicit part of the year effect,
+        # kept as its own additive term so gamma stays the global amplitude and this stays 0
+        # at init. g_res is mean-centred, so summing gamma + year_gain preserves the basin
+        # amplitude (mean_x[gamma*(1 + g_res)] == gamma).
+        if self.year_gain is not None:
+            g_res = self.year_gain(inputs[self.year_gain.input_name])
+            terms["year_gain"] = terms["gamma"] * g_res
+        else:
+            terms["year_gain"] = x.new_zeros(x.shape[0], 1, 1, 1)
         return terms
 
     def forward(self, inputs):
         terms = self.forward_terms(inputs)
-        logits = terms["gamma"] + terms["m"] + terms["s"] + terms["c"]
+        logits = (terms["gamma"] + terms["year_gain"]
+                  + terms["m"] + terms["s"] + terms["c"])
         # Head runs in float32 even under autocast, matching the other decoders.
         with torch.autocast(device_type=logits.device.type, enabled=False):
             return torch.sigmoid(logits.float()).squeeze(1)
