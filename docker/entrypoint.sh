@@ -11,8 +11,11 @@
 #
 # Required: CONFIG_PATH CHECKPOINT DATA_DIR OUTPUT_URI
 # Optional: MODE (predict) STATS_PATH TFRECORD_PATTERN MAX_CHIPS BATCH_SIZE SEED
-#           EDGE_CROP (0) INVERT_YRES (1) MOSAIC (1) MOSAIC_NAME (preds)
+#           EDGE_CROP (0) INVERT_YRES (0) MOSAIC (1) MOSAIC_NAME (preds)
 #           UPLOAD_TILES (0) SCRATCH_DIR (/scratch/chips)
+#           PROFILE_TEMPLATE (assets/example_v3.tif = fullgrid_v3 MODIS sinusoidal,
+#             north-up, pairs with INVERT_YRES=0. fullgrid_v2 needs
+#             PROFILE_TEMPLATE=/app/assets/example.tif + INVERT_YRES=1)
 # Attribute-only: DRIVERS (gs:// driver spec) SHAPLEY (0) SHAPLEY_SAMPLES
 #           POS_WEIGHT WRITE_MASK (0)
 set -euo pipefail
@@ -67,7 +70,8 @@ if [ -n "${TFRECORD_PATTERN:-}" ]; then args+=(--tfrecord_pattern "$TFRECORD_PAT
 if [ -n "${MAX_CHIPS:-}" ];        then args+=(--max_chips "$MAX_CHIPS"); fi
 if [ -n "${BATCH_SIZE:-}" ];       then args+=(--batch_size "$BATCH_SIZE"); fi
 if [ -n "${SEED:-}" ];             then args+=(--seed "$SEED"); fi
-if [ "${INVERT_YRES:-1}" = "1" ];  then args+=(--invert_yres); fi
+if [ -n "${PROFILE_TEMPLATE:-}" ]; then args+=(--profile_template "$PROFILE_TEMPLATE"); fi
+if [ "${INVERT_YRES:-0}" = "1" ];  then args+=(--invert_yres); fi
 
 # Which per-chip prefixes the mosaic step should stitch. predict writes out/mask;
 # attribute writes a single shap_ (Shapley) or attr_ (OAT) raster.
