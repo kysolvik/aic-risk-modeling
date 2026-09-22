@@ -17,7 +17,7 @@ CENTERED = True# True if x, y are for center for each tile
 # than the cwd so it works from any working directory, in a container or out.
 _REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir))
-DEFAULT_PROFILE_TEMPLATE = os.path.join(_REPO_ROOT, 'assets', 'example.tif')
+DEFAULT_PROFILE_TEMPLATE = os.path.join(_REPO_ROOT, 'assets', 'example_v3.tif')
 
 # Passthrough feature group injected into the config at runtime so the raw
 # (un-normalized) coordinates ride along in the model inputs dict.
@@ -232,7 +232,7 @@ def main():
 
     n_chips = 0
     with torch.no_grad():
-        for inputs, labels, weights in tqdm(arm.train.trainer._torch_batches(ds, device),
+        for inputs, labels, weights, *_ in tqdm(arm.train.trainer._torch_batches(ds, device),
                                    desc='Predicting', unit='batch'):
             with torch.autocast(device_type=device.type, dtype=amp_dtype,
                                 enabled=amp_enabled):
