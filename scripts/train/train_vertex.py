@@ -2,6 +2,7 @@
 from google.cloud import aiplatform
 import argparse
 import google
+import os
 
 
 parser = argparse.ArgumentParser()
@@ -32,17 +33,25 @@ aiplatform.init(project=project, location=location, staging_bucket=bucket)
 # https://cloud.google.com/vertex-ai/docs/training/pre-built-containers
 job = aiplatform.CustomPythonPackageTrainingJob(
     display_name=args.display_name,
-    python_package_gcs_uri="gs://aic-amazon/python_packages/aic_risk_modeling-0.3.1.tar.gz",
+    python_package_gcs_uri="gs://aic-amazon/python_packages/aic_risk_modeling-0.3.3.tar.gz",
     python_module_name="aic_risk_modeling.train.trainer",
     container_uri="us-docker.pkg.dev/vertex-ai/training/pytorch-gpu.2-4.py310:latest",
 )
 job.run(
-    machine_type="n1-highmem-8",
+    machine_type="n1-highmem-16",
 #    scheduling_strategy=aiplatform.compat.types.custom_job.Scheduling.Strategy.SPOT,
     accelerator_type="NVIDIA_TESLA_T4",
     accelerator_count=1,
-    boot_disk_size_gb=100, # 100 is default
+    boot_disk_size_gb=200, # 100 is default
     args=[
         f"--config_path={config_json}",
     ],
+    sync=False,
 )
+job.wait_for_resource_creation()
+print(job.resource_name)
+# sync=False runs the job-to-completion monitor in a NON-daemon pool thread, so a
+# normal exit would hang joining it until the job finishes. The job is already
+# created server-side above, so hard-exit instead (must be os._exit, not sys.exit,
+# which still joins non-daemon threads).
+os._exit(0)
