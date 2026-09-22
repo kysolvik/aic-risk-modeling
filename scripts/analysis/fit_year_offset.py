@@ -45,10 +45,12 @@ PANEL = os.path.join(os.path.dirname(__file__), "..", "..", "out", "chip_panel",
 # union, so in log space it shifts the level and barely touches the YEAR effect,
 # which is all gamma uses.
 TARGETS = {"bd": ["burn_bd"], "snpp": ["burn_snpp"], "ft": ["burn_ft"],
-           "union_sum": ["burn_bd", "burn_snpp"]}
+           "union_sum": ["burn_bd", "burn_snpp"],
+           "union3": ["burn_bd", "burn_snpp", "burn_mod14"]}
 PREV_BANDS = {"bd": ["im_BurnDate_-1_mean"],
               "snpp": ["im_viirs_snpp_-1_mean"],
-              "union_sum": ["im_BurnDate_-1_mean", "im_viirs_snpp_-1_mean"]}
+              "union_sum": ["im_BurnDate_-1_mean", "im_viirs_snpp_-1_mean"],
+              "union3": ["im_BurnDate_-1_mean", "im_viirs_snpp_-1_mean", "im_mod14_-1_mean"]}
 SOI_COL = "md_soi_y1ond"
 CHIP_PIXELS = 128 * 128
 
