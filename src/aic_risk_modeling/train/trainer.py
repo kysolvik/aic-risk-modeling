@@ -9,6 +9,7 @@ every other metric is maximized.
 """
 
 import csv
+import glob
 import inspect
 import json
 import math
@@ -196,6 +197,25 @@ def load_model(model_path, map_location='cpu'):
     return model
 
 
+def _cache_dataset_to_disk(dataset, cache_dir):
+    """Cache a finished (normalized, band-selected) dataset to local disk.
+
+    The first full pass pays the GZIP-decode / parse / normalize cost and writes
+    the decoded batches under `cache_dir`; every later pass replays them from
+    disk. Only valid for a deterministic dataset (validation: no shuffle, no
+    augmentation), since replays return the first pass's batches verbatim.
+
+    `Dataset.cache(filename)` silently serves whatever is already on disk at that
+    path, so leftovers from an earlier run (other config or data, same path) are
+    deleted first; otherwise they would be read in place of this run's data.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    prefix = os.path.join(cache_dir, 'val')
+    for stale in glob.glob(prefix + '*'):
+        os.remove(stale)
+    return dataset.cache(prefix).prefetch(tf.data.AUTOTUNE)
+
+
 def _torch_batches(dataset, device):
     """Yield (inputs, labels, sample_weight) from a tf.data dataset as torch tensors.
 
@@ -355,6 +375,12 @@ def run(config):
         sample_weight_config=sample_weight_config,
         pos_weight=pos_weight,
     )
+    # Optional: replay validation from local disk after epoch 1 (config key
+    # 'val_cache_dir'). Needs ~10 MB/example free on that disk, and must be the
+    # LAST validation op so the cache holds the fully processed batches.
+    if config.get('val_cache_dir'):
+        validation_ds = _cache_dataset_to_disk(
+            validation_ds, config['val_cache_dir'])
 
     # Get branch models
     all_models = build_all_models(config['input_features'])

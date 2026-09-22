@@ -657,6 +657,38 @@ class FusionDecoder(nn.Module):
             return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
 
 
+class SimpleReadout(nn.Module):
+    """Bare per-pixel linear readout over concatenated branch outputs.
+
+    Unlike FusionDecoder, this has no hidden head and no spatial mixing: it
+    concatenates the channels-last branch outputs and applies a single 1x1 conv
+    to the class logits. All model capacity is meant to live in the branch
+    encoder(s) -- e.g. a single all-bands PixelMLP -- so the whole model is a
+    naive per-pixel MLP with a linear output layer, and this decoder adds nothing
+    but the readout (and the sigmoid/softmax). Output contract matches
+    FusionDecoder: (B, H, W) sigmoid probs for num_classes == 1, else
+    (B, H, W, num_classes) softmax.
+    """
+
+    def __init__(self, branch_models, num_classes=1):
+        super().__init__()
+        self.num_classes = num_classes
+        self.branches = nn.ModuleList(branch_models)
+        in_channels = sum(m.out_channels for m in branch_models)
+        self.out_conv = nn.Conv2d(in_channels, num_classes, 1)
+
+    def forward(self, inputs):
+        feats = [branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
+                 for branch in self.branches]
+        x = torch.cat(feats, dim=1)
+        # Match FusionDecoder: run the float32 readout even under autocast.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            logits = self.out_conv(x.float())
+            if self.num_classes == 1:
+                return torch.sigmoid(logits).squeeze(1)
+            return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
+
+
 def _location_features(branch_models, name, fallback):
     """Coordinate width of the branch named `name`.
 
@@ -1505,6 +1537,15 @@ def decoder_fusion(branch_models, num_classes=1, **kwargs):
 
     kwargs come from config['decoder_config'] (e.g. branch_norm, head_kernel)."""
     return FusionDecoder(branch_models, num_classes=num_classes, **kwargs)
+
+
+def decoder_simple(branch_models, num_classes=1, **kwargs):
+    """Bare 1x1 linear readout over the branches (see SimpleReadout).
+
+    For the naive per-pixel MLP baseline: pair with a single all-bands PixelMLP
+    branch so the model is that MLP plus a linear output layer, nothing else.
+    Takes no decoder_config kwargs."""
+    return SimpleReadout(branch_models, num_classes=num_classes)
 
 
 def decoder_mtsvit(branch_models, num_classes=1, **kwargs):
