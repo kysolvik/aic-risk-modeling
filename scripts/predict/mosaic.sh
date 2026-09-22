@@ -25,7 +25,11 @@ for pfx in $prefixes; do
     fi
     echo "[mosaic] $(wc -l < "$list") ${pfx} chips -> ${name}_${pfx}.tif"
     gdalbuildvrt -input_file_list "$list" "$out_dir/${name}_${pfx}.vrt"
-    gdal_translate -co COMPRESS=LZW -co TILED=YES -co BIGTIFF=IF_SAFER \
+    # BIGTIFF=YES, not IF_SAFER: with LZW the size estimate can fall under the 4GB
+    # threshold and pick classic TIFF, which then fails ("tile arrays larger than
+    # 2GB") mid-write on the full-basin mosaic (fullgrid_v3 = 2556 chips/yr). Forcing
+    # BigTIFF is universally readable and adds only 8-byte offsets on small mosaics.
+    gdal_translate -co COMPRESS=LZW -co TILED=YES -co BIGTIFF=YES \
         "$out_dir/${name}_${pfx}.vrt" "$out_dir/${name}_${pfx}.tif"
     # gdalbuildvrt drops per-band descriptions, so a Shapley/attr mosaic would
     # open as "Band 1..10". Copy them off one chip (rasterio ships in the image);
