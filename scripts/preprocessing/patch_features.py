@@ -150,20 +150,27 @@ def _set_values(feature, kind, values):
 def build_corrected_table(corrected_dir, features, cache_dir, pattern):
     """Materialize the corrected bands as an mmap-able array.
 
-    Returns (npy_path, index_path, meta). The array is (n_tiles, n_features,
-    width) float32; meta["index"] maps str(md_id) -> row, and meta["kinds"]
+    Returns (table_path, index_path, meta). The table is a raw float32 file of
+    shape meta["shape"] = (n_tiles, n_features, width), opened with
+    `_open_table`; meta["index"] maps str(md_id) -> row, and meta["kinds"]
     records each band's protobuf oneof kind, which is the only way to know what
-    type a band added to a year export should have. Written to disk rather than
-    held in memory so that worker processes share one copy via the page cache
-    instead of each inheriting their own (~800 MB for 1800 tiles x 7 bands).
+    type a band added to a year export should have. Each tile is appended to
+    disk as it is read, so peak memory is one record regardless of band count
+    (a full-year export is ~5 GB -- holding it in RAM got the process killed),
+    and worker processes share one copy via the page cache.
     """
     shards = _list_shards(corrected_dir, pattern)
     if not features:
         features = sorted(k for k in _first_example(shards[0]).features.feature
                           if k.startswith("im_"))
-        print(f"inferred corrected features: {', '.join(features)}")
+        print(f"inferred corrected features ({len(features)}): "
+              f"{', '.join(features)}")
 
-    rows, index, width, kinds = [], {}, None, {}
+    os.makedirs(cache_dir, exist_ok=True)
+    table_path = os.path.join(cache_dir, "corrected_table.f32")
+    index_path = os.path.join(cache_dir, "corrected_index.json")
+    out = open(table_path, "wb")
+    index, width, kinds = {}, None, {}
     for shard in shards:
         for example in _examples(shard):
             feats = example.features.feature
@@ -195,20 +202,18 @@ def build_corrected_table(corrected_dir, features, cache_dir, pattern):
                         f"{name!r} on tile {md_id} has length {len(values)}, "
                         f"expected {width}")
                 band.append(np.asarray(values, dtype=np.float32))
-            index[md_id] = len(rows)
-            rows.append(np.stack(band))
-    if not rows:
+            index[md_id] = len(index)
+            out.write(np.stack(band).tobytes())
+        print(f"  read {shard} ({len(index)} tiles so far)")
+    out.close()
+    if not index:
         raise ValueError(f"corrected export {corrected_dir} is empty")
 
-    table = np.stack(rows)  # (n_tiles, n_features, width)
-    os.makedirs(cache_dir, exist_ok=True)
-    npy_path = os.path.join(cache_dir, "corrected_table.npy")
-    index_path = os.path.join(cache_dir, "corrected_index.json")
-    np.save(npy_path, table)
-    meta = {"index": index, "features": list(features),
-            "width": width, "kinds": kinds}
+    meta = {"index": index, "features": list(features), "width": width,
+            "kinds": kinds, "shape": [len(index), len(features), width]}
     with open(index_path, "w") as f:
         json.dump(meta, f)
+    table = _open_table(table_path, meta)
     for i, name in enumerate(features):
         if _is_int(kinds[name]):
             peak = float(np.abs(table[:, i]).max())
@@ -216,8 +221,14 @@ def build_corrected_table(corrected_dir, features, cache_dir, pattern):
                 print(f"  WARNING: {name} is int64 and reaches {peak:.0f}; "
                       f"the float32 table cannot round-trip it exactly")
     print(f"corrected table: {table.shape} tiles x features x px "
-          f"({table.nbytes / 1e6:.0f} MB) -> {npy_path}")
-    return npy_path, index_path, meta
+          f"({table.nbytes / 1e6:.0f} MB on disk) -> {table_path}")
+    return table_path, index_path, meta
+
+
+def _open_table(table_path, meta):
+    """Read-only memmap of the table `build_corrected_table` wrote."""
+    return np.memmap(table_path, dtype=np.float32, mode="r",
+                     shape=tuple(meta["shape"]))
 
 
 # ---------------------------------------------------------------------------
@@ -227,10 +238,10 @@ def build_corrected_table(corrected_dir, features, cache_dir, pattern):
 _WORKER = {}
 
 
-def _init_worker(npy_path, index_path):
+def _init_worker(table_path, index_path):
     with open(index_path) as f:
         meta = json.load(f)
-    _WORKER["table"] = np.load(npy_path, mmap_mode="r")
+    _WORKER["table"] = _open_table(table_path, meta)
     _WORKER["index"] = meta["index"]
     _WORKER["features"] = meta["features"]
     _WORKER["kinds"] = meta["kinds"]
@@ -531,12 +542,12 @@ def plan_jobs(args, features):
     return dirs, jobs
 
 
-def run_jobs(jobs, npy_path, index_path, workers):
+def run_jobs(jobs, table_path, index_path, workers):
     if workers > 1:
         with mp.Pool(workers, initializer=_init_worker,
-                     initargs=(npy_path, index_path)) as pool:
+                     initargs=(table_path, index_path)) as pool:
             return pool.map(patch_shard, jobs)
-    _init_worker(npy_path, index_path)
+    _init_worker(table_path, index_path)
     return [patch_shard(job) for job in jobs]
 
 
@@ -562,7 +573,7 @@ def report(results, features, additions):
               f"records; drop those tiles or extend the corrected export.")
 
 
-def write_sidecars(args, dirs, jobs, results, npy_path, meta):
+def write_sidecars(args, dirs, jobs, results, table_path, meta):
     per_dir = defaultdict(lambda: {"rows": [], "records": 0, "missing": 0})
     for (_, dst, _, _), r in zip(jobs, results):
         d = per_dir[os.path.dirname(dst)]
@@ -570,7 +581,7 @@ def write_sidecars(args, dirs, jobs, results, npy_path, meta):
         d["records"] += r["records"]
         d["missing"] += r["missing"]
 
-    table = np.load(npy_path, mmap_mode="r") if not args.skip_stats else None
+    table = _open_table(table_path, meta) if not args.skip_stats else None
     for src_dir, out_dir, added in dirs:
         print(f"\n{out_dir}")
         if not args.skip_schema:
@@ -625,7 +636,7 @@ def main(argv=None):
                 if args.features else None)
     cache_dir = args.cache_dir or tempfile.mkdtemp(prefix="patch_features_")
     try:
-        npy_path, index_path, meta = build_corrected_table(
+        table_path, index_path, meta = build_corrected_table(
             args.corrected_dir, features, cache_dir, args.tfrecord_pattern)
         features = meta["features"]
 
@@ -647,9 +658,9 @@ def main(argv=None):
         if args.dry_run:
             print("DRY RUN -- nothing will be written")
 
-        results = run_jobs(jobs, npy_path, index_path, args.workers)
+        results = run_jobs(jobs, table_path, index_path, args.workers)
         report(results, features, additions)
-        write_sidecars(args, dirs, jobs, results, npy_path, meta)
+        write_sidecars(args, dirs, jobs, results, table_path, meta)
     finally:
         if args.cache_dir is None:
             shutil.rmtree(cache_dir, ignore_errors=True)
