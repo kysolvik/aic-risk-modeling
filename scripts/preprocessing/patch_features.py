@@ -3,11 +3,13 @@
 Static fields (elevation, slope, accessibility, governance, ...) are duplicated
 into every year's export, so re-exporting them means rewriting every year even
 though the corrected data is one grid's worth of rasters. This script does that
-rewrite: it reads a corrected *static* export, keys it by `md_id`, then streams
-each year's shards replacing only the named features and copying every other
-feature through byte-for-byte. It can also handle dynamic field rewrites, and
-a band the year export never had at all is *added* rather than an error, which
-is how a new static field gets backfilled into every existing year.
+rewrite: it reads a corrected export, keys it by `md_id`, then streams each
+year's shards replacing only the named features and copying every other
+feature through byte-for-byte. A band the year export never had at all is
+*added* rather than an error, which is how a new field gets backfilled.
+
+Year-varying (dynamic) fields work the same way, one run per year: pass that
+year's corrected export as --corrected_dir and that year's dir as --data_dirs.
 
 Why key on `md_id`: Beam gives no ordering guarantee, so record N of a shard in
 the corrected export is not record N of the same-named shard in a year export.
@@ -21,51 +23,76 @@ Cost: measured ~16 MB/s uncompressed single-threaded (gzip re-compression
 dominates), i.e. ~1 s per 17 MB record. With `--workers 8` a ~1800-tile year
 takes a few minutes. Shards are independent, so workers scale ~linearly.
 
-AFTER RUNNING: regenerate the stats file. Training reads
-`config['stats_path']`, defaulting to `data_dirs[0]/stats.pbtxt`, so a patched
-directory with a stale stats file changes nothing about normalization -- which
-is usually the entire point of the patch.
+Sidecars written to each output dir:
+  * schema.pbtxt (+ schema.json) -- copied from the source, extended with any
+    band this run added (`--skip_schema` to opt out). `data_loader` builds its
+    parse spec from that file per-dir, so an output dir without one is
+    unreadable and one that omits an added band ignores it.
+  * stats.pbtxt -- the source's tfdv stats with the patched bands' entries
+    recomputed from the corrected values (replaced in place if the band
+    existed, appended if it is new); every other entry is copied untouched
+    (`--skip_stats` to opt out). Quantiles are exact rather than sketched. No
+    second pass over the data is needed: the patched values are exactly the
+    corrected table rows matched in that dir. Stats are skipped for a dir that
+    was only partially patched (--limit_shards, or unmatched md_ids under
+    --allow_missing) rather than written wrong.
 
-Each output dir also gets a `schema.pbtxt` copied from its source, extended
-with any band this run added (`--skip_schema` to opt out). `data_loader`
-builds its parse spec from that file per-dir, so an output dir without one is
-unreadable and one that omits an added band ignores it. Stats are NOT copied:
-they are regenerated, per above.
+AFTER RUNNING: re-pool the per-year stats into the training stats JSON with
+pool_stats_pbtxt.py (training reads `config['stats_path']`).
 
 Examples:
-    # Check coverage and what would change, without writing anything.
+    # Preview coverage, what would change, and the stats diff; writes nothing.
     python scripts/preprocessing/patch_features.py \\
-        --corrected_dir gs://aic-amazon/data/corrected_v3/ \\
-        --data_dirs gs://aic-amazon/data/fullgrid_v2/allpreds_2018/ \\
-        --output_root gs://aic-amazon/data/fullgrid_v3/ \\
-        --features im_Elevation,im_accessibility,im_gov_type --dry_run
+        --corrected_dir gs://aic-amazon/data/corrected_2018/ \\
+        --data_dirs gs://aic-amazon/data/fullgrid_v3/allpreds_2018/ \\
+        --output_root gs://aic-amazon/data/fullgrid_v4/ \\
+        --features im_foo,im_bar --dry_run
 
-    # Patch every year, 8 shards at a time.
-    python scripts/preprocessing/patch_features.py \\
-        --corrected_dir gs://aic-amazon/data/corrected_v3/ \\
-        --data_dirs gs://aic-amazon/data/fullgrid_v2/allpreds_20{18,19,20,21,22,23,24}/ \\
-        --output_root gs://aic-amazon/data/fullgrid_v3/ \\
-        --features im_Elevation,im_accessibility,im_gov_type --workers 8
+    # Patch each year from its own corrected export, 8 shards at a time.
+    for y in 2013 2014 ...; do
+      python scripts/preprocessing/patch_features.py \\
+          --corrected_dir gs://aic-amazon/data/corrected_$y/ \\
+          --data_dirs gs://aic-amazon/data/fullgrid_v3/allpreds_$y/ \\
+          --output_root gs://aic-amazon/data/fullgrid_v4/ \\
+          --features im_foo,im_bar --workers 8
+    done
 """
 
 import argparse
 import json
 import multiprocessing as mp
 import os
+import shutil
 import sys
+import tempfile
+from collections import defaultdict
 
 import numpy as np
 import tensorflow as tf
 
-try:  # only needed to declare newly added bands in schema.pbtxt
+try:  # needed for the schema/stats sidecars
     from google.protobuf import text_format
-    from tensorflow_metadata.proto.v0 import schema_pb2
+    from tensorflow_metadata.proto.v0 import schema_pb2, statistics_pb2
 except ImportError:  # pragma: no cover - environment without tfmd
-    text_format = schema_pb2 = None
+    text_format = schema_pb2 = statistics_pb2 = None
+
+DEFAULT_HIST_BUCKETS = 10  # tfdv's default for both STANDARD and QUANTILES
 
 
 def _compression(path):
     return "GZIP" if path.endswith(".gz") else ""
+
+
+def _examples(path):
+    """Yield every tf.train.Example in one tfrecord file."""
+    for rec in tf.data.TFRecordDataset([path], compression_type=_compression(path)):
+        yield tf.train.Example.FromString(rec.numpy())
+
+
+def _first_example(path):
+    for example in _examples(path):
+        return example
+    raise ValueError(f"{path} is empty")
 
 
 def _list_shards(directory, pattern="*.tfrecord.gz"):
@@ -73,6 +100,19 @@ def _list_shards(directory, pattern="*.tfrecord.gz"):
     if not shards:
         raise ValueError(f"no shards matching {pattern!r} in {directory}")
     return shards
+
+
+def _md_id(feats):
+    return str(feats["md_id"].int64_list.value[0])
+
+
+def _is_int(kind):
+    return kind == "int64_list"
+
+
+def _require_tfmd(what):
+    if statistics_pb2 is None:
+        raise ImportError(f"tensorflow_metadata is required to {what}")
 
 
 def _feature_values(feature):
@@ -89,7 +129,7 @@ def _as_kind(values, kind):
     The corrected table is float32 for every band, but protobuf type-checks
     repeated fields: extending an `int64_list` with python floats raises.
     """
-    if kind == "int64_list":
+    if _is_int(kind):
         return [int(round(float(v))) for v in values.tolist()]
     if kind == "float_list":
         return [float(v) for v in values.tolist()]
@@ -103,39 +143,33 @@ def _set_values(feature, kind, values):
     target.extend(_as_kind(values, kind))
 
 
-def infer_corrected_features(corrected_shards):
-    """Every `im_*` band present in the first record of the static export."""
-    for rec in tf.data.TFRecordDataset(corrected_shards[:1],
-                                       compression_type=_compression(corrected_shards[0])):
-        example = tf.train.Example.FromString(rec.numpy())
-        return sorted(k for k in example.features.feature if k.startswith("im_"))
-    raise ValueError("corrected export is empty")
-
+# ---------------------------------------------------------------------------
+# Corrected table
+# ---------------------------------------------------------------------------
 
 def build_corrected_table(corrected_dir, features, cache_dir, pattern):
-    """Materialize the corrected corrected bands as an mmap-able array.
+    """Materialize the corrected bands as an mmap-able array.
 
-    Returns (npy_path, index_path). The array is (n_tiles, n_features, width)
-    float32; the index maps str(md_id) -> row, and the sidecar also records
-    each band's protobuf oneof kind, which is the only way to know what type a
-    band added to a year export should have. Written to disk rather than held
-    in memory so that worker processes share one copy via the page cache
+    Returns (npy_path, index_path, meta). The array is (n_tiles, n_features,
+    width) float32; meta["index"] maps str(md_id) -> row, and meta["kinds"]
+    records each band's protobuf oneof kind, which is the only way to know what
+    type a band added to a year export should have. Written to disk rather than
+    held in memory so that worker processes share one copy via the page cache
     instead of each inheriting their own (~800 MB for 1800 tiles x 7 bands).
     """
     shards = _list_shards(corrected_dir, pattern)
     if not features:
-        features = infer_corrected_features(shards)
+        features = sorted(k for k in _first_example(shards[0]).features.feature
+                          if k.startswith("im_"))
         print(f"inferred corrected features: {', '.join(features)}")
 
     rows, index, width, kinds = [], {}, None, {}
     for shard in shards:
-        for rec in tf.data.TFRecordDataset([shard],
-                                           compression_type=_compression(shard)):
-            example = tf.train.Example.FromString(rec.numpy())
+        for example in _examples(shard):
             feats = example.features.feature
             if "md_id" not in feats:
                 raise ValueError(f"{shard}: corrected record has no md_id")
-            md_id = str(feats["md_id"].int64_list.value[0])
+            md_id = _md_id(feats)
             if md_id in index:
                 raise ValueError(
                     f"duplicate md_id {md_id} in the corrected export -- the "
@@ -163,25 +197,32 @@ def build_corrected_table(corrected_dir, features, cache_dir, pattern):
                 band.append(np.asarray(values, dtype=np.float32))
             index[md_id] = len(rows)
             rows.append(np.stack(band))
+    if not rows:
+        raise ValueError(f"corrected export {corrected_dir} is empty")
 
     table = np.stack(rows)  # (n_tiles, n_features, width)
-    tf.io.gfile.makedirs(cache_dir)
+    os.makedirs(cache_dir, exist_ok=True)
     npy_path = os.path.join(cache_dir, "corrected_table.npy")
     index_path = os.path.join(cache_dir, "corrected_index.json")
     np.save(npy_path, table)
+    meta = {"index": index, "features": list(features),
+            "width": width, "kinds": kinds}
     with open(index_path, "w") as f:
-        json.dump({"index": index, "features": list(features),
-                   "width": width, "kinds": kinds}, f)
-    for name, kind in kinds.items():
-        if kind == "int64_list":
-            peak = float(np.abs(table[:, list(features).index(name)]).max())
+        json.dump(meta, f)
+    for i, name in enumerate(features):
+        if _is_int(kinds[name]):
+            peak = float(np.abs(table[:, i]).max())
             if peak > 2 ** 24:
                 print(f"  WARNING: {name} is int64 and reaches {peak:.0f}; "
                       f"the float32 table cannot round-trip it exactly")
     print(f"corrected table: {table.shape} tiles x features x px "
           f"({table.nbytes / 1e6:.0f} MB) -> {npy_path}")
-    return npy_path, index_path
+    return npy_path, index_path, meta
 
+
+# ---------------------------------------------------------------------------
+# Shard patching (runs in workers)
+# ---------------------------------------------------------------------------
 
 _WORKER = {}
 
@@ -196,11 +237,16 @@ def _init_worker(npy_path, index_path):
 
 
 def patch_shard(job):
-    """Rewrite one shard with the corrected bands replaced. Returns a stat dict."""
+    """Rewrite one shard with the corrected bands replaced. Returns a stat dict.
+
+    `rows` lists the table row written into each matched record, so the
+    caller can compute the patched bands' stats without re-reading the output.
+    """
     src, dst, dry_run, allow_missing = job
     table, index = _WORKER["table"], _WORKER["index"]
     features, kinds = _WORKER["features"], _WORKER["kinds"]
     stats = {"shard": os.path.basename(src), "records": 0, "missing": 0,
+             "rows": [],
              "changed": {name: 0 for name in features},
              "added": {name: 0 for name in features}}
 
@@ -210,12 +256,10 @@ def patch_shard(job):
         writer = tf.io.TFRecordWriter(
             dst, tf.io.TFRecordOptions(compression_type=_compression(dst)))
     try:
-        for rec in tf.data.TFRecordDataset([src],
-                                           compression_type=_compression(src)):
-            example = tf.train.Example.FromString(rec.numpy())
+        for example in _examples(src):
             feats = example.features.feature
             stats["records"] += 1
-            md_id = str(feats["md_id"].int64_list.value[0])
+            md_id = _md_id(feats)
             row = index.get(md_id)
             if row is None:
                 stats["missing"] += 1
@@ -225,6 +269,7 @@ def patch_shard(job):
                         f"export (pass --allow_missing to copy such records "
                         f"through unpatched)")
             else:
+                stats["rows"].append(row)
                 for i, name in enumerate(features):
                     new = table[row, i]
                     if name not in feats:
@@ -258,18 +303,13 @@ def verify_shard(src, dst, features):
     legitimately introduce a feature the year export never had, but only one
     that was asked for. Nothing may ever disappear.
     """
-    a = next(iter(tf.data.TFRecordDataset([src], compression_type=_compression(src))))
-    b = next(iter(tf.data.TFRecordDataset([dst], compression_type=_compression(dst))))
-    ea = tf.train.Example.FromString(a.numpy())
-    eb = tf.train.Example.FromString(b.numpy())
-    src_names, dst_names = set(ea.features.feature), set(eb.features.feature)
-    dropped = src_names - dst_names
+    fa = _first_example(src).features.feature
+    fb = _first_example(dst).features.feature
+    dropped = set(fa) - set(fb)
     if dropped:
         raise AssertionError(f"{dst}: features disappeared: {sorted(dropped)}")
-    added = dst_names - src_names
-    differing = added | {k for k in src_names
-                         if ea.features.feature[k].SerializeToString()
-                         != eb.features.feature[k].SerializeToString()}
+    differing = (set(fb) - set(fa)) | {
+        k for k in fa if fa[k].SerializeToString() != fb[k].SerializeToString()}
     unexpected = differing - set(features)
     if unexpected:
         raise AssertionError(f"{dst}: unexpected features changed: {unexpected}")
@@ -278,12 +318,23 @@ def verify_shard(src, dst, features):
 
 def features_missing_from(directory, features, pattern):
     """Which of `features` the first record of `directory` does not carry."""
-    shard = _list_shards(directory, pattern)[0]
-    for rec in tf.data.TFRecordDataset([shard],
-                                       compression_type=_compression(shard)):
-        present = set(tf.train.Example.FromString(rec.numpy()).features.feature)
-        return [name for name in features if name not in present]
-    raise ValueError(f"{directory}: first shard is empty")
+    present = _first_example(_list_shards(directory, pattern)[0]).features.feature
+    return [name for name in features if name not in present]
+
+
+# ---------------------------------------------------------------------------
+# Sidecars: schema.pbtxt / schema.json / stats.pbtxt
+# ---------------------------------------------------------------------------
+
+def _read_pbtxt(path, message):
+    with tf.io.gfile.GFile(path) as f:
+        text_format.Parse(f.read(), message)
+    return message
+
+
+def _write_text(path, text):
+    with tf.io.gfile.GFile(path, "w") as f:
+        f.write(text)
 
 
 def write_schema(src_dir, dst_dir, added, kinds, width, dry_run):
@@ -294,177 +345,326 @@ def write_schema(src_dir, dst_dir, added, kinds, width, dry_run):
     unreadable, and one that omits a band this run added leaves that band
     unparsed no matter that it is in the records.
     """
-    src_schema = os.path.join(src_dir, 'schema.pbtxt')
-    dst_schema = os.path.join(dst_dir, 'schema.pbtxt')
+    src_schema = os.path.join(src_dir, "schema.pbtxt")
+    dst_schema = os.path.join(dst_dir, "schema.pbtxt")
+    note = f" (+{', '.join(added)})" if added else " (copy)"
     if not tf.io.gfile.exists(src_schema):
         print(f"  no schema.pbtxt in {src_dir} -- the patched dir will need "
               f"one before training can read it")
         return
     if dry_run:
-        print(f"  would write {dst_schema}"
-              + (f" (+{', '.join(added)})" if added else " (copy)"))
+        print(f"  would write {dst_schema}{note}")
         return
     tf.io.gfile.makedirs(dst_dir)
     if not added:
         tf.io.gfile.copy(src_schema, dst_schema, overwrite=True)
     else:
-        if schema_pb2 is None:
-            raise ImportError(
-                "tensorflow_metadata is required to declare added bands in "
-                "schema.pbtxt; install it or pass --skip_schema and edit the "
-                "schema by hand")
-        schema = schema_pb2.Schema()
-        with tf.io.gfile.GFile(src_schema) as f:
-            text_format.Parse(f.read(), schema)
+        _require_tfmd("declare added bands in schema.pbtxt; pass --skip_schema "
+                      "and edit the schema by hand otherwise")
+        schema = _read_pbtxt(src_schema, schema_pb2.Schema())
         present = {f.name for f in schema.feature}
         for name in added:
             if name in present:
                 continue
             feature = schema.feature.add()
             feature.name = name
-            feature.type = (schema_pb2.FeatureType.INT
-                            if kinds[name] == 'int64_list'
+            feature.type = (schema_pb2.FeatureType.INT if _is_int(kinds[name])
                             else schema_pb2.FeatureType.FLOAT)
             feature.presence.min_fraction = 1.0
             feature.presence.min_count = 1
             feature.shape.dim.add().size = width
-        with tf.io.gfile.GFile(dst_schema, 'w') as f:
-            f.write(text_format.MessageToString(schema))
-    print(f"  wrote {dst_schema}"
-          + (f" (+{', '.join(added)})" if added else " (copy)"))
+        _write_text(dst_schema, text_format.MessageToString(schema))
+    print(f"  wrote {dst_schema}{note}")
 
-    src_json = os.path.join(src_dir, 'schema.json')
-    if added and tf.io.gfile.exists(src_json):
-        with tf.io.gfile.GFile(src_json) as f:
-            meta = json.load(f)
-        for name in added:
-            meta.setdefault('features', {}).setdefault(
-                name, 'int64' if kinds[name] == 'int64_list' else 'float')
-        with tf.io.gfile.GFile(os.path.join(dst_dir, 'schema.json'), 'w') as f:
-            json.dump(meta, f, indent=2)
-    elif tf.io.gfile.exists(src_json):
-        tf.io.gfile.copy(src_json, os.path.join(dst_dir, 'schema.json'),
-                         overwrite=True)
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--corrected_dir', required=True,
-                        help='directory of corrected tfrecords, keyed by md_id')
-    parser.add_argument('--data_dirs', nargs='+', required=True,
-                        help='year directories to patch (never modified)')
-    parser.add_argument('--output_root', required=True,
-                        help='patched years are written to <root>/<dir name>/')
-    parser.add_argument('--features', default=None,
-                        help='comma-separated bands to replace; default: every '
-                             'im_* band in the corrected export')
-    parser.add_argument('--tfrecord_pattern', default='*.tfrecord.gz')
-    parser.add_argument('--cache_dir', default=None,
-                        help='where to materialize the corrected table '
-                             '(default: <output_root>/_corrected_cache, must be local)')
-    parser.add_argument('--workers', type=int, default=1)
-    parser.add_argument('--limit_shards', type=int, default=None,
-                        help='patch only the first N shards per year (for testing)')
-    parser.add_argument('--allow_missing', action='store_true',
-                        help='copy records whose md_id is absent from the corrected '
-                             'export through unpatched instead of failing')
-    parser.add_argument('--skip_schema', action='store_true',
-                        help='do not copy/patch schema.pbtxt into the output dirs')
-    parser.add_argument('--dry_run', action='store_true',
-                        help='report coverage and what would change; write nothing')
-    args = parser.parse_args()
-
-    features = ([f.strip() for f in args.features.split(',')]
-                if args.features else None)
-    cache_dir = args.cache_dir or os.path.join(
-        args.output_root if not args.output_root.startswith('gs://') else '.',
-        '_corrected_cache')
-    npy_path, index_path = build_corrected_table(
-        args.corrected_dir, features, cache_dir, args.tfrecord_pattern)
-    with open(index_path) as f:
+    src_json = os.path.join(src_dir, "schema.json")
+    dst_json = os.path.join(dst_dir, "schema.json")
+    if not tf.io.gfile.exists(src_json):
+        return
+    if not added:
+        tf.io.gfile.copy(src_json, dst_json, overwrite=True)
+        return
+    with tf.io.gfile.GFile(src_json) as f:
         meta = json.load(f)
-    features = meta['features']
-    kinds = meta['kinds']
-    width = meta['width']
-    n_tiles = len(meta['index'])
+    for name in added:
+        meta.setdefault("features", {}).setdefault(
+            name, "int64" if _is_int(kinds[name]) else "float")
+    with tf.io.gfile.GFile(dst_json, "w") as f:
+        json.dump(meta, f, indent=2)
 
-    jobs, dirs, additions = [], [], {}
+
+def _quantile_bucket_count(stats_list):
+    """Bucket count of the first QUANTILES histogram in an existing stats file."""
+    for dataset in stats_list.datasets:
+        for feature in dataset.features:
+            for hist in feature.num_stats.histograms:
+                if hist.type == statistics_pb2.Histogram.QUANTILES and hist.buckets:
+                    return len(hist.buckets)
+    return DEFAULT_HIST_BUCKETS
+
+
+def feature_stats_proto(name, values, kind, n_records, width,
+                        n_buckets=DEFAULT_HIST_BUCKETS):
+    """A tfdv-layout FeatureNameStatistics for one band's patched values.
+
+    `values` is every value written for the band in the dir (any shape).
+    Mirrors what tfdv emits for a fixed-length numeric feature: common_stats
+    with a QUANTILES num_values_histogram, moments, then a STANDARD
+    (equal-width) and a QUANTILES (equal-count) histogram. The quantiles are
+    exact rather than sketched. Only finite values count, as in data_stats.
+    """
+    _require_tfmd("write stats.pbtxt; pass --skip_stats to opt out")
+    v = np.asarray(values, dtype=np.float64).ravel()
+    if _is_int(kind):
+        v = np.round(v)  # what _as_kind actually wrote
+    v = v[np.isfinite(v)]
+
+    fs = statistics_pb2.FeatureNameStatistics()
+    fs.path.step.append(name)
+    fs.type = (statistics_pb2.FeatureNameStatistics.INT if _is_int(kind)
+               else statistics_pb2.FeatureNameStatistics.FLOAT)
+    num = fs.num_stats
+    common = num.common_stats
+    common.num_non_missing = n_records
+    common.min_num_values = width
+    common.max_num_values = width
+    common.avg_num_values = float(width)
+    common.tot_num_values = v.size
+    nvh = common.num_values_histogram
+    nvh.type = statistics_pb2.Histogram.QUANTILES
+    for _ in range(n_buckets):
+        b = nvh.buckets.add()
+        b.low_value = b.high_value = float(width)
+        b.sample_count = n_records / n_buckets
+    if v.size == 0:
+        return fs
+
+    num.mean = float(v.mean())
+    num.std_dev = float(v.std())
+    num.num_zeros = int(np.count_nonzero(v == 0))
+    num.min = float(v.min())
+    num.max = float(v.max())
+    num.median = float(np.median(v))
+
+    counts, edges = np.histogram(v, bins=n_buckets)
+    standard = num.histograms.add()
+    for lo, hi, c in zip(edges[:-1], edges[1:], counts):
+        b = standard.buckets.add()
+        b.low_value, b.high_value, b.sample_count = float(lo), float(hi), float(c)
+
+    qedges = np.quantile(v, np.linspace(0, 1, n_buckets + 1))
+    quantiles = num.histograms.add()
+    quantiles.type = statistics_pb2.Histogram.QUANTILES
+    for lo, hi in zip(qedges[:-1], qedges[1:]):
+        b = quantiles.buckets.add()
+        b.low_value, b.high_value = float(lo), float(hi)
+        b.sample_count = v.size / n_buckets
+    return fs
+
+
+def write_stats(src_dir, dst_dir, rows, table, meta, n_records, dry_run):
+    """Write `dst_dir/stats.pbtxt`: the source's, with patched bands recomputed.
+
+    Existing entries for patched bands are replaced in place (order kept); new
+    bands are appended. Every other entry is carried over untouched.
+    """
+    src_stats = os.path.join(src_dir, "stats.pbtxt")
+    dst_stats = os.path.join(dst_dir, "stats.pbtxt")
+    if not tf.io.gfile.exists(src_stats):
+        print(f"  no stats.pbtxt in {src_dir} -- skipping stats")
+        return
+    _require_tfmd("write stats.pbtxt; pass --skip_stats to opt out")
+    stats_list = _read_pbtxt(src_stats, statistics_pb2.DatasetFeatureStatisticsList())
+    if len(stats_list.datasets) != 1:
+        raise ValueError(f"{src_stats}: expected 1 dataset, found "
+                         f"{len(stats_list.datasets)}")
+    dataset = stats_list.datasets[0]
+    n_buckets = _quantile_bucket_count(stats_list)
+    by_name = {f.path.step[0]: f for f in dataset.features if f.path.step}
+
+    rows = np.sort(np.asarray(rows))
+    for i, name in enumerate(meta["features"]):
+        new = feature_stats_proto(name, table[rows, i], meta["kinds"][name],
+                                  n_records, meta["width"], n_buckets)
+        old = by_name.get(name)
+        if old is None:
+            dataset.features.add().CopyFrom(new)
+            print(f"  {name:24s} added     mean {new.num_stats.mean:.6g}  "
+                  f"std {new.num_stats.std_dev:.6g}  "
+                  f"median {new.num_stats.median:.6g}")
+        else:
+            o = old.num_stats
+            before = (o.mean, o.std_dev, o.median)  # CopyFrom overwrites `o`
+            old.CopyFrom(new)
+            print(f"  {name:24s} updated   mean {before[0]:.6g} -> "
+                  f"{new.num_stats.mean:.6g}  std {before[1]:.6g} -> "
+                  f"{new.num_stats.std_dev:.6g}  median {before[2]:.6g} -> "
+                  f"{new.num_stats.median:.6g}")
+    if dry_run:
+        print(f"  would write {dst_stats}")
+        return
+    tf.io.gfile.makedirs(dst_dir)
+    _write_text(dst_stats, text_format.MessageToString(stats_list))
+    print(f"  wrote {dst_stats}")
+
+
+# ---------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------
+
+def plan_jobs(args, features):
+    """Per-dir (src, out, bands to add) plus the flat list of shard jobs."""
+    dirs, jobs = [], []
     for data_dir in args.data_dirs:
-        name = os.path.basename(data_dir.rstrip('/'))
-        out_dir = os.path.join(args.output_root, name)
+        out_dir = os.path.join(args.output_root,
+                               os.path.basename(data_dir.rstrip("/")))
+        if out_dir.rstrip("/") == data_dir.rstrip("/"):
+            raise ValueError(f"output dir {out_dir} is the source dir; "
+                             f"refusing to patch in place")
         shards = _list_shards(data_dir, args.tfrecord_pattern)
         if args.limit_shards:
             shards = shards[:args.limit_shards]
-        missing_feats = features_missing_from(data_dir, features,
-                                              args.tfrecord_pattern)
-        if missing_feats:
-            additions[data_dir] = missing_feats
-        dirs.append((data_dir, out_dir, missing_feats))
-        for shard in shards:
-            dst = os.path.join(out_dir, os.path.basename(shard))
-            jobs.append((shard, dst, args.dry_run, args.allow_missing))
-    print(f"{len(jobs)} shards across {len(args.data_dirs)} dirs; "
-          f"{n_tiles} tiles in the corrected table; features: {', '.join(features)}")
-    for data_dir, missing_feats in additions.items():
-        print(f"  {data_dir}: ADDING {', '.join(missing_feats)} "
-              f"(absent from that export)")
-    if additions and args.allow_missing:
-        print("\n!! --allow_missing together with added bands writes a ragged "
-              "directory: records whose md_id is not in the corrected export "
-              "keep no value at all for the added bands, and "
-              "tf.io.FixedLenFeature raises on a record that is missing a "
-              "feature. Only safe if the corrected export covers every tile.")
-    if args.dry_run:
-        print("DRY RUN -- nothing will be written")
+        dirs.append((data_dir, out_dir,
+                     features_missing_from(data_dir, features,
+                                           args.tfrecord_pattern)))
+        jobs.extend((shard, os.path.join(out_dir, os.path.basename(shard)),
+                     args.dry_run, args.allow_missing) for shard in shards)
+    return dirs, jobs
 
-    if args.workers > 1:
-        with mp.Pool(args.workers, initializer=_init_worker,
+
+def run_jobs(jobs, npy_path, index_path, workers):
+    if workers > 1:
+        with mp.Pool(workers, initializer=_init_worker,
                      initargs=(npy_path, index_path)) as pool:
-            results = pool.map(patch_shard, jobs)
-    else:
-        _init_worker(npy_path, index_path)
-        results = [patch_shard(job) for job in jobs]
+            return pool.map(patch_shard, jobs)
+    _init_worker(npy_path, index_path)
+    return [patch_shard(job) for job in jobs]
 
-    records = sum(r['records'] for r in results)
-    missing = sum(r['missing'] for r in results)
+
+def report(results, features, additions):
+    records = sum(r["records"] for r in results)
+    missing = sum(r["missing"] for r in results)
     print(f"\npatched {records} records ({missing} unmatched md_id)")
     for name in features:
-        changed = sum(r['changed'][name] for r in results)
-        added = sum(r['added'][name] for r in results)
+        changed = sum(r["changed"][name] for r in results)
+        added = sum(r["added"][name] for r in results)
         line = f"  {name:24s} changed in {changed:6d} / {records} records"
         if added:
             line += f", added to {added}"
         elif changed == 0:
-            line += ('  <- IDENTICAL everywhere; the corrected export did not '
-                     'actually change this band')
+            line += ("  <- IDENTICAL everywhere; the corrected export did not "
+                     "actually change this band")
         print(line)
-
     if missing and additions:
-        added_names = sorted({n for v in additions.values() for n in v})
+        added_names = sorted({n for v in additions for n in v})
         print(f"\n!! {missing} records were copied through unpatched and so "
               f"carry no {', '.join(added_names)}. Parsing the patched dirs "
               f"with a schema that declares those bands WILL FAIL on those "
               f"records; drop those tiles or extend the corrected export.")
 
-    if not args.skip_schema:
-        print()
-        for src_dir, out_dir, missing_feats in dirs:
-            write_schema(src_dir, out_dir, missing_feats, kinds, width,
+
+def write_sidecars(args, dirs, jobs, results, npy_path, meta):
+    per_dir = defaultdict(lambda: {"rows": [], "records": 0, "missing": 0})
+    for (_, dst, _, _), r in zip(jobs, results):
+        d = per_dir[os.path.dirname(dst)]
+        d["rows"].extend(r["rows"])
+        d["records"] += r["records"]
+        d["missing"] += r["missing"]
+
+    table = np.load(npy_path, mmap_mode="r") if not args.skip_stats else None
+    for src_dir, out_dir, added in dirs:
+        print(f"\n{out_dir}")
+        if not args.skip_schema:
+            write_schema(src_dir, out_dir, added, meta["kinds"], meta["width"],
                          args.dry_run)
+        if args.skip_stats:
+            continue
+        d = per_dir[out_dir]
+        if args.limit_shards:
+            print("  --limit_shards: dir only partially patched -- skipping stats")
+        elif d["missing"]:
+            print(f"  {d['missing']} records unmatched and not patched -- "
+                  f"skipping stats (they would not reflect those records)")
+        else:
+            write_stats(src_dir, out_dir, d["rows"], table, meta, d["records"],
+                        args.dry_run)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--corrected_dir", required=True,
+                        help="directory of corrected tfrecords, keyed by md_id")
+    parser.add_argument("--data_dirs", nargs="+", required=True,
+                        help="year directories to patch (never modified)")
+    parser.add_argument("--output_root", required=True,
+                        help="patched years are written to <root>/<dir name>/")
+    parser.add_argument("--features", default=None,
+                        help="comma-separated bands to replace/add; default: "
+                             "every im_* band in the corrected export")
+    parser.add_argument("--tfrecord_pattern", default="*.tfrecord.gz")
+    parser.add_argument("--cache_dir", default=None,
+                        help="local dir to materialize the corrected table in "
+                             "(default: a fresh temp dir, removed on exit)")
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--limit_shards", type=int, default=None,
+                        help="patch only the first N shards per year (for "
+                             "testing; stats are then skipped)")
+    parser.add_argument("--allow_missing", action="store_true",
+                        help="copy records whose md_id is absent from the corrected "
+                             "export through unpatched instead of failing")
+    parser.add_argument("--skip_schema", action="store_true",
+                        help="do not copy/patch schema.pbtxt into the output dirs")
+    parser.add_argument("--skip_stats", action="store_true",
+                        help="do not write a patched stats.pbtxt into the output dirs")
+    parser.add_argument("--dry_run", action="store_true",
+                        help="report coverage, what would change and the stats "
+                             "diff; write nothing")
+    args = parser.parse_args(argv)
+
+    features = ([f.strip() for f in args.features.split(",")]
+                if args.features else None)
+    cache_dir = args.cache_dir or tempfile.mkdtemp(prefix="patch_features_")
+    try:
+        npy_path, index_path, meta = build_corrected_table(
+            args.corrected_dir, features, cache_dir, args.tfrecord_pattern)
+        features = meta["features"]
+
+        dirs, jobs = plan_jobs(args, features)
+        additions = [added for _, _, added in dirs if added]
+        print(f"{len(jobs)} shards across {len(dirs)} dirs; "
+              f"{len(meta['index'])} tiles in the corrected table; "
+              f"features: {', '.join(features)}")
+        for src_dir, _, added in dirs:
+            if added:
+                print(f"  {src_dir}: ADDING {', '.join(added)} "
+                      f"(absent from that export)")
+        if additions and args.allow_missing:
+            print("\n!! --allow_missing together with added bands writes a ragged "
+                  "directory: records whose md_id is not in the corrected export "
+                  "keep no value at all for the added bands, and "
+                  "tf.io.FixedLenFeature raises on a record that is missing a "
+                  "feature. Only safe if the corrected export covers every tile.")
+        if args.dry_run:
+            print("DRY RUN -- nothing will be written")
+
+        results = run_jobs(jobs, npy_path, index_path, args.workers)
+        report(results, features, additions)
+        write_sidecars(args, dirs, jobs, results, npy_path, meta)
+    finally:
+        if args.cache_dir is None:
+            shutil.rmtree(cache_dir, ignore_errors=True)
 
     if not args.dry_run:
-        for src, dst, _, _ in jobs[:min(3, len(jobs))]:
+        print()
+        for src, dst, _, _ in jobs[:3]:
             differing = verify_shard(src, dst, features)
             print(f"verified {os.path.basename(dst)}: "
                   f"only {sorted(differing) or 'nothing'} differs")
-        print("\nNEXT: regenerate the stats file for the patched dirs, e.g.\n"
-              "  python -m aic_risk_modeling.train.data_stats "
-              f"--data_dirs {os.path.join(args.output_root, '<year dir>')} "
-              "--output_path <...>/stats.json\n"
-              "and point config['stats_path'] at it (it otherwise defaults to "
-              "data_dirs[0]/stats.pbtxt).")
+        print("\nNEXT: re-pool the per-year stats into the training stats JSON, e.g.\n"
+              "  python scripts/preprocessing/pool_stats_pbtxt.py "
+              f"--data_dirs {os.path.join(args.output_root, 'allpreds_<year>')} ... "
+              "--output <...>/stats_<years>.json")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())
