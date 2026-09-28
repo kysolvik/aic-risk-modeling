@@ -96,6 +96,91 @@ def load_panel(path=PANEL, target="bd", prev_burn="union_sum", space="log1p"):
     return d
 
 
+TARGET_PANEL = os.path.join(os.path.dirname(__file__), "..", "..", "out", "target_panel", "panel.parquet")
+
+
+def load_target_panel(path=TARGET_PANEL, target="bd", space="logit", emit_through=None):
+    """`load_panel` for the long targets-only panel (build_target_panel.py, 2001+).
+
+    Same columns out (`y`, `zsoi`, `zprev`), but the prev-burn term is the chip's own
+    lagged pixel COUNT (`prev_bd`) rather than the fullgrid `im_BurnDate_-1_mean`
+    band, which does not exist here. The two agree to log-corr 0.986 on 2013-2023.
+    The target is a true pixel count/union, so the logit denominator is one chip.
+
+    `emit_through` adds predict-only years past the panel (e.g. 2026). Their drivers
+    are known in January -- SOI Oct-Dec of Y-1 from NOAA and the basin MCD64 count of
+    Y-1 from the panel -- but they have no target, so they live only in
+    `d.attrs["per_year"]` (for `build_offsets`) and never enter a fit or `evaluate`.
+    z-scores are taken over panel + emit years together; OLS with an intercept is
+    invariant to that affine choice, so it changes no fitted offset.
+    """
+    if space != "logit":
+        raise ValueError("the target panel only supports space='logit'")
+    raw = pd.read_parquet(path)
+    col = f"burn_{target}"
+    d = raw.dropna(subset=[col, "prev_bd", SOI_COL]).copy()
+    p = (d[col] + 0.5) / (CHIP_PIXELS + 1.0)
+    d["y"] = np.log(p / (1.0 - p))
+    d["burn_w"] = d[col].astype(float)          # chip weights for weighting="burn"
+
+    per_year = d.groupby("year").agg(soi=(SOI_COL, "first"), prev=("prev_bd", "mean"))
+    last = int(per_year.index.max())
+    if emit_through is not None and emit_through > last:
+        from aic_risk_modeling.preprocess.climate_indices import download_clim_indices
+        s = download_clim_indices("soi", last - 1, emit_through - 1)["metric"]
+        basin = raw.groupby("year")["burn_bd"].mean()
+        for y in range(last + 1, emit_through + 1):
+            ond = s[(s.index.year == y - 1) & (s.index.month >= 10)]
+            if len(ond) != 3 or (y - 1) not in basin.index:
+                raise ValueError(f"cannot emit {y}: needs SOI Oct-Dec {y - 1} and MCD64 {y - 1}")
+            per_year.loc[y] = {"soi": float(ond.mean()), "prev": float(basin.loc[y - 1])}
+        # the downloaded SOI must agree with the panel's on the overlap year
+        ond_last = s[(s.index.year == last - 1) & (s.index.month >= 10)].mean()
+        if not np.isclose(ond_last, per_year.loc[last, "soi"], atol=1e-9):
+            raise ValueError("NOAA SOI Oct-Dec disagrees with the panel -- calendar misaligned")
+    lprev = np.log1p(per_year.prev)
+    per_year["zsoi"] = (per_year.soi - per_year.soi.mean()) / per_year.soi.std()
+    per_year["zprev"] = (lprev - lprev.mean()) / lprev.std()
+    d["zsoi"] = d.year.map(per_year.zsoi)
+    d["zprev"] = d.year.map(per_year.zprev)
+    d.attrs["per_year"] = per_year.rename_axis("year").reset_index()
+    return d
+
+
+def _chip_weights(tr, weighting):
+    """Per-chip weights from TRAINING rows only (normalised to sum 1), or None.
+
+    "equal": every chip counts the same (the gamma_v1 recipe). "burn": each chip is
+    weighted by its mean burn count over the training years, so the year effect is
+    measured where the fire -- and the loss -- is. Equal weighting gives the ~43% of
+    chips averaging <10 px/yr (0.2% of burn) 43% of the weight, and never-burning
+    chips contribute exact zeros, which shrinks the year effect ~1/3.
+    """
+    if weighting == "equal":
+        return None
+    if weighting != "burn":
+        raise ValueError(f"unknown weighting {weighting!r}")
+    if "burn_w" not in tr:
+        raise ValueError("weighting='burn' needs the target panel (load_target_panel)")
+    w = tr.groupby("md_id")["burn_w"].mean()
+    if w.sum() <= 0:
+        raise ValueError("no burn in the training years; cannot burn-weight")
+    return w / w.sum()
+
+
+def _lstsq(A, y, row_w=None):
+    if row_w is None:
+        beta, *_ = np.linalg.lstsq(A, y, rcond=None)
+    else:
+        sw = np.sqrt(row_w)
+        beta, *_ = np.linalg.lstsq(A * sw[:, None], y * sw, rcond=None)
+    return beta
+
+
+def _wmean(v, w):
+    return float(v.mean()) if w is None else float((v * w).sum() / w.sum())
+
+
 def _design(frame, terms):
     cols = [np.ones(len(frame))]
     for a, b in terms:
@@ -103,7 +188,8 @@ def _design(frame, terms):
     return np.column_stack(cols)
 
 
-def evaluate(d, terms, protocol="loyo", exclude_prev_from_clim=False, min_train_years=5):
+def evaluate(d, terms, protocol="loyo", exclude_prev_from_clim=False, min_train_years=5,
+             weighting="equal"):
     """Out-of-sample fit of the year effect.
 
     Chip climatology is always computed from TRAINING years only -- an in-sample
@@ -111,6 +197,9 @@ def evaluate(d, terms, protocol="loyo", exclude_prev_from_clim=False, min_train_
     `exclude_prev_from_clim` the year t-1 is dropped too, which is what separates a
     genuine mean-reverting prev-burn signal from a climatology artifact (a high t-1
     raises the climatology and mechanically depresses the t residual).
+
+    `weighting` (see `_chip_weights`) sets both the WLS row weights and the average
+    that defines a year's effect; weights come from the training rows only.
     """
     years = sorted(d.year.unique())
     pred_year, act_year, betas = {}, {}, []
@@ -126,10 +215,13 @@ def evaluate(d, terms, protocol="loyo", exclude_prev_from_clim=False, min_train_
         te = te[te.md_id.isin(clim.index)]
         te_res = (te.y - te.md_id.map(clim)).to_numpy()
 
-        beta, *_ = np.linalg.lstsq(_design(tr, terms), tr_res, rcond=None)
+        w = _chip_weights(tr, weighting)
+        tr_w = None if w is None else tr.md_id.map(w).to_numpy()
+        te_w = None if w is None else te.md_id.map(w).to_numpy()
+        beta = _lstsq(_design(tr, terms), tr_res, tr_w)
         betas.append(beta)
-        pred_year[t] = float((_design(te, terms) @ beta).mean())
-        act_year[t] = float(te_res.mean())
+        pred_year[t] = _wmean(_design(te, terms) @ beta, te_w)
+        act_year[t] = _wmean(te_res, te_w)
 
     ks = sorted(pred_year)
     P = np.array([pred_year[k] for k in ks])
@@ -165,18 +257,25 @@ PREV = [("zprev", None)]
 BOTH = [("zsoi", None), ("zprev", None)]
 
 
-def fit_final(d, fit_years, terms=BOTH):
+def fit_final(d, fit_years, terms=BOTH, weighting="equal"):
     """Single in-sample fit over the training years -> the coefficients we ship."""
     tr = d[d.year.isin(fit_years)]
     clim = tr.groupby("md_id")["y"].mean()
     res = (tr.y - tr.md_id.map(clim)).to_numpy()
-    beta, *_ = np.linalg.lstsq(_design(tr, terms), res, rcond=None)
+    w = _chip_weights(tr, weighting)
+    beta = _lstsq(_design(tr, terms), res, None if w is None else tr.md_id.map(w).to_numpy())
     return beta, clim
 
 
 def build_offsets(d, beta, terms=BOTH, center_years=None):
-    """Per-year gamma, mean-centered over `center_years` (see module docstring)."""
-    per_year = d.groupby("year").first().reset_index()
+    """Per-year gamma, mean-centered over `center_years` (see module docstring).
+
+    Emits every year in `d.attrs["per_year"]` when present (the target panel's
+    predict-only years), otherwise every year in `d`.
+    """
+    per_year = d.attrs.get("per_year")
+    if per_year is None:
+        per_year = d.groupby("year").first().reset_index()
     vals = _design(per_year, terms) @ beta
     out = dict(zip(per_year.year.astype(int), vals))
     ref = center_years if center_years is not None else sorted(out)
@@ -276,6 +375,16 @@ def main():
     p.add_argument("--space", default="logit", choices=["log1p", "logit"])
     p.add_argument("--fit_years", default="2013-2022", help="inclusive range, e.g. 2013-2022")
     p.add_argument("--out", default=None, help="write gamma JSON here")
+    p.add_argument("--panel_kind", default="chip", choices=["chip", "target"],
+                   help="chip = fullgrid chip panel (default, gamma_v1 recipe); target = "
+                        "long targets-only panel from build_target_panel.py (2001+)")
+    p.add_argument("--center_years", default=None,
+                   help="inclusive range to mean-center offsets over (default = fit_years); "
+                        "for a long fit, pass the network's training years")
+    p.add_argument("--weighting", default="equal", choices=["equal", "burn"],
+                   help="chip weighting of the year effect (burn needs --panel_kind target)")
+    p.add_argument("--emit_through", type=int, default=None,
+                   help="target panel only: also emit predict-only years up to this one")
     a = p.parse_args()
 
     if a.check:
@@ -286,17 +395,32 @@ def main():
 
     lo, hi = (int(v) for v in a.fit_years.split("-"))
     fit_years = list(range(lo, hi + 1))
-    d = load_panel(a.panel, target=a.target, prev_burn=a.prev_burn, space=a.space)
+    if a.panel_kind == "target":
+        panel = a.panel if a.panel != PANEL else TARGET_PANEL
+        d = load_target_panel(panel, target=a.target, space=a.space, emit_through=a.emit_through)
+        val = d[d.year <= hi]                 # validate on the fit window only
+    else:
+        if a.emit_through is not None:
+            sys.exit("--emit_through needs --panel_kind target")
+        d = load_panel(a.panel, target=a.target, prev_burn=a.prev_burn, space=a.space)
+        val = d
+    if a.center_years:
+        clo, chi = (int(v) for v in a.center_years.split("-"))
+        center_years = list(range(clo, chi + 1))
+    else:
+        center_years = fit_years
 
-    beta, _ = fit_final(d, fit_years)
+    if a.weighting != "equal" and a.panel_kind != "target":
+        sys.exit("--weighting burn needs --panel_kind target")
+    beta, _ = fit_final(d, fit_years, weighting=a.weighting)
     if beta[2] >= 0:
         sys.exit(f"REFUSING to emit: b_prev = {beta[2]:+.4f} >= 0. A positive prev-burn "
                  "coefficient is persistence, which lags every turn. Investigate before shipping.")
 
-    fwd = evaluate(d, BOTH, protocol="forward", exclude_prev_from_clim=True)
-    loyo = evaluate(d, BOTH, exclude_prev_from_clim=True)
+    fwd = evaluate(val, BOTH, protocol="forward", exclude_prev_from_clim=True, weighting=a.weighting)
+    loyo = evaluate(val, BOTH, exclude_prev_from_clim=True, weighting=a.weighting)
     jack = jackknife_r(fwd)
-    offsets, level = build_offsets(d, beta, center_years=fit_years)
+    offsets, level = build_offsets(d, beta, center_years=center_years)
 
     doc = {
         "version": "gamma_v1",
@@ -324,10 +448,18 @@ def main():
             "actual_amplitude": fwd["actual_amplitude"],
         },
     }
+    if a.panel_kind == "target":             # chip-mode JSON stays byte-identical
+        doc["version"] = "gamma_long_v1" if a.weighting == "equal" else "gamma_long_burn_v1"
+        doc["fit"].update(panel_kind="target", weighting=a.weighting, panel=os.path.relpath(panel), prev_burn="bd_count",
+                          protocol="in-sample fit, forward-chained validation on fit_years only")
+        doc["centering"].update(center_years=center_years,
+                                note="offsets are mean-centered over center_years (the network's "
+                                     "training years); the level is absorbed by the network bias")
+        doc["emit_years"] = sorted(offsets)
     print(json.dumps(doc["coeffs"], indent=2))
     print(f"forward-chained r_year={fwd['r_year']:.3f} "
           f"(jackknife {jack[0]:.3f}..{jack[1]:.3f}, {jack[2]} carries it)  "
-          f"LOYO all 13 yrs={loyo['r_year']:.3f}")
+          f"LOYO all {len(loyo['years'])} yrs={loyo['r_year']:.3f}")
     print(f"  {len(fwd['years'])} evaluated years, {fwd['n_turns']} transitions, "
           f"turns={fwd['turns']}/{fwd['n_turns']}  "
           f"amplitude={fwd['amplitude']:.2f}x (actual {fwd['actual_amplitude']:.2f}x)")
