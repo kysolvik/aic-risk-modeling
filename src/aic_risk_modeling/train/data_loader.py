@@ -25,6 +25,7 @@ Typical workflow:
 
 from __future__ import annotations
 
+import math
 import os
 import logging
 from typing import List, Dict,  Optional, Callable
@@ -34,7 +35,7 @@ from tensorflow_metadata.proto.v0 import schema_pb2
 from google.protobuf import text_format
 from google.protobuf.json_format import MessageToDict
 
-from aic_risk_modeling.train import transforms
+from aic_risk_modeling.train import data_norm, transforms
 
 logger = logging.getLogger(__name__)
 
@@ -371,6 +372,315 @@ def build_type_weight_map(raw_type, type_weights, pos_weight):
                           weight)
     return weight
 
+# --- confidence weighting from several fire products ------------------------
+#
+# The target is an OR of three imperfect detectors of the same latent event
+# ("did this cell burn this year"): MCD64A1 burn scars, MOD14 active fire and
+# VIIRS SNPP hotspots. They differ far more in what they MISS than in what they
+# falsely claim, so a detection from any of them is strong, roughly
+# interchangeable evidence, while a non-detection is weak evidence that varies a
+# lot by product and by land cover. Treating the OR as a clean bit throws that
+# structure away.
+#
+# Each pixel's evidence is summed as log-likelihood ratios under a latent-class
+# (Hui-Walter / Dawid-Skene) measurement model whose parameters are fitted
+# offline by scripts/analysis/fit_label_model.py and inlined into the config:
+#
+#   logit q = logit(pi_g)
+#             + sum_r [ d_r log(s_rg/f_r) + (1-d_r) log((1-s_rg)/(1-f_r)) ]
+#             + pair-dependence corrections + a co-detection |dDOY| term
+#
+# with s_rg the stratum-specific sensitivity, f_r the false-positive rate, and
+# g a land-cover stratum. q is the posterior probability the cell burned.
+
+_CONF_EPS = 1e-6
+
+
+def _validate_confidence_config(cfg):
+    """Eager checks on a 'confidence' sample_weight block; raises on nonsense.
+
+    Runs at graph-construction time (not per batch) so a bad config fails at
+    launch rather than producing silently wrong weights for a whole run.
+    """
+    products = cfg.get('products')
+    if not products:
+        raise ValueError("confidence sample_weight needs a non-empty 'products' list")
+    n_strata = len(cfg['prior'])
+    if n_strata < 1:
+        raise ValueError("confidence sample_weight needs a non-empty 'prior'")
+    strat = cfg.get('stratify')
+    edges = (strat or {}).get('edges', [])
+    if n_strata != len(edges) + 1:
+        raise ValueError(
+            f"'prior' has {n_strata} entries but 'stratify.edges' implies "
+            f"{len(edges) + 1} strata")
+    for value in cfg['prior']:
+        if not 0.0 < value < 1.0:
+            raise ValueError(f"prior {value} is not in (0, 1)")
+    for prod in products:
+        if not 0.0 < prod['fpr'] < 1.0:
+            raise ValueError(f"{prod['name']}: fpr {prod['fpr']} is not in (0, 1)")
+        if len(prod['sens']) != n_strata:
+            raise ValueError(
+                f"{prod['name']}: {len(prod['sens'])} sensitivities for "
+                f"{n_strata} strata")
+        for s in prod['sens']:
+            if not 0.0 < s < 1.0:
+                raise ValueError(f"{prod['name']}: sensitivity {s} is not in (0, 1)")
+            if s <= prod['fpr']:
+                raise ValueError(
+                    f"{prod['name']}: sensitivity {s} <= fpr {prod['fpr']}, so a "
+                    "detection would be evidence AGAINST fire")
+    reliability = cfg.get('reliability')
+    if reliability is not None and len(reliability) != n_strata:
+        raise ValueError(
+            f"'reliability' has {len(reliability)} entries for {n_strata} strata")
+    for term in _doy_terms(cfg):
+        if len(term['values']) != len(term['edges']) + 1:
+            raise ValueError(
+                "doy_llr 'values' must have one more entry than 'edges'")
+        for pair in term['pairs']:
+            if len(pair) != 2 or not all(0 <= i < len(products) for i in pair):
+                raise ValueError(f"doy_llr pair {pair} is not a valid product index pair")
+
+
+def _dilate_mask(mask, radius):
+    """Max-pool a boolean mask with a (2*radius+1) square; identity at radius 0.
+
+    Products sit on different native grids (MCD64 500 m, VIIRS 463 m, MOD14
+    926.6 m against a ~555 m chip pixel) and MODIS scars sit ADJACENT to the
+    active-fire detections that seeded them, so scoring agreement at exact pixel
+    coincidence conflates registration and scale error with detection error.
+    """
+    if not radius:
+        return mask
+    x = tf.cast(mask, tf.float32)
+    rank2 = len(x.shape) == 2
+    if rank2:
+        x = x[tf.newaxis, ...]
+    x = tf.nn.max_pool2d(x[..., tf.newaxis], ksize=2 * int(radius) + 1,
+                         strides=1, padding='SAME')[..., 0]
+    if rank2:
+        x = x[0]
+    return x > 0.0
+
+
+def _stratum_edges(strat):
+    """Bin edges in the units the band will actually carry at loss time.
+
+    Edges are configured in natural units (e.g. MapBiomas forest fraction in
+    [0, 1]) because that is what the offline fit measured, but normalization
+    runs BEFORE select_bands_transform, so a stratifier that is also a
+    normalized model input arrives as a z-score. Mapping the edges once here is
+    equivalent to de-normalizing every pixel and far cheaper.
+    `resolve_stratifier_normalization` fills in 'normalized'.
+    """
+    edges = [float(e) for e in strat.get('edges', [])]
+    norm = strat.get('normalized')
+    if norm is None:
+        return edges
+    center, scale = float(norm['center']), float(norm['scale'])
+    if scale == 0:
+        return [e - center for e in edges]
+    return [(e - center) / (scale + 1e-7) for e in edges]
+
+
+def resolve_stratifier_normalization(sample_weight_config, normalize_list,
+                                     robust_features, stats):
+    """Fill in how the stratifier band is scaled at loss time, or raise.
+
+    The band is read AFTER the normalizer has run, so silently comparing
+    natural-unit edges against z-scores would put every pixel in one stratum and
+    quietly disable stratification for a whole run. Rather than let that happen,
+    resolve it from the same stats the normalizer used, and refuse if they are
+    missing.
+
+    Returns a shallow copy with stratify['normalized'] set (or the input
+    unchanged when the band is not normalized).
+    """
+    cfg = sample_weight_config
+    if (cfg or {}).get('mode') != 'confidence' or 'stratify' not in (cfg or {}):
+        return cfg
+    strat = cfg['stratify']
+    name = strat['feature_name']
+    if name not in set(normalize_list) or 'normalized' in strat:
+        return cfg
+    s = data_norm.get_norm_stats(stats, name)
+    if not s:
+        raise ValueError(
+            f"confidence stratifier {name!r} is normalized by this config but "
+            f"has no entry in the stats file, so its bin edges cannot be put on "
+            f"the same scale. Give stratify.normalized {{center, scale}} "
+            f"explicitly, or stratify on a band that is not normalized.")
+    if name in set(robust_features or ()):
+        center, scale = s['median'], (s.get('robust_scale') or s['stddev'])
+    else:
+        center, scale = s['mean'], s['stddev']
+    out = dict(cfg)
+    out['stratify'] = dict(strat, normalized={"center": float(center),
+                                              "scale": float(scale)})
+    return out
+
+
+def _stratum_index(example, strat):
+    """Per-pixel stratum index from a continuous band and a list of bin edges."""
+    if strat is None:
+        return None
+    band = tf.cast(example[strat['feature_name']], tf.float32)
+    idx = tf.zeros_like(band, dtype=tf.int32)
+    for edge in _stratum_edges(strat):
+        idx += tf.cast(band >= edge, tf.int32)
+    return idx
+
+
+def _per_stratum(values, idx, shape_ref):
+    """Broadcast a per-stratum constant to a per-pixel tensor."""
+    table = tf.constant(values, dtype=tf.float32)
+    if idx is None:
+        return tf.fill(tf.shape(shape_ref), table[0])
+    return tf.gather(table, idx)
+
+
+def _doy_terms(cfg):
+    """Normalise cfg['doy_llr'] to a list of terms.
+
+    A list lets each product pair carry its own |dDOY| table, which matters
+    because MCD64A1 is seeded by MOD14 active fires -- their co-detection
+    timing is partly an artefact of the algorithm, not independent corroboration
+    -- while a VIIRS/MCD64 co-detection in the same week is real evidence.
+    """
+    doy = cfg.get('doy_llr')
+    if doy is None:
+        return []
+    return [doy] if isinstance(doy, dict) else list(doy)
+
+
+def _binned_lookup(delta, edges, values):
+    """Piecewise-constant lookup: values[k] where edges[k-1] <= delta < edges[k]."""
+    idx = tf.zeros_like(delta, dtype=tf.int32)
+    for edge in edges:
+        idx += tf.cast(delta >= float(edge), tf.int32)
+    return tf.gather(tf.constant(values, dtype=tf.float32), idx)
+
+
+def build_confidence_posterior(example, cfg):
+    """Per-pixel posterior q that the cell burned, and the raw-OR union label.
+
+    Args:
+        example: the parsed feature dict, holding RAW day-of-year bands (the
+            output prep binarizes a copy, so values here are untransformed).
+        cfg: the 'confidence' sample_weight block (see _validate_confidence_config).
+
+    Returns:
+        (q, union) where q is float32 in (0, 1) and union is the bool OR of the
+        undilated detections -- bit-identical to _combine_output_bands(..., 'any'),
+        which is what the metrics and the hard eval label keep using.
+    """
+    products = cfg['products']
+    idx = _stratum_index(example, cfg.get('stratify'))
+    ref = tf.cast(example[products[0]['name']], tf.float32)
+
+    llr = _per_stratum([math.log(p / (1.0 - p)) for p in cfg['prior']], idx, ref)
+
+    raw = [tf.cast(example[p['name']], tf.float32) for p in products]
+    hits = [band > 0.0 for band in raw]
+    detected = [_dilate_mask(hit, p.get('dilate', 0))
+                for hit, p in zip(hits, products)]
+
+    for prod, det in zip(products, detected):
+        f = float(prod['fpr'])
+        pos = _per_stratum([math.log(s / f) for s in prod['sens']], idx, ref)
+        neg = _per_stratum([math.log((1.0 - s) / (1.0 - f)) for s in prod['sens']],
+                           idx, ref)
+        llr += tf.where(det, pos, neg)
+
+    # Pairwise dependence. MCD64A1 is partly DERIVED from MOD14 (the Collection 6
+    # algorithm seeds its training samples and priors from a cumulative active-fire
+    # composite), and MOD14/VIIRS share an early-afternoon overpass, so those
+    # agreements are partly one vote counted twice and must be discounted.
+    for pair in cfg.get('pair_llr', []):
+        a, b = detected[pair['a']], detected[pair['b']]
+        both = tf.logical_and(a, b)
+        neither = tf.logical_and(tf.logical_not(a), tf.logical_not(b))
+        llr += tf.where(both, float(pair.get('both', 0.0)),
+                        tf.where(neither, float(pair.get('neither', 0.0)), 0.0))
+
+    # Co-detection timing. Two products firing within the MCD64 8-day compositing
+    # window is far stronger consensus than two firing six months apart, which in a
+    # high-fire cell may be two unrelated fires. Undilated co-detection only, so
+    # "whose day-of-year" is unambiguous.
+    for term in _doy_terms(cfg):
+        for a, b in term['pairs']:
+            co = tf.logical_and(hits[a], hits[b])
+            delta = tf.abs(raw[a] - raw[b])
+            llr += tf.where(co, _binned_lookup(delta, term['edges'], term['values']),
+                            tf.zeros_like(delta))
+
+    union = hits[0]
+    for hit in hits[1:]:
+        union = tf.logical_or(union, hit)
+    return tf.sigmoid(llr), union
+
+
+def build_confidence_weight_map(example, cfg, pos_weight):
+    """Per-pixel (loss weight, soft target) from several fire products.
+
+    The loss we want per pixel is the pseudo-count form
+
+        L = b * [ -P*q*log(p) - (1-q)*log(1-p) ]
+
+    with P the pos_weight, q the posterior probability the cell burned and b a
+    confidence in q. `weighted_bce` computes `(bce(target, pred) * weight).mean()`
+    with ONE scalar per pixel, so P is folded into both returned tensors:
+
+        target = P*q / (P*q + 1 - q)        weight = b * (P*q + 1 - q)
+
+    which expands to exactly L. At q in {0, 1} and b = 1 this reduces to the
+    current weighted_bce bit for bit (q=1 -> weight P, target 1; q=0 -> weight 1,
+    target 0), so the feature is a strict superset of today's behaviour.
+    `losses.deflate_probs(target, P)` still returns q exactly, so the area_ratio
+    metric keeps its meaning.
+
+    Two arms, selected by cfg['soft_label']:
+      False  the target stays the hard union and b = P(the union bit is right)
+             = q where the union fires, 1 - q elsewhere. This is the
+             label-dependent-cost estimator for class-conditional label noise.
+      True   the target is q itself and b defaults to 1 (optionally a per-stratum
+             reliability), so the evidence lives in the target and is not counted
+             twice.
+
+    Returns:
+        (weights, soft_target). soft_target is None in the hard-label arm, where
+        it would equal the pipeline's existing union label.
+    """
+    q, union = build_confidence_posterior(example, cfg)
+    conf = cfg.get('confidence', {})
+    floor = float(conf.get('floor', 0.0))
+    scale = float(conf.get('weight_scale', 1.0))
+    soft_label = cfg.get('soft_label', False)
+
+    if soft_label:
+        target = q
+        reliability = cfg.get('reliability')
+        if reliability is None:
+            b = tf.ones_like(q)
+        else:
+            b = _per_stratum(reliability,
+                             _stratum_index(example, cfg.get('stratify')), q)
+    else:
+        target = tf.cast(union, tf.float32)
+        b = tf.where(union, q, 1.0 - q)
+
+    b = tf.maximum(b, floor) * scale
+    p_w = tf.cast(pos_weight, tf.float32)
+    denom = p_w * target + (1.0 - target)
+    weights = b * denom
+    if not soft_label:
+        # target is already the pipeline's union label; emitting it again would
+        # just duplicate `outputs`.
+        return weights, None
+    return weights, (p_w * target) / tf.maximum(denom, _CONF_EPS)
+
 def _to_tuple_transform(
     example: Dict,
     input_feature_config: dict,
@@ -378,12 +688,13 @@ def _to_tuple_transform(
     sample_weight_config: Optional[dict] = None,
     pos_weight: float = 9.0,
 ):
-    """Transform a parsed example into an (inputs, outputs[, sample_weight]) tuple.
+    """Transform a parsed example into an (inputs, outputs[, weight[, soft]]) tuple.
 
     Returns:
-        Tuple of (inputs_dict, outputs_dict or outputs_tensor), or
-        (inputs_dict, outputs, sample_weight_tensor) when sample_weight_config
-        is provided.
+        (inputs_dict, outputs_dict or outputs_tensor); plus a per-pixel
+        sample_weight tensor when sample_weight_config is provided; plus a soft
+        target when that config is a 'confidence' block with soft_label set.
+        `outputs` is always the hard label, whatever the weighting.
     """
 
     # Input features first
@@ -413,9 +724,19 @@ def _to_tuple_transform(
     if sample_weight_config is None:
         return inputs, outputs
 
-    # Build a per-pixel loss weight map from the raw (untransformed) fire-type
-    # band. The original `example` still holds raw values because the output
-    # prep applies its binarizing transform to a copy (see apply_transforms).
+    # Build a per-pixel loss weight map from the raw (untransformed) label bands.
+    # The original `example` still holds raw values because the output prep
+    # applies its binarizing transform to a copy (see apply_transforms).
+    if sample_weight_config.get('mode') == 'confidence':
+        weights, soft = build_confidence_weight_map(
+            example, sample_weight_config, pos_weight)
+        if soft is None:
+            return inputs, outputs, weights
+        # `outputs` stays the HARD union so metrics and the written prediction
+        # rasters keep scoring against the frozen eval label; the soft target
+        # rides along as a 4th element that only the loss reads.
+        return inputs, outputs, weights, soft
+
     feature_name = sample_weight_config.get('feature_name', 'im_viirs_type')
     type_weights = sample_weight_config.get('type_weights', {})
     weights = build_type_weight_map(example[feature_name], type_weights, pos_weight)
@@ -436,16 +757,24 @@ def select_bands_transform(
         dataset: A dataset yielding feature dicts (e.g., from dataset_from_dir or merge_datasets)
         input_feature_config:
         output_feature_config:
-        sample_weight_config: optional dict with 'feature_name' (default
-            'im_viirs_type') and 'type_weights' (a {type: weight} mapping). When
-            given, the dataset additionally yields a per-pixel loss weight map.
-        pos_weight: positive-class weight used for fire pixels whose type is not
-            listed in sample_weight_config['type_weights'].
+        sample_weight_config: optional per-pixel loss weighting block. Either
+            the per-fire-type form ('feature_name', 'type_weights'), or
+            {'mode': 'confidence', ...} to derive the weight (and optionally a
+            soft target) from several fire products -- see
+            build_confidence_weight_map.
+        pos_weight: positive-class weight. Folded into the returned weights,
+            since sample_weight replaces the loss's internal class weighting.
     Returns:
-        A dataset yielding (inputs_dict, outputs_dict/tensor) tuples, or
-        (inputs_dict, outputs, sample_weight) 3-tuples when sample_weight_config
-        is provided.
+        A dataset yielding (inputs_dict, outputs_dict/tensor) 2-tuples; 3-tuples
+        with a per-pixel sample_weight when sample_weight_config is given; or
+        4-tuples that also carry a soft target when that config is a
+        'confidence' block with soft_label set.
     """
+    if (sample_weight_config or {}).get('mode') == 'confidence':
+        # Eager, so a malformed measurement model fails at launch rather than
+        # silently mis-weighting an entire run.
+        _validate_confidence_config(sample_weight_config)
+
     def select_fn(example):
         return _to_tuple_transform(
             example, input_feature_config, output_feature_config,

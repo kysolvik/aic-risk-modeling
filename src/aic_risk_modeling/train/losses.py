@@ -4,9 +4,17 @@ All losses are called as `loss(y_true, y_pred, sample_weight=None)` where
 `y_pred` holds probabilities (after sigmoid for binary, softmax for
 multi-class), not logits. `sample_weight`, when given, is a per-pixel weight
 tensor (same shape as the loss's elementwise term) multiplied in before the
-mean. It is built upstream in the data pipeline (see
-`data_loader.build_type_weight_map`) to up-weight specific fire types while
-keeping the model binary.
+mean. It is built upstream in the data pipeline, either by
+`data_loader.build_type_weight_map` (up-weight specific fire types, binary
+label) or by `data_loader.build_confidence_weight_map` (weight by how much the
+fire products agree that the cell burned).
+
+`y_true` may be soft. A confidence-weighted dataset supplies a target in [0, 1]
+and a weight that together make the elementwise term
+`b*[-P*q*log(p) - (1-q)*log(1-p)]` -- the pseudo-count form of a weighted BCE
+with posterior q, confidence b and pos_weight P. See
+`build_confidence_weight_map` for the algebra; at q in {0,1} and b = 1 it is
+bit-identical to `weighted_bce` with no sample_weight.
 """
 
 import torch

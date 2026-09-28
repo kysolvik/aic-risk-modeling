@@ -217,12 +217,20 @@ def _cache_dataset_to_disk(dataset, cache_dir):
 
 
 def _torch_batches(dataset, device):
-    """Yield (inputs, labels, sample_weight) from a tf.data dataset as torch tensors.
+    """Yield (inputs, labels, sample_weight[, soft_target]) as torch tensors.
 
     sample_weight is None when the dataset yields plain (inputs, labels)
-    2-tuples (i.e. no per-pixel weighting configured)."""
+    2-tuples (i.e. no per-pixel weighting configured). A 4th element appears
+    only for a confidence-weighted soft-label dataset; `labels` is ALWAYS the
+    hard label, so callers that only score or write labels can ignore the tail
+    with `for inputs, labels, weights, *_ in ...`."""
     for batch in dataset.as_numpy_iterator():
-        if len(batch) == 3:
+        soft = None
+        if len(batch) == 4:
+            inputs, labels, weights, soft = batch
+            soft = torch.as_tensor(soft).float().to(device)
+            weights = torch.as_tensor(weights).float().to(device)
+        elif len(batch) == 3:
             inputs, labels, weights = batch
             weights = torch.as_tensor(weights).float().to(device)
         else:
@@ -230,7 +238,10 @@ def _torch_batches(dataset, device):
             weights = None
         inputs = {k: torch.as_tensor(v).to(device) for k, v in inputs.items()}
         labels = torch.as_tensor(labels).float().to(device)
-        yield inputs, labels, weights
+        if soft is None:
+            yield inputs, labels, weights
+        else:
+            yield inputs, labels, weights, soft
 
 
 def _cosine_warmup_schedule(optimizer, warmup_steps, decay_steps):
@@ -257,12 +268,15 @@ def _run_epoch(model, dataset, loss_function, device, metrics,
     amp_dtype = torch.float16 if amp_enabled else torch.bfloat16
 
     with torch.set_grad_enabled(training):
-        for inputs, labels, weights in _torch_batches(dataset, device):
+        for inputs, labels, weights, *soft in _torch_batches(dataset, device):
             with torch.autocast(device_type=device.type, dtype=amp_dtype,
                                 enabled=amp_enabled):
                 preds = model(inputs)
-            # preds are float32 (the fusion head opts out of autocast)
-            loss = loss_function(labels, preds, weights)
+            # preds are float32 (the fusion head opts out of autocast).
+            # The loss trains against the soft target when one is supplied;
+            # `labels` stays the hard label so the metrics below -- and every
+            # PR-AUC comparison built on them -- keep their frozen definition.
+            loss = loss_function(soft[0] if soft else labels, preds, weights)
 
             if training:
                 optimizer.zero_grad(set_to_none=True)
@@ -361,6 +375,13 @@ def run(config):
     # Select bands. An optional 'sample_weight' config block adds a per-pixel
     # loss weight map (e.g. up-weighting fire types 3/4) to train and val.
     sample_weight_config = config.get('sample_weight')
+    # A confidence block may stratify on a band that is ALSO a normalized model
+    # input, in which case its bin edges have to be put on the normalized scale
+    # -- silently comparing forest fractions against z-scores would collapse
+    # every pixel into one stratum for a whole run.
+    sample_weight_config = data_loader.resolve_stratifier_normalization(
+        sample_weight_config, normalize_list, robust_features,
+        data_norm.load_stats(stats_path))
     training_ds = data_loader.select_bands_transform(
         training_ds,
         input_feature_config=config['input_features'],
