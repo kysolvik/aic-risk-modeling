@@ -122,6 +122,61 @@ mod14_memory = [prep_mod14_year(y) for y in range(
 if PREDICT_ONLY:
     mod14_memory.append(prep_mod14_year(TARGET_YEAR-1).rename('mod14_0'))
 
+# Aqua active fire
+def prep_aqua_year(y):
+    aqua = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/mod14_aqua_archive_msgrid')
+             .filter(ee.Filter.calendarRange(y, y, 'year'))
+             ).max().unmask().rename(f'aqua_{y-TARGET_YEAR}')
+    return aqua
+
+aqua_memory = [prep_aqua_year(y) for y in range(
+    TARGET_YEAR-10, TARGET_YEAR+(1-PREDICT_ONLY))]
+if PREDICT_ONLY:
+    aqua_memory.append(prep_aqua_year(TARGET_YEAR-1).rename('aqua_0'))
+
+# Terra active fire
+def prep_terra_year(y):
+    terra = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/mod14_terra_archive_msgrid')
+             .filter(ee.Filter.calendarRange(y, y, 'year'))
+             ).max().unmask().rename(f'terra_{y-TARGET_YEAR}')
+    return terra
+
+terra_memory = [prep_terra_year(y) for y in range(
+    TARGET_YEAR-10, TARGET_YEAR+(1-PREDICT_ONLY))]
+if PREDICT_ONLY:
+    terra_memory.append(prep_terra_year(TARGET_YEAR-1).rename('terra_0'))
+
+# VIIRS VNP64 burned area
+def prep_vnp64_year(y):
+    vnp64 = (ee.ImageCollection('NASA/VIIRS/002/VNP64A1')
+             .select('Burn_Date')
+             .filter(ee.Filter.calendarRange(y, y, 'year'))
+             .max()
+             .unmask()
+             ).rename(f'BurnDate_viirs_{y-TARGET_YEAR}')
+    return vnp64
+
+vnp64_list = [prep_vnp64_year(y) for y in range(
+    TARGET_YEAR-1, TARGET_YEAR+(1-PREDICT_ONLY))]
+if PREDICT_ONLY:
+    vnp64_list.append(prep_vnp64_year(TARGET_YEAR-1).rename('BurnDate_viirs_0'))
+
+# VIIRS NOAA20 active fire target
+def prep_viirs_noaa20_year(y):
+    viirs_noaa20 = (ee.ImageCollection('projects/mmacedo-reservoirid/assets/viirs_noaa20_archive_msgrid')
+                 .filter(ee.Filter.calendarRange(y, y, 'year'))
+                 ).max().unmask().rename(f'viirs_noaa20_{y-TARGET_YEAR}')
+    return viirs_noaa20
+
+NOAA20_START_YEAR = 2018  # VIIRS NOAA20 archive start
+# Only build the NOAA20 target when the archive covers the needed year;
+# for predict-only, y-1 stands in as the `_0` placeholder
+if TARGET_YEAR - PREDICT_ONLY >= NOAA20_START_YEAR:
+    viirs_noaa20_target = prep_viirs_noaa20_year(
+        TARGET_YEAR - PREDICT_ONLY).rename('viirs_noaa20_0')
+else:
+    viirs_noaa20_target = None
+
 # MB Land-use/land-cover
 mb_amz_lulc_im = ee.Image('projects/mapbiomas-public/assets/amazon/lulc/collection6/mapbiomas_collection60_integration_v1')
 
@@ -450,7 +505,7 @@ wdpa_polys = ee.FeatureCollection('WCMC/WDPA/current/polygons').remap(
 wdpa_im = ee.Image().int().paint(wdpa_polys, 'GOV_TYPE').rename(['gov_type'])
 
 # Note that with split processing each will be processed separately
-im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_memory + mod14_memory + nightlights_list + [
+im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_memory + mod14_memory + aqua_memory + terra_memory + vnp64_list + nightlights_list + [
            mb_amz_pasture,
            mb_amz_forest,
            mb_amz_ag,
@@ -472,6 +527,10 @@ im_list = mcd64_list + mod13_annual + chirps_annual + chirps_annual_amz + viirs_
 # Append the fire-atlas target only when it exists for the year (see FIRE_ATLAS_START_YEAR)
 if viirs_target is not None:
     im_list.append(viirs_target)
+
+# Append the NOAA20 target only when it exists for the year (see NOAA20_START_YEAR)
+if viirs_noaa20_target is not None:
+    im_list.append(viirs_noaa20_target)
 
 # Append embeddings only if available for y-1 (see EMBEDDINGS_START_YEAR)
 if embeddings_im is not None:

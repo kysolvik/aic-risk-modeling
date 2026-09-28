@@ -54,7 +54,7 @@ If this fails on a missing default Cloud Build service account or logs bucket
 Expect ~8–12 min cold, ~2 min for a source-only change (the dependency layer is
 cached). The `.gcloudignore` in the repo root is load-bearing: without it
 `gcloud` derives one from `.gitignore`, whose `*.tif` rule would silently drop
-`assets/example.tif` and produce an image that builds fine and fails at runtime.
+`assets/example*.tif` and produce an image that builds fine and fails at runtime.
 
 ## Create the job (once)
 
@@ -72,7 +72,7 @@ CONFIG_PATH=gs://aic-amazon/configs/mtsvit_test_v40.json,\
 CHECKPOINT=gs://aic-amazon/models/mtsvit_test_v40.pt,\
 DATA_DIR=gs://aic-amazon/data/fullgrid_v2/allpreds_2025/,\
 OUTPUT_URI=gs://aic-amazon/preds/mtsvit_v40_2025/,\
-EDGE_CROP=0,INVERT_YRES=1,MOSAIC=1,BATCH_SIZE=4,OMP_NUM_THREADS=8
+EDGE_CROP=0,INVERT_YRES=1,PROFILE_TEMPLATE=/app/assets/example.tif,MOSAIC=1,BATCH_SIZE=4,OMP_NUM_THREADS=8
 ```
 
 Load-bearing flags:
@@ -174,7 +174,7 @@ CONFIG_PATH=gs://aic-amazon/configs/mtsvit_test_v44.json,\
 CHECKPOINT=gs://aic-amazon/models/mtsvit_test_v44.pt,\
 DATA_DIR=gs://aic-amazon/data/fullgrid_v2/allpreds_2024/,\
 OUTPUT_URI=gs://aic-amazon/attr/mtsvit_v44_2024/,\
-EDGE_CROP=0,INVERT_YRES=1,MOSAIC=1,BATCH_SIZE=4,OMP_NUM_THREADS=8
+EDGE_CROP=0,INVERT_YRES=1,PROFILE_TEMPLATE=/app/assets/example.tif,MOSAIC=1,BATCH_SIZE=4,OMP_NUM_THREADS=8
 ```
 
 Then run a year (or loop years) with `docker/run_attribute.sh`, or override at
@@ -197,7 +197,8 @@ aic-attribute --image="$IMG"` before `execute` sees the new code.
 | `BATCH_SIZE` | 4 | |
 | `SEED` | unset | makes shard/chip order reproducible |
 | `EDGE_CROP` | 0 | |
-| `INVERT_YRES` | 1 | pass `--invert_yres` |
+| `INVERT_YRES` | 0 | pass `--invert_yres` (flip rows + y res); `1` only for fullgrid_v2 |
+| `PROFILE_TEMPLATE` | `assets/example_v3.tif` | output CRS + pixel size; must match the data's `md_x`/`md_y` CRS. fullgrid_v3 = MODIS sinusoidal 463.3 m north-up (default, `INVERT_YRES=0`); fullgrid_v2 = `/app/assets/example.tif` (WGS84 0.005°, +y res, needs `INVERT_YRES=1`) |
 | `MOSAIC` | 1 | run `gdalbuildvrt`/`gdal_translate` |
 | `MOSAIC_NAME` | `preds` | output basename |
 | `UPLOAD_TILES` | 0 | also upload the ~3,600 per-chip tiles |

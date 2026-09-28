@@ -14,4 +14,4 @@ CONFIG_PATH=gs://aic-amazon/configs/mtsvit_test_v39.json,\
 CHECKPOINT=gs://aic-amazon/models/mtsvit_test_v39.pt,\
 DATA_DIR=gs://aic-amazon/data/fullgrid_v2/allpreds_2024/,\
 OUTPUT_URI=gs://aic-amazon/preds/mtsvit_v39_2024/,\
-EDGE_CROP=0,INVERT_YRES=1,MOSAIC=1,BATCH_SIZE=4,OMP_NUM_THREADS=8
+EDGE_CROP=0,INVERT_YRES=1,PROFILE_TEMPLATE=/app/assets/example.tif,MOSAIC=1,BATCH_SIZE=4,OMP_NUM_THREADS=8

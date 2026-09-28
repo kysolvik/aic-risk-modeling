@@ -68,7 +68,7 @@ def parse_args():
     parser.add_argument(
         '--invert_yres', action='store_true',
         help='flip rows / negate y-resolution so the rasters georeference the '
-             'same way predict.py writes them (entrypoint default INVERT_YRES=1)')
+             'same way predict.py writes them (entrypoint default INVERT_YRES=0)')
     parser.add_argument(
         '--drivers', type=str, default=None,
         help='driver-spec JSON (see configs/attribution_drivers_default.json);'
@@ -194,7 +194,7 @@ def main():
     # Rasters are written per batch rather than accumulated (10 float32
     # bands per chip adds up over a full grid).
     out_prefix = 'shap' if args.shapley else 'attr'
-    for inputs, labels, _ in tqdm(arm.train.trainer._torch_batches(ds, device),
+    for inputs, labels, *_ in tqdm(arm.train.trainer._torch_batches(ds, device),
                                   desc='Attributing', unit='batch'):
         if args.shapley:
             bands, names = attribution.shapley_bands(

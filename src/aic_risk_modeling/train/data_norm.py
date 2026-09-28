@@ -3,6 +3,7 @@ import json
 from google.protobuf import text_format
 from tensorflow_metadata.proto.v0 import statistics_pb2
 import tensorflow as tf
+from . import transforms
 
 def load_stats_from_text(path):
     """Load tfdv-generated DatasetFeatureStatisticsList from a text file."""
@@ -80,7 +81,8 @@ def get_norm_stats(stats_list, target_feature):
 def _normalize_single_features_dict(f, normalize_list):
     if 'normalize' in f.keys() and f['normalize']:
         for fn in f['feature_names']:
-            if fn not in f['transforms'].keys():
+            if (fn not in f['transforms'].keys()
+                    or f['transforms'][fn] in transforms.NORMALIZE_THROUGH_TRANSFORMS):
                 if len(f['timesteps']) > 0:
                     normalize_list.extend([
                         fn + '_' + str(ts) for ts in f['timesteps']
@@ -130,6 +132,13 @@ def get_robust_normalize_list(config):
 
     return robust_list
 
+def load_stats(stats_path):
+    """Load normalization stats from a data_stats JSON or a tfdv stats.pbtxt."""
+    if stats_path.endswith('.json'):
+        return load_stats_json(stats_path)
+    return load_stats_from_text(stats_path)
+
+
 def create_normalizer(stats_path, features_to_normalize, robust_features=None):
     """Create a normalization function based on provided statistics.
 
@@ -145,10 +154,7 @@ def create_normalizer(stats_path, features_to_normalize, robust_features=None):
     """
     robust_features = set(robust_features or [])
     norm_constants = {}
-    if stats_path.endswith('.json'):
-        stats = load_stats_json(stats_path)
-    else:
-        stats = load_stats_from_text(stats_path)
+    stats = load_stats(stats_path)
     for name in features_to_normalize:
         s = get_norm_stats(stats, name)
         if s:

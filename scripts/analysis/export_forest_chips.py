@@ -62,14 +62,13 @@ def parse_args():
     ap.add_argument("--batch_size", type=int, default=4)
     ap.add_argument("--edge_crop", type=int, default=0,
                     help="MUST match the --edge_crop used to write the predictions")
-    # The prediction pipeline inverts y by default (docker entrypoint
-    # INVERT_YRES=1), because assets/example.tif carries a +0.005 yres. Match it
-    # so the forest chips register with the out_/mask_ chips; --no_invert_yres is
-    # only for predictions written without it.
-    ap.add_argument("--no_invert_yres", dest="invert_yres", action="store_false",
-                    help="write with the raw (+yres) transform; use only if the "
-                         "predictions were written WITHOUT --invert_yres")
-    ap.set_defaults(invert_yres=True)
+    # MUST match how the predictions were written so the forest chips register
+    # with the out_/mask_ chips. Default is no flip (entrypoint INVERT_YRES=0,
+    # north-up assets/example_v3.tif); fullgrid_v2 predictions were written with
+    # --invert_yres against the +0.005 yres assets/example.tif.
+    ap.add_argument("--invert_yres", action="store_true",
+                    help="flip rows + y res; use only for predictions written "
+                         "with --invert_yres (fullgrid_v2 + assets/example.tif)")
     ap.add_argument("--profile_template", default=DEFAULT_PROFILE_TEMPLATE,
                     help="GeoTIFF supplying the output CRS and pixel size")
     ap.add_argument("--max_chips", type=int, default=None,
