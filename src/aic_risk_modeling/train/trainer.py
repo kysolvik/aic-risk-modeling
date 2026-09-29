@@ -5,7 +5,8 @@ Models and the training loop are PyTorch; data loading runs via tf.data TFRecord
 pipeline in `data_loader`.
 Training includes checkpointing and early stopping on configurable validation
 metrics ('checkpoint_metric' / 'early_stopping_metric'); 'loss' is minimized,
-every other metric is maximized.
+every other metric is maximized. checkpoint_metric 'last' trains a fixed
+number of epochs and keeps the final one; only then may 'val_data_dirs' be omitted.
 """
 
 import csv
@@ -302,6 +303,8 @@ class _BestTracker:
 
     `metric` names a key of the per-epoch validation results; 'loss' is
     minimized, every other metric is maximized. Ties are not improvements.
+    'last' improves every epoch: the checkpoint is the final epoch and early
+    stopping never fires (fixed-epoch training, e.g. with no validation set).
     """
 
     def __init__(self, metric):
@@ -310,11 +313,34 @@ class _BestTracker:
         self._best = float('-inf')
 
     def improved(self, results):
+        if self.metric == 'last':
+            return True
         value = self._sign * results[self.metric]
         if value > self._best:
             self._best = value
             return True
         return False
+
+
+def _monitoring(config, num_classes):
+    """(has_val, checkpoint_metric, early_stopping_metric) for a config.
+
+    'val_data_dirs' may be omitted only with checkpoint_metric 'last' (train a
+    fixed number of epochs, keep the final one); any other metric needs a
+    validation set to watch.
+    """
+    has_val = bool(config.get('val_data_dirs'))
+    checkpoint_metric = config.get(
+        'checkpoint_metric', 'fire_iou' if num_classes > 1 else 'pr_auc')
+    early_stopping_metric = config.get('early_stopping_metric',
+                                       checkpoint_metric)
+    if not has_val:
+        bad = {m for m in (checkpoint_metric, early_stopping_metric) if m != 'last'}
+        if bad:
+            raise ValueError(
+                f"no val_data_dirs: checkpoint/early-stopping metric {sorted(bad)} "
+                "needs a validation set (use checkpoint_metric 'last')")
+    return has_val, checkpoint_metric, early_stopping_metric
 
 
 def run(config):
@@ -332,6 +358,9 @@ def run(config):
     # Aggregate burn-area term options, used by 'weighted_bce_area'.
     area_weight = config.get('area_loss_weight', 1.0)
     area_block_size = config.get('area_block_size')
+    # Fail before any data loads if the config can't be monitored.
+    has_val, checkpoint_metric, early_stopping_metric = _monitoring(
+        config, num_classes)
 
     # Get loss function
     loss_function = losses.get_loss(config['loss_function'],
@@ -359,7 +388,7 @@ def run(config):
         axis=config['merge_axis'],
         batch_size=config['batch_size'],
         seed=seed,
-    )
+    ) if has_val else None
 
     # Normalize. Prefer an explicit stats file (e.g. pooled stats.json from
     # data_stats); fall back to the first dir's stats.pbtxt.
@@ -370,7 +399,8 @@ def run(config):
     norm_func = data_norm.create_normalizer(
         stats_path, normalize_list, robust_features=robust_features)
     training_ds = training_ds.map(norm_func, num_parallel_calls=tf.data.AUTOTUNE)
-    validation_ds = validation_ds.map(norm_func, num_parallel_calls=tf.data.AUTOTUNE)
+    if has_val:
+        validation_ds = validation_ds.map(norm_func, num_parallel_calls=tf.data.AUTOTUNE)
 
     # Select bands. An optional 'sample_weight' config block adds a per-pixel
     # loss weight map (e.g. up-weighting fire types 3/4) to train and val.
@@ -389,17 +419,18 @@ def run(config):
         sample_weight_config=sample_weight_config,
         pos_weight=pos_weight,
     )
-    validation_ds = data_loader.select_bands_transform(
-        validation_ds,
-        input_feature_config=config['input_features'],
-        output_feature_config=config['output_features'],
-        sample_weight_config=sample_weight_config,
-        pos_weight=pos_weight,
-    )
+    if has_val:
+        validation_ds = data_loader.select_bands_transform(
+            validation_ds,
+            input_feature_config=config['input_features'],
+            output_feature_config=config['output_features'],
+            sample_weight_config=sample_weight_config,
+            pos_weight=pos_weight,
+        )
     # Optional: replay validation from local disk after epoch 1 (config key
     # 'val_cache_dir'). Needs ~10 MB/example free on that disk, and must be the
     # LAST validation op so the cache holds the fully processed batches.
-    if config.get('val_cache_dir'):
+    if has_val and config.get('val_cache_dir'):
         validation_ds = _cache_dataset_to_disk(
             validation_ds, config['val_cache_dir'])
 
@@ -435,7 +466,6 @@ def run(config):
     if num_classes > 1:
         train_metrics = MulticlassSegmentationMetrics(num_classes)
         val_metrics = MulticlassSegmentationMetrics(num_classes)
-        checkpoint_metric = config.get('checkpoint_metric', 'fire_iou')
     else:
         # The area_ratio metric deflates predictions by pos_weight, but only
         # for losses that actually train toward the inflated optimum.
@@ -444,13 +474,11 @@ def run(config):
             if config['loss_function'] in losses.POS_WEIGHT_LOSSES else 1.0)
         train_metrics = SegmentationMetrics(pos_weight=metric_pos_weight)
         val_metrics = SegmentationMetrics(pos_weight=metric_pos_weight)
-        checkpoint_metric = config.get('checkpoint_metric', 'pr_auc')
 
     # Early stopping watches its own (configurable) metric, defaulting to the
     # checkpoint metric, so e.g. checkpointing on val loss while stopping on
-    # PR AUC stagnation (or vice versa) is possible.
-    early_stopping_metric = config.get('early_stopping_metric',
-                                       checkpoint_metric)
+    # PR AUC stagnation (or vice versa) is possible. Both resolved in
+    # _monitoring above.
     checkpoint_tracker = _BestTracker(checkpoint_metric)
     early_stop_tracker = _BestTracker(early_stopping_metric)
 
@@ -464,7 +492,7 @@ def run(config):
             model, training_ds, loss_function, device, train_metrics,
             optimizer=optimizer, scaler=scaler, scheduler=scheduler)
         val_results = _run_epoch(
-            model, validation_ds, loss_function, device, val_metrics)
+            model, validation_ds, loss_function, device, val_metrics) if has_val else {}
 
         row = {'epoch': epoch, 'learning_rate': scheduler.get_last_lr()[0]}
         row.update(train_results)
