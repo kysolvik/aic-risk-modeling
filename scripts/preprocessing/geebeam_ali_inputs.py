@@ -562,7 +562,7 @@ if __name__ == '__main__':
         tile_coverage='intersect',
         validation_ratio=0.0, # Fraction to select as validation data
         output_type='tfrecord',
-        output_path=f'gs://woodwell-aic-fire-risk/data/fullgrid_v3/allpreds_{TARGET_YEAR}',
+        output_path=f'gs://woodwell-aic-fire-risk/data/fullgrid_v3_patched/allpreds_{TARGET_YEAR}',
         sampling_region='../data/Limites_RAISG_2025/Lim_Raisg.shp',
         extra_metadata=md_dict
     )
