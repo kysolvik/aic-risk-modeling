@@ -29,9 +29,21 @@ tensor-space mean -- mean(transform(x)) != transform(mean(x)) -- so they
 require an explicit `baseline_overrides` entry; `resolve_baselines` raises
 otherwise.
 
-`shapley_bands` is an alternative attribution mode over the same drivers: 
+`shapley_bands` is an alternative attribution mode over the same drivers:
 Shapley values split the interaction term across drivers, but more intensive
-(2^N runs where N is number of variable groups) 
+(2^N runs where N is number of variable groups)
+
+Year terms (optional, factored models only): the factored model's frozen year
+offset `gamma(t)*(1 + g_res(location))` is added to the logit after the
+network, so by default it is not a player and sits in the baseline band. A spec
+`year_terms` block hands each driver a per-year logit COMPONENT of gamma (e.g.
+the SOI part to climate, the previous-year-burn part to fire history); a driver
+that is absent from a coalition then also loses its component (scaled by the
+same per-chip `1 + g_res`), so the baseline becomes "average year" as well as
+"grid-average pixel". The components must sum to the model's gamma table for
+every year attributed (checked per batch). Costs no extra forwards: the year
+term never enters the network, so it is subtracted from the summed
+`forward_terms` logit.
 
 Caveats:
 - One-at-a-time deltas are not Shapley values: correlated drivers each absorb
@@ -105,9 +117,12 @@ class DriverSpec:
         across all timesteps and pixels.
     baseline_overrides: (group, feature name) -> tensor-space baseline for
         features the normalizer skips (see module docstring).
+    year_terms: driver name -> {year: logit component of gamma(year)}; empty
+        unless the spec has a `year_terms` block (see module docstring).
     """
     drivers: 'OrderedDict[str, list]'
     baseline_overrides: dict
+    year_terms: dict = dataclasses.field(default_factory=dict)
 
 
 def resolve_driver_spec(spec, input_features):
@@ -116,12 +131,15 @@ def resolve_driver_spec(spec, input_features):
     `spec` is either None (use DEFAULT_DRIVERS / DEFAULT_BASELINE_OVERRIDES)
     or a dict shaped like configs/attribution_drivers_default.json:
         {"drivers": {name: [[group, feature_name], ...]},
-         "baseline_overrides": {"group/feature_name": value}}
+         "baseline_overrides": {"group/feature_name": value},
+         "year_terms": {name: {"<year>": logit component}}}   (optional)
 
     Raises ValueError on an unknown group or feature, or on a feature claimed
     twice (within or across drivers) -- overlapping drivers would make the
-    all-drivers-at-baseline residual band ill-defined.
+    all-drivers-at-baseline residual band ill-defined -- or on a year_terms
+    entry for a driver the spec does not define.
     """
+    year_terms = {}
     if spec is None:
         drivers = DEFAULT_DRIVERS
         overrides = dict(DEFAULT_BASELINE_OVERRIDES)
@@ -133,6 +151,12 @@ def resolve_driver_spec(spec, input_features):
         for key, value in spec.get('baseline_overrides', {}).items():
             group, _, feature = key.partition('/')
             overrides[(group, feature)] = float(value)
+        for name, per_year in spec.get('year_terms', {}).items():
+            if name not in drivers:
+                raise ValueError(
+                    f"year_terms names driver '{name}', which the spec does "
+                    f"not define")
+            year_terms[name] = {int(y): float(v) for y, v in per_year.items()}
 
     if not drivers:
         raise ValueError('driver spec defines no drivers')
@@ -160,7 +184,8 @@ def resolve_driver_spec(spec, input_features):
             raise ValueError(f"driver '{name}' has no features")
         resolved[name] = channels
 
-    return DriverSpec(drivers=resolved, baseline_overrides=overrides)
+    return DriverSpec(drivers=resolved, baseline_overrides=overrides,
+                      year_terms=year_terms)
 
 
 def resolve_baselines(driver_spec, config):
@@ -214,6 +239,69 @@ def occlude(inputs, channels, baselines):
     return out
 
 
+def year_components(model, inputs, driver_spec):
+    """driver -> (B, 1, 1) logit component of the year term, {} without year_terms.
+
+    Each component is the spec's per-year value scaled by the chip's year gain
+    `1 + g_res` (1 for models without one), i.e. that driver's share of the
+    `gamma + year_gain` terms. Raises if a batch year is missing from a driver's
+    table or if the components do not sum to the model's own gamma -- a spec
+    built for another gamma fit would otherwise attribute silently wrong.
+    """
+    if not driver_spec.year_terms:
+        return {}
+    year_mod = getattr(model, 'year', None)
+    if year_mod is None or not hasattr(model, 'forward_terms'):
+        raise ValueError('year_terms needs a factored model with a year offset '
+                         '(forward_terms + year)')
+    raw = inputs[year_mod.input_name]
+    years = torch.round(raw.reshape(raw.shape[0], -1)[:, 0]).long().tolist()
+    gamma = year_mod(raw).reshape(-1)
+    scale = torch.ones_like(gamma)
+    gain = getattr(model, 'year_gain', None)
+    if gain is not None:
+        scale = scale + gain(inputs[gain.input_name]).reshape(-1)
+    total = torch.zeros_like(gamma)
+    comps = {}
+    for name, per_year in driver_spec.year_terms.items():
+        missing = sorted(set(years) - set(per_year))
+        if missing:
+            raise ValueError(f"year_terms['{name}'] has no entry for year(s) {missing}")
+        c = torch.tensor([per_year[y] for y in years], dtype=gamma.dtype,
+                         device=gamma.device)
+        total += c
+        comps[name] = (c * scale).reshape(-1, 1, 1)
+    if not torch.allclose(total, gamma, atol=1e-4):
+        raise ValueError(
+            f'year_terms components sum to {total.tolist()} but the model gamma is '
+            f'{gamma.tolist()} for years {years}: the spec was built for another '
+            f'gamma fit')
+    return comps
+
+
+def _probs(model, inputs, removed=None):
+    """Model probabilities, optionally with logit offset `removed` (B, 1, 1) taken out.
+
+    `removed=None` is exactly `model(inputs)`. Otherwise the logit is rebuilt from
+    `forward_terms` (the same sum `FactoredFireModel.forward` takes) so year
+    components can be subtracted without an extra forward.
+    """
+    if removed is None:
+        return model(inputs)
+    t = model.forward_terms(inputs)
+    logits = t['gamma'] + t['year_gain'] + t['m'] + t['s'] + t['c']
+    with torch.autocast(device_type=logits.device.type, enabled=False):
+        return torch.sigmoid(logits.float().squeeze(1) - removed)
+
+
+def _removed(comps, absent):
+    """Summed year components of the `absent` drivers, or None without year_terms."""
+    if not comps:
+        return None
+    return sum((comps[n] for n in absent if n in comps),
+               torch.zeros_like(next(iter(comps.values()))))
+
+
 @torch.no_grad()
 def attribution_bands(model, inputs, driver_spec, baselines, pos_weight=1.0):
     """OAT attribution for one batch: N+2 forwards, stacked as output bands.
@@ -229,7 +317,8 @@ def attribution_bands(model, inputs, driver_spec, baselines, pos_weight=1.0):
      'residual_interactions', 'risk_all_drivers_baseline'], satisfying
     bands[..., 0] - bands[..., -1] == sum(deltas) + residual exactly.
     """
-    base = deflate_probs(model(inputs), pos_weight)
+    comps = year_components(model, inputs, driver_spec)
+    base = deflate_probs(_probs(model, inputs, _removed(comps, [])), pos_weight)
     if base.ndim != 3:
         raise ValueError(
             f'attribution supports binary (B, H, W) outputs only, '
@@ -241,13 +330,15 @@ def attribution_bands(model, inputs, driver_spec, baselines, pos_weight=1.0):
     for name, channels in driver_spec.drivers.items():
         all_channels.extend(channels)
         occluded = deflate_probs(
-            model(occlude(inputs, channels, baselines)), pos_weight)
+            _probs(model, occlude(inputs, channels, baselines), _removed(comps, [name])),
+            pos_weight)
         delta = base - occluded
         total_delta += delta
         bands.append(delta)
         names.append(f'delta_{name}')
     all_baseline = deflate_probs(
-        model(occlude(inputs, all_channels, baselines)), pos_weight)
+        _probs(model, occlude(inputs, all_channels, baselines),
+               _removed(comps, driver_spec.drivers)), pos_weight)
     bands.append((base - all_baseline) - total_delta)
     names.append('residual_interactions')
     bands.append(all_baseline)
@@ -285,15 +376,17 @@ def shapley_bands(model, inputs, driver_spec, baselines, pos_weight=1.0,
     """
     names = list(driver_spec.drivers.keys())
     n = len(names)
+    comps = year_components(model, inputs, driver_spec)
 
     cache = {}  # frozenset[str] of drivers present -> (B, H, W) deflated probs
 
     def value(coalition):
         if coalition not in cache:
-            occluded = [c for name in names if name not in coalition
-                        for c in driver_spec.drivers[name]]
+            absent = [name for name in names if name not in coalition]
+            occluded = [c for name in absent for c in driver_spec.drivers[name]]
             cache[coalition] = deflate_probs(
-                model(occlude(inputs, occluded, baselines)), pos_weight)
+                _probs(model, occlude(inputs, occluded, baselines),
+                       _removed(comps, absent)), pos_weight)
         return cache[coalition]
 
     base = value(frozenset(names))  # occlude nothing -> the 'risk' forward
