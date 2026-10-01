@@ -96,6 +96,6 @@ elif [ -n "${YEARS:-}" ]; then
     echo "[download_cv_preds] all ${#ROWS[@]} rows downloaded (YEARS override: off-protocol, not scored)."
 else
     echo "[download_cv_preds] all ${#ROWS[@]} rows downloaded. Score with:"
-    echo "  .venv/bin/python scripts/analysis/cv_collect_results.py --protocol $STAGE \\"
+    echo "  .venv/bin/python scripts/cross_validation/cv_collect_results.py --protocol $STAGE \\"
     echo "      --arch $ARCH --label_dir $MOSAIC_DIR --fetch_train_csv"
 fi
