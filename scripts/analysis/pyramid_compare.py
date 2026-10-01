@@ -183,7 +183,18 @@ def chip_inventory(directory):
     (flat holdout) or one level down in a per-year subdirectory. Anything deeper
     (e.g. a stray ``<model>/<year>/chips/out_*.tif``) is ignored, so an unrelated
     nested export can't leak into a validation figure.
+
+    `directory` may instead be a list of (chips_dir, year) pairs, each a flat
+    chip directory scored as that year.
     """
+    if isinstance(directory, (list, tuple)):
+        # Explicit [(chips_dir, year), ...]: chips flat in each dir, year given
+        # (the CV layout <arch>/<fold>/<year>/chips/ puts "chips" where the year
+        # would be, and its fold dir also holds years that must stay out).
+        items = []
+        for chips_dir, year in directory:
+            items += [(o, m, str(year)) for o, m, _ in chip_inventory(chips_dir)]
+        return items
     root = os.path.normpath(directory)
     out_paths = sorted(
         p for p in glob.glob(os.path.join(directory, "**", "out_*.tif"),

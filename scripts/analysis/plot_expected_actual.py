@@ -43,7 +43,9 @@ def draw_splits(ax, boundaries, labels, start_year, end_year):
         mid = 0.5 * (max(lo, start_year - 0.5) + min(hi, end_year + 0.5))
         ax.text(mid, 0.975, name, transform=ax.get_xaxis_transform(),
                 ha="center", va="top", fontsize=9, color=INK_SECONDARY,
-                clip_on=False, zorder=1)
+                clip_on=False, zorder=3,
+                # surface patch so gridlines / split rules don't run through the text
+                bbox=dict(facecolor=SURFACE, edgecolor="none", pad=1.5))
 
 
 def main():
@@ -61,6 +63,13 @@ def main():
     parser.add_argument("--train-end", type=int, default=2022)
     parser.add_argument("--val-end", type=int, default=2024)
     parser.add_argument("--test-end", type=int, default=2025)
+    # Generic override of the three flags above (e.g. the CV figure's
+    # --boundaries 2023 2025 --region-labels Cross-validation Test Forecast).
+    parser.add_argument("--boundaries", nargs="+", type=int, default=None,
+                        help="last year of each region but the last "
+                             "(overrides --train-end/--val-end/--test-end)")
+    parser.add_argument("--region-labels", nargs="+", default=None,
+                        help="one label per region (len(boundaries)+1)")
     parser.add_argument("--ymax", type=float, default=2_000_000,
                         help="upper y-limit (headroom for the region labels)")
     args = parser.parse_args()
@@ -100,9 +109,12 @@ def main():
                     xytext=(0, 12), textcoords="offset points", color=ACTUAL,
                     fontsize=20, fontweight="bold", ha="center", va="center")
 
-    draw_splits(ax, [args.train_end, args.val_end, args.test_end],
-                ["Training", "Validation", "Test", "Forecast"],
-                args.start_year, args.end_year)
+    boundaries = args.boundaries or [args.train_end, args.val_end, args.test_end]
+    region_labels = args.region_labels or ["Training", "Validation", "Test",
+                                           "Forecast"]
+    if len(region_labels) != len(boundaries) + 1:
+        parser.error("--region-labels needs one more entry than --boundaries")
+    draw_splits(ax, boundaries, region_labels, args.start_year, args.end_year)
 
     ax.set_xlabel("Year", fontsize=11.5, color=INK_SECONDARY)
     ax.set_ylabel("Burned Pixels", fontsize=11.5, color=INK_SECONDARY)

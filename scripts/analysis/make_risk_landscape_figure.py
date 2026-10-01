@@ -4,8 +4,9 @@ A single data-free schematic that situates three classes of fire-risk model on a
 log-log plane of spatial resolution (y) against forecast / assessment horizon (x):
 
   - Short-term operational   -- weather-driven & real-time burn detection (<1 week)
-  - Medium-term strategic     -- THIS STUDY (1 month - 1 year, ~0.5-50 km), highlighted
-  - Long-term climatic        -- decadal climate-driven risk assessment
+  - Medium-term strategic     -- THIS STUDY (1 month - 1 year, ~0.5-50 km), highlighted;
+                                 climate + human activity patterns
+  - Long-term outlooks        -- decadal climate-driven risk assessment
 
 Each class is drawn as a shaded zone with a few representative systems plotted as
 labelled points. Zone extents and example systems live in the ZONES / POINTS dicts
@@ -41,43 +42,42 @@ C_LONG = "#d55e00"    # vermillion
 DAY, WEEK, MONTH, SEASON, YEAR, DECADE = 1.0, 7.0, 30.0, 91.0, 365.0, 3650.0
 KM = 1000.0
 
-# Zone extents as (x0, x1) days and (y0, y1) metres; title_xy / desc_xy in data coords.
+# Zone extents as (x0, x1) days and (y0, y1) metres. The title sits a fixed inset
+# inside the box's top-left corner and the description directly below the title.
 ZONES = {
     "short": dict(
         x=(0.5, 9.0), y=(100.0, 28.0 * KM), color=C_SHORT,
         title="Short-term\noperational",
         desc="Weather-driven &\nreal-time detection",
-        title_xy=(0.62, 26.0 * KM), desc_xy=(0.62, 6.5 * KM),
     ),
     "medium": dict(
         x=(MONTH, YEAR), y=(0.5 * KM, 50.0 * KM), color=C_MEDIUM, highlight=True,
         title="Medium-term\nstrategic",
-        desc="",
-        title_xy=(34.0, 46.0 * KM), desc_xy=(34.0, 14.0 * KM),
+        desc="Climate & human\nactivity patterns",
     ),
     "long": dict(
         x=(2 * YEAR, 9000.0), y=(10.0 * KM, 130.0 * KM), color=C_LONG,
-        title="Long-term\nclimatic",
+        title="Long-term\noutlooks",
         desc="Climate-driven\nrisk assessment",
-        title_xy=(820.0, 120.0 * KM), desc_xy=(820.0, 40.0 * KM),
     ),
 }
+TITLE_INSET = (9, -7)   # points from the box's top-left corner
+DESC_GAP = 3            # points between title and description
 
-# Representative systems: markers + labels (xytext in data coords). `star` = the study.
-# `leader=True` draws a thin leader line from the label to the marker.
+# Representative systems: marker at (x, y) in data coords; label offset (dx, dy) in
+# points from the marker with alignment ha/va. `leader=True` draws a thin line from
+# the label to the marker. `star` = the study.
 POINTS = [
     dict(zone="short", label="VIIRS / MODIS\nactive-fire detection",
-         x=0.8, y=0.40 * KM, tx=1.7, ty=0.40 * KM, ha="left", va="center"),
+         x=0.8, y=0.40 * KM, dx=9, dy=0, ha="left", va="center"),
     dict(zone="short", label="Fire Weather Index /\nECMWF fire forecast",
-         x=6.5, y=14.0 * KM, tx=6.5, ty=3.6 * KM, ha="center", va="top", leader=True),
+         x=4.0, y=7.0 * KM, dx=0, dy=-30, ha="center", va="top", leader=True),
     dict(zone="medium", label="This study", star=True,
-         x=YEAR, y=0.5 * KM, tx=300.0, ty=0.62 * KM, ha="right", va="center"),
-    dict(zone="medium", label="Seasonal fire-\npotential outlooks",
-         x=250.0, y=26.0 * KM, tx=250.0, ty=6.5 * KM, ha="center", va="top",
-         leader=True),
+         x=YEAR, y=0.5 * KM, dx=-12, dy=13, ha="right", va="center"),
+    dict(zone="medium", label="Seasonal fire\npotential",
+         x=200.0, y=10.0 * KM, dx=0, dy=-30, ha="center", va="top", leader=True),
     dict(zone="long", label="Climate fire\nprojections (CMIP)",
-         x=3200.0, y=60.0 * KM, tx=3200.0, ty=24.0 * KM, ha="center", va="top",
-         leader=True),
+         x=4200.0, y=30.0 * KM, dx=0, dy=-9, ha="center", va="top"),
 ]
 
 # Axis ticks (position -> label).
@@ -99,6 +99,46 @@ def _axfrac(x, y):
     return fx, fy
 
 
+def check_layout(fig, ax, texts, boxes, pad_px=6):
+    """Warn about any text not inside its own zone box (inset by pad_px, which also
+    clears the rounded corners), touching another zone's box, overlapping other text,
+    or crossed by another label's leader line. Text extents exclude leader lines
+    (an Annotation's own extent would include its arrow)."""
+    from matplotlib.text import Text
+    from matplotlib.transforms import Bbox
+    fig.canvas.draw()
+    r = fig.canvas.get_renderer()
+    disp = {k: Bbox.from_extents(*ax.transAxes.transform([(b[0], b[1]), (b[2], b[3])]).ravel())
+            for k, b in boxes.items()}
+    ext = [(z, t, Text.get_window_extent(t, r)) for z, t in texts]
+    leaders = [(t, t.arrow_patch.get_window_extent(r)) for _, t in texts
+               if getattr(t, "arrow_patch", None) is not None]
+    bad = 0
+    for z, t, e in ext:
+        name = t.get_text().replace("\n", " ")
+        own = disp[z].padded(-pad_px)
+        if not (own.x0 <= e.x0 and e.x1 <= own.x1 and own.y0 <= e.y0 and e.y1 <= own.y1):
+            print(f"[risk_landscape] LAYOUT: '{name}' crosses its {z} box edge")
+            bad += 1
+        for k, b in disp.items():
+            if k != z and b.padded(pad_px).overlaps(e):
+                print(f"[risk_landscape] LAYOUT: '{name}' touches the {k} box")
+                bad += 1
+    for i in range(len(ext)):
+        for j in range(i + 1, len(ext)):
+            if ext[i][2].overlaps(ext[j][2]):
+                print(f"[risk_landscape] LAYOUT: '{ext[i][1].get_text()!r}' overlaps "
+                      f"'{ext[j][1].get_text()!r}'")
+                bad += 1
+    for owner, le in leaders:
+        for _, t, e in ext:
+            if t is not owner and le.overlaps(e):
+                print(f"[risk_landscape] LAYOUT: leader of {owner.get_text()!r} crosses "
+                      f"{t.get_text()!r}")
+                bad += 1
+    print(f"[risk_landscape] layout check: {'OK' if not bad else f'{bad} problem(s)'}")
+
+
 def plot(out_png):
     import matplotlib
     matplotlib.use("Agg")
@@ -111,6 +151,8 @@ def plot(out_png):
     ax.set_yscale("log")
     ax.set_xlim(*XLIM)
     ax.set_ylim(*YLIM)
+
+    texts, boxes = [], {}   # (zone, Text) for the overlap check; zone -> axes-fraction box
 
     # --- zones (rounded rectangles drawn in axes-fraction space for clean corners) ---
     for key in ("short", "long", "medium"):  # draw medium last so it sits on top
@@ -138,16 +180,21 @@ def plot(out_png):
         )
         ax.add_patch(edge)
 
-        # zone title + descriptor (data coords, anchored top-left inside the box)
-        tx, ty = z["title_xy"]
-        ax.text(tx, ty, z["title"], color=z["color"], fontsize=11.5,
-                fontweight="bold", ha="left", va="top", zorder=5,
-                linespacing=1.05)
+        # zone title (fixed inset from the top-left corner) + description below it
+        t = ax.annotate(z["title"], xy=(x0, y1), xytext=TITLE_INSET,
+                        textcoords="offset points", color=z["color"], fontsize=11.5,
+                        fontweight="bold", ha="left", va="top", zorder=5,
+                        linespacing=1.05)
+        texts.append((key, t))
         if z["desc"]:
-            dx, dy = z["desc_xy"]
-            ax.text(dx, dy, z["desc"], color=z["color"] if hi else INK_SECONDARY,
-                    fontsize=9.5 if hi else 9.0, fontweight="bold" if hi else "normal",
-                    ha="left", va="top", zorder=5, linespacing=1.05)
+            d = ax.annotate(z["desc"], xy=(0, 0), xycoords=t, xytext=(0, -DESC_GAP),
+                            textcoords="offset points",
+                            color=INK_SECONDARY,
+                            fontsize=9.0,
+                            fontweight="normal",
+                            ha="left", va="top", zorder=5, linespacing=1.05)
+            texts.append((key, d))
+        boxes[key] = (fx0, fy0, fx1, fy1)
 
     # --- representative systems ---
     for p in POINTS:
@@ -162,14 +209,16 @@ def plot(out_png):
         arrow = (dict(arrowstyle="-", color=INK_SECONDARY, linewidth=0.7,
                       shrinkA=2, shrinkB=6, alpha=0.7)
                  if p.get("leader", False) else None)
-        ax.annotate(
-            p["label"], xy=(p["x"], p["y"]), xytext=(p["tx"], p["ty"]),
+        a = ax.annotate(
+            p["label"], xy=(p["x"], p["y"]), xytext=(p["dx"], p["dy"]),
+            textcoords="offset points",
             color=INK_PRIMARY if star else INK_SECONDARY,
             fontsize=9.2 if star else 8.5,
             fontweight="bold" if star else "normal",
             ha=p["ha"], va=p["va"], zorder=6, linespacing=1.05,
             arrowprops=arrow,
         )
+        texts.append((p["zone"], a))
 
     # --- axes cosmetics ---
     ax.set_xticks([t for t, _ in XTICKS])
@@ -192,6 +241,7 @@ def plot(out_png):
     ax.grid(True, which="major", color=GRID, linewidth=0.8, zorder=0)
 
     fig.tight_layout(rect=[0.005, 0.01, 0.995, 0.99])
+    check_layout(fig, ax, texts, boxes)
 
     os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
     fig.savefig(out_png, dpi=300, facecolor=SURFACE)

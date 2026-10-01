@@ -58,6 +58,21 @@ def deflate(q, pos_weight):
     return q / (pos_weight - (pos_weight - 1.0) * q)
 
 
+def load_calibrator(path):
+    """Frozen calibrator (raw score -> probability) from an npz saved by
+    calibrated_year_totals.py --save-calibrator: platt (a, b) via the eval module's
+    apply_platt, or isotonic breakpoints via np.interp (== the fitted curve). npz
+    files without a `method` key predate platt support and are isotonic."""
+    d = np.load(path)
+    method = str(d["method"]) if "method" in d.files else "isotonic"
+    if method == "platt":
+        from aic_risk_modeling.eval.calibration import apply_platt
+        a, b = float(d["a"]), float(d["b"])
+        return lambda q: apply_platt(q, a, b)
+    x, y = d["x"], d["y"]
+    return lambda q: np.interp(q, x, y)
+
+
 def chip_pairs(directory):
     """[(out_path, mask_path)] for the chips directly in `directory`."""
     out_paths = sorted(glob.glob(os.path.join(directory, "out_*.tif")))

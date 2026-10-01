@@ -1,9 +1,9 @@
 """Publication figure (Fig 6): PR-AUC by forested vs non-forested land cover.
 
-Grouped bars, one pair per predictor (forest / non-forest PR-AUC), for four
-series on the identical validation pixel population (2023 + 2024): the factored
-model, the pointwise MLP (receptive field 1), and the two free baselines
-(climatology, last-year burn). Each stratum's no-skill floor -- its fire
+Grouped bars, one pair per predictor (forest / non-forest PR-AUC), on the
+identical pixel population. v3p version (9/30): the five v3p CV architectures on
+their fwdpair_2022 eval years (2022 + 2023, same fold and names as Fig 3) plus the
+two free baselines (burn frequency over the fold's train years, last-year burn). Each stratum's no-skill floor -- its fire
 prevalence -- is drawn as a dotted line; the gap above it is the skill, because
 raw PR-AUC scales with prevalence and prevalence differs between strata.
 
@@ -12,7 +12,11 @@ baseline score reads, stratified PR-AUC) is reused from `compare_forest_split.py
 Metrics are cached to a CSV; pass `--from_csv` to restyle without recomputing.
 
     .venv/bin/python scripts/analysis/make_forest_figure.py
-    .venv/bin/python scripts/analysis/make_forest_figure.py --from_csv out/figures/fig_forest_split.csv
+    .venv/bin/python scripts/analysis/make_forest_figure.py \
+        --from_csv out/figures/fig_forest_split_fwdpair_2022.csv
+
+Forest chips must exist first, on the v3 grid (export_forest_chips.py with the
+v3 profile template, no --invert_yres) under <forest_dir>/<year>/.
 """
 
 import argparse
@@ -28,17 +32,22 @@ from compare_forest_split import (  # noqa: E402
     load_shared, stratify, write_split_table,
 )
 
-# Predictors in display order: two models, then the two grey baselines.
+# Predictors in display order: the five CV archs (as in Fig 3), then the two grey
+# baselines. Chips are read from <preds_root>/<arch>/<fold>/<year>/chips/.
 MODELS = [
-    ("Factored", "out/baselines/factored_v1"),
-    ("MLP RF1",  "out/baselines/baseline_mlp_rf1"),
+    ("Factored", "factored_v3p_union4_monthlyattn_wide_yeargain"),
+    ("U-Net",    "unet_v3p_union4"),
+    ("ViT",      "vit_test_v3p_union4"),
+    ("MLP",      "mlp_v3p_union4_flat"),
+    ("LSTM",     "lstm_v3p_union4"),
 ]
-BASELINES = [("Climatology", "climatology"), ("Last-year burn", "last_year")]
+BASELINES = [("Burn frequency", "climatology"), ("Last-year burn", "last_year")]
 ORDER = [m[0] for m in MODELS] + [b[0] for b in BASELINES]
 
-DEFAULT_FOREST_DIR = "out/forest"
-DEFAULT_LABEL_DIR = "out/label_mosaics"
-DEFAULT_CLIM = "out/label_mosaics/climatology_2013_2022.tif"
+DEFAULT_FOREST_DIR = "out/forest_v3p"
+DEFAULT_LABEL_DIR = "out/label_mosaics_v3p_union4"
+DEFAULT_CLIM = "out/label_mosaics_v3p_union4/climatology_2013_2021.tif"
+DEFAULT_PREDS_ROOT = "out/cv/preds"
 
 
 def plot_split(order, per_model, prevalence, out_png):
@@ -46,7 +55,7 @@ def plot_split(order, per_model, prevalence, out_png):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(8.6, 5.4), facecolor=SURFACE)
+    fig, ax = plt.subplots(figsize=(11.0, 5.4), facecolor=SURFACE)
     ax.set_facecolor(SURFACE)
     ax.grid(True, axis="y", color=GRID, linewidth=0.8, zorder=0)
     ax.set_axisbelow(True)
@@ -108,12 +117,14 @@ def main():
     ap.add_argument("--forest_dir", default=DEFAULT_FOREST_DIR)
     ap.add_argument("--label-dir", dest="label_dir", default=DEFAULT_LABEL_DIR)
     ap.add_argument("--climatology", default=DEFAULT_CLIM)
-    ap.add_argument("--year", default=None, help="force year (flat holdout dirs)")
+    ap.add_argument("--preds_root", default=DEFAULT_PREDS_ROOT)
+    ap.add_argument("--fold", default="fwdpair_2022")
+    ap.add_argument("--years", default="2022,2023", help="eval years of --fold")
     ap.add_argument("--threshold", type=float, default=0.5,
                     help="forest-fraction cutoff defining the two strata")
     ap.add_argument("--from_csv", default=None, help="restyle from an existing CSV")
-    ap.add_argument("--out_png", default="out/figures/fig_forest_split.png")
-    ap.add_argument("--out_csv", default="out/figures/fig_forest_split.csv")
+    ap.add_argument("--out_png", default="out/figures/fig_forest_split_fwdpair_2022.png")
+    ap.add_argument("--out_csv", default="out/figures/fig_forest_split_fwdpair_2022.csv")
     args = ap.parse_args()
 
     if args.from_csv:
@@ -121,14 +132,20 @@ def main():
         plot_split(order, per_model, prevalence, args.out_png)
         return
 
-    chips = canonical_chips(MODELS[0][1], args.forest_dir, args.year)
+    years = [int(y) for y in args.years.split(",")]
+
+    def spec(arch):  # explicit [(chips_dir, year)]: the fold dir also holds test years
+        return [(os.path.join(args.preds_root, arch, args.fold, str(y), "chips"), y)
+                for y in years]
+
+    chips = canonical_chips(spec(MODELS[0][1]), args.forest_dir, None)
     labels, forest = load_shared(chips)
     print(f"[forest_fig] {len(chips)} chips, {labels.size} pixels", flush=True)
 
     scores_by = {}
-    for name, path in MODELS:
-        print(f"[forest_fig] reading {name}: {path}", flush=True)
-        scores_by[name] = load_model_scores(path, chips, args.year)
+    for name, arch in MODELS:
+        print(f"[forest_fig] reading {name}: {arch}/{args.fold}", flush=True)
+        scores_by[name] = load_model_scores(spec(arch), chips, None)
     for name, kind in BASELINES:
         print(f"[forest_fig] reading baseline {name}", flush=True)
         scores_by[name] = load_baseline_scores(chips, kind, args.label_dir,
