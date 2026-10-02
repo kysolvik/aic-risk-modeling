@@ -208,6 +208,35 @@ def fit_calibrator(method, scores, labels):
         "(use 'platt' or 'isotonic')")
 
 
+def deflate(q, pos_weight):
+    """Invert the weighted-BCE optimum q = w*p/(w*p+1-p) back to p."""
+    return q / (pos_weight - (pos_weight - 1.0) * q)
+
+
+def inflate(p, pos_weight):
+    """Calibrated probability -> raw weighted-BCE score (inverse of `deflate`)."""
+    return pos_weight * p / (pos_weight * p + 1.0 - p)
+
+
+def to_prob(q, pos_weight, level=1.0, cal=None):
+    """Model score -> burn probability: the frozen calibrator if given, else deflate / level."""
+    return cal(q) if cal is not None else deflate(q, pos_weight) / level
+
+
+def load_calibrator(path):
+    """Frozen calibrator (raw score -> probability) from an npz saved by
+    calibrated_year_totals.py --save-calibrator: platt (a, b) via apply_platt, or
+    isotonic breakpoints via np.interp (== the fitted curve). npz files without a
+    `method` key predate platt support and are isotonic."""
+    d = np.load(path)
+    method = str(d["method"]) if "method" in d.files else "isotonic"
+    if method == "platt":
+        a, b = float(d["a"]), float(d["b"])
+        return lambda q: apply_platt(q, a, b)
+    x, y = d["x"], d["y"]
+    return lambda q: np.interp(q, x, y)
+
+
 def reliability_table_str(bins):
     """Format a reliability table (bin range, confidence, frequency, count)."""
     lines = [f"{'bin':>11}  {'conf':>6}  {'freq':>6}  {'count':>12}"]

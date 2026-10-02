@@ -1,5 +1,5 @@
-"""Evaluation utilities: metrics, calibration and driver attribution."""
+"""Evaluation utilities: metrics, calibration, chip I/O, year offset and driver attribution."""
 
-from .eval import calc_stats
+from .metrics import binary_metrics, calc_stats
 
-__all__ = ["calc_stats"]
+__all__ = ["binary_metrics", "calc_stats"]
