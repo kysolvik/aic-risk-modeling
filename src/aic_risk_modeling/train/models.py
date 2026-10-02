@@ -116,11 +116,9 @@ def _time_distributed(module, x):
 # ---------------------------------------------------------------------------
 
 class UNet(nn.Module):
-    def __init__(self, input_shape, input_name=None, for_fusion=True,
-                 base_filters=64):
+    def __init__(self, input_shape, input_name=None, base_filters=64):
         super().__init__()
         self.input_name = input_name
-        self.for_fusion = for_fusion
         in_channels = input_shape[-1]
         # Width-parametric: channels double each level from `base_filters`. The
         # bottleneck ConvTranspose scales ~quadratically with width, so lowering
@@ -137,13 +135,7 @@ class UNet(nn.Module):
         self.d2 = DecoderBlock(c4, c3, c3)
         self.d3 = DecoderBlock(c3, c2, c2)
         self.d4 = DecoderBlock(c2, c1, c1)
-        if for_fusion:
-            # Expose the base-width decoder feature map as fusion features
-            # instead of collapsing to a single channel.
-            self.out_channels = c1
-        else:
-            self.out_conv = nn.Conv2d(c1, 1, 1)
-            self.out_channels = 1
+        self.out_channels = c1
 
     def forward(self, x):
         x = x.permute(0, 3, 1, 2)
@@ -156,80 +148,7 @@ class UNet(nn.Module):
         d = self.d2(d, s3)
         d = self.d3(d, s2)
         d = self.d4(d, s1)
-        if not self.for_fusion:
-            d = F.relu(self.out_conv(d))
         return d.permute(0, 2, 3, 1)
-
-
-class UNetLite(nn.Module):
-    def __init__(self, input_shape, input_name=None, for_fusion=True,
-                 base_filters=16):
-        super().__init__()
-        self.input_name = input_name
-        self.for_fusion = for_fusion
-        in_channels = input_shape[-1]
-        # Width-parametric like `UNet`, at this module's 2-level depth. For a
-        # fusion branch `base_filters` *is* the width handed to the decoder
-        # head, so it sets how much full-resolution detail the head sees next
-        # to the wider pooled/upsampled sources it is concatenated with.
-        # Default 16 preserves the original UNetLite exactly.
-        b = base_filters
-        self.e1 = EncoderBlock(in_channels, b)
-        self.e2 = EncoderBlock(b, 2 * b)
-        self.bottleneck = ConvBlock(2 * b, 4 * b)
-        self.d1 = DecoderBlock(4 * b, 2 * b, 2 * b)
-        self.d2 = DecoderBlock(2 * b, b, b)
-        if for_fusion:
-            # Expose the base-width decoder feature map as fusion features
-            # instead of collapsing to a single channel.
-            self.out_channels = b
-        else:
-            self.out_conv = nn.Conv2d(b, 1, 1)
-            self.out_channels = 1
-
-    def forward(self, x):
-        x = x.permute(0, 3, 1, 2)
-        s1, p1 = self.e1(x)
-        s2, p2 = self.e2(p1)
-        b = self.bottleneck(p2)
-        d = self.d1(b, s2)
-        d = self.d2(d, s1)
-        if not self.for_fusion:
-            d = F.relu(self.out_conv(d))
-        return d.permute(0, 2, 3, 1)
-
-
-class MLP(nn.Module):
-    def __init__(self, input_shape, input_name=None):
-        super().__init__()
-        self.input_name = input_name
-        self.net = nn.Sequential(
-            nn.Linear(input_shape[-1], 1024), nn.ReLU(), nn.Dropout(0.3),
-            nn.Linear(1024, 512), nn.ReLU(), nn.Dropout(0.3),
-            nn.Linear(512, 128), nn.ReLU(),
-            nn.Linear(128, 1), nn.Sigmoid(),
-        )
-        self.out_channels = 1
-
-    def forward(self, x):
-        return self.net(x)
-
-
-class MLPForFusion(nn.Module):
-    def __init__(self, input_shape, input_name=None):
-        super().__init__()
-        self.input_name = input_name
-        self.net = nn.Sequential(
-            nn.Linear(input_shape[-1], 64), nn.ReLU(), nn.Dropout(0.3),
-            nn.Linear(64, 32), nn.ReLU(), nn.Dropout(0.3),
-            nn.Linear(32, 16), nn.ReLU(),
-        )
-        self.out_channels = 16
-
-    def forward(self, x):
-        x = self.net(x)
-        x = x.reshape(x.shape[0], 1, 1, self.out_channels)
-        return x.expand(-1, PATCH_SIZE, PATCH_SIZE, -1)
 
 
 class PixelMLP(nn.Module):
@@ -240,9 +159,7 @@ class PixelMLP(nn.Module):
     ``nn.Linear`` acts on the last axis, so this is equivalent to a stack of 1x1
     convolutions. The neural analogue of the tabular random-forest baseline (each
     pixel classified from its own stacked band/timestep values), exposed as a
-    fusion branch so it shares the decoder head with the other baselines. Unlike
-    ``MLPForFusion`` (which collapses a flat per-tile vector and broadcasts it),
-    this keeps full spatial resolution.
+    fusion branch so it shares the decoder head with the other baselines.
     """
 
     def __init__(self, input_shape, input_name=None, hidden=(128, 64),
@@ -274,7 +191,7 @@ class CoordFourierForFusion(nn.Module):
     metadata such as `md_single`'s (md_x, md_y); not for absolute year, which does
     not generalize to unseen years and is dropped from `feature_names`.
 
-    Like `MLPForFusion`, the per-tile vector is broadcast across the spatial grid.
+    The per-tile vector is broadcast across the spatial grid.
     """
 
     def __init__(self, input_shape, input_name=None, num_freqs=16, sigma=1.0,
@@ -301,52 +218,6 @@ class CoordFourierForFusion(nn.Module):
         h = self.net(feats)
         h = h.reshape(h.shape[0], 1, 1, self.out_channels)
         return h.expand(-1, PATCH_SIZE, PATCH_SIZE, -1)
-
-
-class MultiScaleMLPHead(nn.Module):
-    def __init__(self, input_shape, input_name=None, hidden=128):
-        super().__init__()
-        self.input_name = input_name
-        in_features = input_shape[-1]
-        self.dense1 = nn.Linear(in_features, hidden)
-        self.dense2 = nn.Linear(in_features, hidden)
-        self.dense3 = nn.Linear(in_features, hidden)
-        self.norm = nn.LayerNorm(3 * hidden)
-        self.fuse = nn.Linear(3 * hidden, hidden)
-        self.out = nn.Linear(hidden, 1)
-        self.out_channels = 1
-
-    def _pooled_scale(self, x, dense, factor):
-        x = F.avg_pool2d(x.permute(0, 3, 1, 2), factor).permute(0, 2, 3, 1)
-        x = F.gelu(dense(x)).permute(0, 3, 1, 2)
-        x = F.interpolate(x, scale_factor=factor, mode="bilinear")
-        return x.permute(0, 2, 3, 1)
-
-    def forward(self, x):
-        s1 = F.gelu(self.dense1(x))
-        s2 = self._pooled_scale(x, self.dense2, 2)
-        s3 = self._pooled_scale(x, self.dense3, 4)
-        fused = self.norm(torch.cat([s1, s2, s3], dim=-1))
-        fused = F.gelu(self.fuse(fused))
-        return torch.sigmoid(self.out(fused))
-
-
-class SimpleConvLSTM(nn.Module):
-    def __init__(self, input_shape, input_name=None):
-        super().__init__()
-        self.input_name = input_name
-        in_channels = input_shape[-1]
-        self.conv = nn.Conv2d(in_channels, 32, 3, padding=1)
-        self.convlstm = ConvLSTM2d(32, 64, 3)
-        self.bn = nn.BatchNorm2d(64)
-        self.out_conv = nn.Conv2d(64, 1, 3, padding=1)
-        self.out_channels = 1
-
-    def forward(self, x):
-        x = x.permute(0, 1, 4, 2, 3)
-        x = F.relu(_time_distributed(self.conv, x))
-        h = self.bn(self.convlstm(x))
-        return torch.sigmoid(self.out_conv(h)).permute(0, 2, 3, 1)
 
 
 class ConvLSTMModel(nn.Module):
@@ -405,33 +276,13 @@ class ConvLSTMBottleneck(nn.Module):
         return h.permute(0, 2, 3, 1)
 
 
-class LSTMModel(nn.Module):
-    def __init__(self, input_shape, input_name=None):
-        super().__init__()
-        self.input_name = input_name
-        self.lstm1 = nn.LSTM(input_shape[-1], 32, batch_first=True)
-        self.lstm2 = nn.LSTM(32, 32, batch_first=True)
-        self.dropout = nn.Dropout(0.2)
-        self.out_channels = 32
-
-    def forward(self, x):
-        seq, _ = self.lstm1(x)
-        seq, _ = self.lstm2(self.dropout(seq))
-        h = self.dropout(seq[:, -1])
-        h = h.reshape(h.shape[0], 1, 1, self.out_channels)
-        return h.expand(-1, PATCH_SIZE, PATCH_SIZE, -1)
-
-
 class PixelLSTM(nn.Module):
     """Per-pixel temporal LSTM over a spatio-temporal input.
 
     Runs an LSTM over time independently at every pixel:
     ``(B, T, H, W, C) -> (B, H, W, hidden)``, taking the final hidden state. No
-    spatial mixing -- the LSTM analogue of ConvLSTM, and the sequence
-    counterpart of ``PixelMLP``. Unlike ``LSTMModel`` (which consumes a
-    non-spatial ``(B, T, F)`` sequence and broadcasts one vector across the
-    grid), this preserves full spatial resolution. Exposed as a fusion branch so
-    it shares the decoder head with the other baselines.
+    spatial mixing -- the sequence counterpart of ``PixelMLP``. Exposed as a
+    fusion branch so it shares the decoder head with the other baselines.
     """
 
     def __init__(self, input_shape, input_name=None, hidden=32, num_layers=2,
@@ -454,43 +305,6 @@ class PixelLSTM(nn.Module):
         return last.reshape(b, h, w, self.hidden)
 
 
-class TransformerModel(nn.Module):
-    def __init__(self, input_shape, input_name=None, embed_dim=32,
-                 num_heads=4, ff_dim=64, dropout=0.1):
-        super().__init__()
-        self.input_name = input_name
-        seq_len, in_features = input_shape
-        self.proj = nn.Linear(in_features, embed_dim)
-        self.pos_embedding = nn.Embedding(seq_len, embed_dim)
-        self.register_buffer("positions", torch.arange(seq_len),
-                             persistent=False)
-        self.ln1 = nn.LayerNorm(embed_dim, eps=1e-6)
-        self.attn = nn.MultiheadAttention(embed_dim, num_heads,
-                                          dropout=dropout, batch_first=True)
-        self.ln2 = nn.LayerNorm(embed_dim, eps=1e-6)
-        self.ff1 = nn.Linear(embed_dim, ff_dim)
-        self.ff2 = nn.Linear(ff_dim, embed_dim)
-        self.dropout = nn.Dropout(dropout)
-        self.out_proj = nn.Linear(embed_dim, 16)
-        self.out_channels = 16
-
-    def forward(self, x):
-        x = self.proj(x) + self.pos_embedding(self.positions)
-        # Attention block
-        y = self.ln1(x)
-        y, _ = self.attn(y, y, y, need_weights=False)
-        x = x + self.dropout(y)
-        # Feed-forward block
-        y = self.ln2(x)
-        y = self.ff2(self.dropout(F.relu(self.ff1(y))))
-        x = x + y
-        # Pool over time, project, and broadcast across the spatial grid
-        h = self.dropout(x.mean(dim=1))
-        h = F.relu(self.out_proj(h))
-        h = h.reshape(h.shape[0], 1, 1, self.out_channels)
-        return h.expand(-1, PATCH_SIZE, PATCH_SIZE, -1)
-
-
 class IdentityModel(nn.Module):
     def __init__(self, input_shape, input_name=None):
         super().__init__()
@@ -502,159 +316,45 @@ class IdentityModel(nn.Module):
         return x
 
 
-class ProjectionModel(nn.Module):
-    """Linear (1x1) projection of a channels-last input to `out_channels`.
-
-    Adjust width of passthrough branches (e.g. the 64-channel AlphaEarth
-    embedding) so a single branch doesn't dominate the fusion head's channel
-    budget. Intended for rank-3 [H, W, C] inputs, which route to the spatial
-    branches by rank exactly like IdentityModel.
-    """
-
-    def __init__(self, input_shape, input_name=None, out_channels=16):
-        super().__init__()
-        self.input_name = input_name
-        self.input_shape = list(input_shape)
-        self.out_channels = out_channels
-        self.proj = nn.Linear(input_shape[-1], out_channels)
-
-    def forward(self, x):
-        return self.proj(x)
-
-
-class _ScaleGain(nn.Module):
-    """Per-source learnable scalar gain (magnitude rescale, distribution kept)."""
-
-    def __init__(self):
-        super().__init__()
-        self.gain = nn.Parameter(torch.ones(()))
-
-    def forward(self, x):
-        return x * self.gain
-
-
-class BranchNorm(nn.Module):
-    """Per-source normalization applied before a fusion concat.
-
-    Stops one loud or wide branch from dominating the concat and drowning out a
-    quieter branch (measure the imbalance with ``scripts/probe_branch_scales.py``).
-    Operates on a list of channels-first ``(B, C, H, W)`` source tensors, in the
-    order they enter the concat, and returns the normalized list.
-
-    Modes:
-      - ``None`` (default): disabled. ``forward`` returns the list unchanged and
-        the module holds no parameters.
-      - ``"groupnorm"``: per-source ``GroupNorm(1, C)`` + affine (per-sample
-        LayerNorm over ``(C, H, W)``). Robust to any channel count and to the
-        spatially-constant broadcast branches (16-ch -> nonzero cross-channel
-        variance). CAVEAT: GroupNorm over the spatial dims zeroes a
-        spatially-constant *single-channel* source (variance 0), so any source
-        with ``C == 1`` auto-falls back to a scale gain instead.
-      - ``"scale"``: per-source learnable scalar gain (``x * g``, ``g`` init 1.0).
-        Fixes only loudness and preserves each branch's distribution, so it is
-        safe for the raw-standardized identity branch.
-
-    ``exclude`` is a set of source labels (branch ``input_name``s, plus the
-    reserved ``"<transformer>"`` for MTSViT's upsampled features) that pass
-    through untouched -- for branches whose absolute level is a real predictor.
-    """
-
-    def __init__(self, channels, labels, mode=None, exclude=None):
-        super().__init__()
-        self.mode = mode
-        if mode is None:
-            self.norms = None
-            return
-        exclude = set(exclude or ())
-        norms = []
-        for c, label in zip(channels, labels):
-            if label in exclude:
-                norms.append(nn.Identity())
-            elif mode == "scale" or (mode == "groupnorm" and c == 1):
-                norms.append(_ScaleGain())
-            elif mode == "groupnorm":
-                norms.append(nn.GroupNorm(1, c))
-            else:
-                raise ValueError(
-                    f"unknown branch_norm mode {mode!r} "
-                    "(use 'groupnorm', 'scale', or null)")
-        self.norms = nn.ModuleList(norms)
-
-    def forward(self, feats):
-        if self.norms is None:
-            return feats
-        return [norm(f) for norm, f in zip(self.norms, feats)]
-
-
 class FusionDecoder(nn.Module):
     """Runs each branch on its named input, concatenates the channels-last
-    outputs, and applies a conv head.
-
-    With num_classes == 1 (binary) returns (batch, H, W) sigmoid probabilities;
-    with num_classes > 1 returns (batch, H, W, num_classes) softmax
-    probabilities.
+    outputs, and applies a conv head. Returns (batch, H, W) sigmoid probabilities.
     """
 
-    def __init__(self, branch_models, num_classes=1, branch_norm=None,
-                 branch_norm_exclude=None, head_kernel=3, head_dilation=1):
-        """Receptive field of the shared head = 1 + 4 * (head_kernel - 1) * head_dilation.
-
-        This head is shared by every branch encoder in the comparison suite, so it
-        -- not the encoder -- sets how much spatial context each "architecture"
-        actually sees. Defaults (3, 1) give 9x9 = 5.0 km at 556 m/px and reproduce
-        existing checkpoints exactly.
-
-        Prefer `head_dilation` over `head_kernel` when sweeping the receptive field:
-        dilation changes the reach at IDENTICAL parameter count, so the sweep
-        isolates spatial context instead of confounding it with capacity
-        (k=5 has 2.8x the head parameters of k=3; k=3,d=2 has exactly as many).
-        """
+    def __init__(self, branch_models, head_kernel=3):
+        """Receptive field of the shared head = 1 + 4 * (head_kernel - 1)."""
         super().__init__()
         if head_kernel < 1 or head_kernel % 2 == 0:
             raise ValueError(f"head_kernel must be a positive odd int, got {head_kernel}")
-        if head_dilation < 1:
-            raise ValueError(f"head_dilation must be >= 1, got {head_dilation}")
-        self.num_classes = num_classes
         self.head_kernel = head_kernel
-        self.head_dilation = head_dilation
         self.branches = nn.ModuleList(branch_models)
-        self.branch_norm = BranchNorm(
-            [m.out_channels for m in branch_models],
-            [m.input_name for m in branch_models],
-            mode=branch_norm, exclude=branch_norm_exclude)
         in_channels = sum(m.out_channels for m in branch_models)
-        k, d = head_kernel, head_dilation
-        pad = d * (k // 2)
-        self.conv1 = nn.Conv2d(in_channels, 128, k, padding=pad, dilation=d)
+        k, pad = head_kernel, head_kernel // 2
+        self.conv1 = nn.Conv2d(in_channels, 128, k, padding=pad)
         self.bn1 = nn.BatchNorm2d(128)
-        self.conv2 = nn.Conv2d(128, 64, k, padding=pad, dilation=d)
+        self.conv2 = nn.Conv2d(128, 64, k, padding=pad)
         self.bn2 = nn.BatchNorm2d(64)
-        self.conv3 = nn.Conv2d(64, 32, k, padding=pad, dilation=d)
+        self.conv3 = nn.Conv2d(64, 32, k, padding=pad)
         self.bn3 = nn.BatchNorm2d(32)
-        self.conv4 = nn.Conv2d(32, 16, k, padding=pad, dilation=d)
-        self.out_conv = nn.Conv2d(16, num_classes, 1)
+        self.conv4 = nn.Conv2d(32, 16, k, padding=pad)
+        self.out_conv = nn.Conv2d(16, 1, 1)
 
     @property
     def receptive_field(self):
         """Effective receptive field of the head, in pixels."""
-        return 1 + 4 * (self.head_kernel - 1) * self.head_dilation
+        return 1 + 4 * (self.head_kernel - 1)
 
     def forward(self, inputs):
-        # Channels-first per branch, normalize, then concat (equivalent to the
-        # channels-last concat + permute when branch_norm is disabled).
         feats = [branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
                  for branch in self.branches]
-        x = torch.cat(self.branch_norm(feats), dim=1)
+        x = torch.cat(feats, dim=1)
         x = self.bn1(F.relu(self.conv1(x)))
         x = self.bn2(F.relu(self.conv2(x)))
         x = self.bn3(F.relu(self.conv3(x)))
         x = F.relu(self.conv4(x))
         # Head runs in float32 even under autocast (Keras dtype="float32" layer)
         with torch.autocast(device_type=x.device.type, enabled=False):
-            logits = self.out_conv(x.float())
-            if self.num_classes == 1:
-                return torch.sigmoid(logits).squeeze(1)
-            return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
+            return torch.sigmoid(self.out_conv(x.float())).squeeze(1)
 
 
 class SimpleReadout(nn.Module):
@@ -665,17 +365,14 @@ class SimpleReadout(nn.Module):
     to the class logits. All model capacity is meant to live in the branch
     encoder(s) -- e.g. a single all-bands PixelMLP -- so the whole model is a
     naive per-pixel MLP with a linear output layer, and this decoder adds nothing
-    but the readout (and the sigmoid/softmax). Output contract matches
-    FusionDecoder: (B, H, W) sigmoid probs for num_classes == 1, else
-    (B, H, W, num_classes) softmax.
+    but the readout (and the sigmoid). Returns (B, H, W) sigmoid probabilities.
     """
 
-    def __init__(self, branch_models, num_classes=1):
+    def __init__(self, branch_models):
         super().__init__()
-        self.num_classes = num_classes
         self.branches = nn.ModuleList(branch_models)
         in_channels = sum(m.out_channels for m in branch_models)
-        self.out_conv = nn.Conv2d(in_channels, num_classes, 1)
+        self.out_conv = nn.Conv2d(in_channels, 1, 1)
 
     def forward(self, inputs):
         feats = [branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
@@ -683,172 +380,7 @@ class SimpleReadout(nn.Module):
         x = torch.cat(feats, dim=1)
         # Match FusionDecoder: run the float32 readout even under autocast.
         with torch.autocast(device_type=x.device.type, enabled=False):
-            logits = self.out_conv(x.float())
-            if self.num_classes == 1:
-                return torch.sigmoid(logits).squeeze(1)
-            return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
-
-
-def _location_features(branch_models, name, fallback):
-    """Coordinate width of the branch named `name`.
-
-    Non-identity branches (e.g. coord_fourier) don't expose `input_shape`;
-    `fallback` covers them (md_single's (md_x, md_y) -> 2).
-    """
-    matches = [b for b in branch_models if b.input_name == name]
-    if not matches:
-        raise ValueError(f"film_location '{name}' "
-                         f"matches no input branch")
-    shape = getattr(matches[0], "input_shape", None)
-    return shape[-1] if shape is not None else fallback
-
-
-class FiLM(nn.Module):
-    """Feature-wise linear modulation (Perez et al. 2018).
-
-    Produces a per-channel scale/shift from a conditioning vector and applies it
-    to a (batch, C, H, W) feature map (spatially uniform). The projection is
-    zero-initialized so the layer starts as the identity transform
-    (gamma = beta = 0), giving a stable warmup.
-    """
-
-    def __init__(self, cond_dim, num_channels):
-        super().__init__()
-        self.proj = nn.Linear(cond_dim, 2 * num_channels)
-        nn.init.zeros_(self.proj.weight)
-        nn.init.zeros_(self.proj.bias)
-
-    def forward(self, x, cond):
-        gamma, beta = self.proj(cond).chunk(2, dim=1)
-        gamma = gamma.unsqueeze(-1).unsqueeze(-1)
-        beta = beta.unsqueeze(-1).unsqueeze(-1)
-        return x * (1 + gamma) + beta
-
-
-class FiLMFusion(nn.Module):
-    """Climate-conditioned spatial fusion decoder.
-
-    A lightweight alternative to `MTSViTFusion`: spatial-feature branches are
-    concatenated and passed through a convolutional head whose features are
-    FiLM-modulated by an encoding of the temporal climate-index branches (e.g.
-    monthly oceanic indices). The climate state thus globally reweights spatial
-    features rather than being fused as extra channels.
-
-    Because ENSO teleconnections are spatially uneven, the conditioning is a
-    joint function of climate and tile location: a per-tile coordinate (named by
-    `location_input`) is encoded with random Fourier features and *gates* the
-    climate encoding before it generates the per-channel gamma/beta, so the same
-    climate state modulates different tiles differently. `location_input` is
-    optional; without it the decoder reduces to pure-climate FiLM.
-
-    Branch routing: the branch named `location_input` is the location modulator;
-    identity branches with (T, F) inputs are the climate indices; every other
-    branch provides a (batch, H, W, C) spatial feature map (so spatio-temporal
-    inputs must use a temporal-reducing branch model such as `convlstm`, not a
-    raw `identity`).
-
-    With num_classes == 1 (binary) returns (batch, H, W) sigmoid probabilities;
-    with num_classes > 1 returns (batch, H, W, num_classes) softmax probabilities.
-    """
-
-    def __init__(self, branch_models, num_classes=1, cond_dim=128,
-                 location_input=None, num_freqs=16, sigma=1.0,
-                 branch_norm=None, branch_norm_exclude=None):
-        super().__init__()
-        self.num_classes = num_classes
-        self.location_input = location_input
-
-        spatial_branches = []
-        context_branches = []
-        location_branch = None
-        for branch in branch_models:
-            if location_input is not None and branch.input_name == location_input:
-                location_branch = branch
-                continue
-            shape = getattr(branch, "input_shape", None)
-            if shape is not None and len(shape) == 2:
-                context_branches.append(branch)
-            else:
-                spatial_branches.append(branch)
-        if location_input is not None and location_branch is None:
-            raise ValueError(
-                f"location_input '{location_input}' matches no input branch")
-        if not context_branches:
-            raise ValueError(
-                "decoder_film needs at least one climate-index input: an "
-                "identity branch with shape [T, F]")
-        if not spatial_branches:
-            raise ValueError("decoder_film needs at least one spatial branch")
-        self.spatial_branches = nn.ModuleList(spatial_branches)
-        self.context_names = [b.input_name for b in context_branches]
-        self.branch_norm = BranchNorm(
-            [b.out_channels for b in spatial_branches],
-            [b.input_name for b in spatial_branches],
-            mode=branch_norm, exclude=branch_norm_exclude)
-
-        # Climate encoder: flatten each (T, F) index series and project.
-        cond_in = sum(s[0] * s[1] for s in
-                      (b.input_shape for b in context_branches))
-        self.conditioner = nn.Sequential(
-            nn.Linear(cond_in, cond_dim), nn.ReLU(),
-            nn.Linear(cond_dim, cond_dim), nn.ReLU(),
-        )
-
-        # Location encoder + gate: tile coordinate -> random Fourier features ->
-        # per-channel gate on the climate code. Zero-initialized gate so the
-        # model starts as pure-climate FiLM and learns the gating on top.
-        if location_input is not None:
-            in_features = location_branch.input_shape[-1]
-            self.register_buffer("freq_proj",
-                                 torch.randn(in_features, num_freqs) * sigma)
-            self.loc_encoder = nn.Sequential(
-                nn.Linear(in_features + 2 * num_freqs, cond_dim), nn.ReLU(),
-                nn.Linear(cond_dim, cond_dim), nn.ReLU(),
-            )
-            self.loc_gate = nn.Linear(cond_dim, 2 * cond_dim)
-            nn.init.zeros_(self.loc_gate.weight)
-            nn.init.zeros_(self.loc_gate.bias)
-
-        in_channels = sum(b.out_channels for b in spatial_branches)
-        self.conv1 = nn.Conv2d(in_channels, 128, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(128)
-        self.film1 = FiLM(cond_dim, 128)
-        self.conv2 = nn.Conv2d(128, 64, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(64)
-        self.film2 = FiLM(cond_dim, 64)
-        self.conv3 = nn.Conv2d(64, 32, 3, padding=1)
-        self.bn3 = nn.BatchNorm2d(32)
-        self.film3 = FiLM(cond_dim, 32)
-        self.conv4 = nn.Conv2d(32, 16, 3, padding=1)
-        self.film4 = FiLM(cond_dim, 16)
-        self.out_conv = nn.Conv2d(16, num_classes, 1)
-
-    def _condition(self, inputs):
-        flat = [inputs[name].flatten(1) for name in self.context_names]
-        cond = self.conditioner(torch.cat(flat, dim=1))
-        if self.location_input is not None:
-            coord = inputs[self.location_input].flatten(1)  # (B, in_features)
-            proj = 2 * math.pi * (coord @ self.freq_proj)
-            feats = torch.cat([coord, proj.sin(), proj.cos()], dim=-1)
-            gamma, beta = self.loc_gate(self.loc_encoder(feats)).chunk(2, dim=1)
-            cond = cond * (1 + gamma) + beta  # location gates climate
-        return cond
-
-    def forward(self, inputs):
-        cond = self._condition(inputs)
-        feats = [branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
-                 for branch in self.spatial_branches]
-        x = torch.cat(self.branch_norm(feats), dim=1)
-        x = F.relu(self.film1(self.bn1(self.conv1(x)), cond))
-        x = F.relu(self.film2(self.bn2(self.conv2(x)), cond))
-        x = F.relu(self.film3(self.bn3(self.conv3(x)), cond))
-        x = F.relu(self.film4(self.conv4(x), cond))
-        # Head output runs in float32 even under autocast
-        with torch.autocast(device_type=x.device.type, enabled=False):
-            logits = self.out_conv(x.float())
-            if self.num_classes == 1:
-                return torch.sigmoid(logits).squeeze(1)
-            return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
+            return torch.sigmoid(self.out_conv(x.float())).squeeze(1)
 
 
 class TransformerLayer(nn.Module):
@@ -871,484 +403,13 @@ class TransformerLayer(nn.Module):
         return x + self.mlp(self.ln2(x))
 
 
-class CrossAttnTemporalLayer(nn.Module):
-    """Temporal transformer layer with cross-attention to shared context tokens.
-
-    Operates on per-patch time sequences (batch * patches, T, dim) and lets each
-    token additionally attend to context tokens (batch, T_ctx, dim) that are
-    shared across patch locations (e.g. monthly climate indices).
-
-    With `loc_dim`, the layer is additionally conditioned on a per-tile location
-    code (see `MTSViTFusion._loc_code`) at two points, which are the two
-    orthogonal axes of a location x climate interaction:
-      - `loc_q_proj` biases the cross-attention query, so *which* months and
-        indices a tile reads out of the climate series depends on where it is
-        (dry-season timing shifts with latitude across the basin);
-      - `loc_gate_proj` scales the attended residual, so *how strongly and in
-        what sign* a tile responds to what it read depends on where it is (the
-        spatially varying coefficient of Chen et al. 2011: ONI drives the
-        eastern Amazon, AMO the south/southwest).
-    Both expansions are zero-initialized, so the conditioned layer is a bitwise
-    identity to the unconditioned one at init. `loc_rank` bottlenecks both,
-    which caps the number of independent spatial modulation patterns
-    ("teleconnection modes") the layer can express.
-    """
-
-    def __init__(self, dim, num_heads, mlp_ratio=2, dropout=0.1,
-                 loc_dim=None, loc_rank=4, loc_inject_q=True,
-                 loc_inject_gate=True):
-        super().__init__()
-        self.ln1 = nn.LayerNorm(dim)
-        self.self_attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout,
-                                               batch_first=True)
-        self.ln_q = nn.LayerNorm(dim)
-        self.ln_kv = nn.LayerNorm(dim)
-        self.cross_attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout,
-                                                batch_first=True)
-        self.ln2 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, mlp_ratio * dim), nn.GELU(), nn.Dropout(dropout),
-            nn.Linear(mlp_ratio * dim, dim), nn.Dropout(dropout),
-        )
-        # Built only when `loc_dim` is given, so the default layer's parameter
-        # set (and state_dict) is exactly what it was before this option.
-        self.loc_dim = loc_dim
-        if loc_dim is not None:
-            self.loc_down = nn.Linear(loc_dim, loc_rank)
-            self.loc_q_proj = nn.Linear(loc_rank, dim) if loc_inject_q else None
-            self.loc_gate_proj = (nn.Linear(loc_rank, dim) if loc_inject_gate
-                                  else None)
-            for proj in (self.loc_q_proj, self.loc_gate_proj):
-                if proj is not None:
-                    nn.init.zeros_(proj.weight)
-                    nn.init.zeros_(proj.bias)
-
-    def forward(self, x, context, loc=None):
-        # x: (B*N, T, D); context: (B, T_ctx, D); loc: (B, loc_dim) or None
-        y = self.ln1(x)
-        x = x + self.self_attn(y, y, y, need_weights=False)[0]
-        # Every patch location attends to the same context, so fold the patch
-        # axis into the query token axis instead of expanding key/values.
-        bn, t, d = x.shape
-        b = context.shape[0]
-        code = (self.loc_down(loc)
-                if (self.loc_dim is not None and loc is not None) else None)
-        # The fold below is tile-major, so a per-tile (B, D) term broadcasts
-        # over the folded token axis -- no per-patch expansion is needed, and
-        # the key/values stay (B, T_ctx, D).
-        q = self.ln_q(x).reshape(b, (bn // b) * t, d)
-        if code is not None and self.loc_q_proj is not None:
-            q = q + self.loc_q_proj(code).unsqueeze(1)
-        kv = self.ln_kv(context)
-        attended = self.cross_attn(q, kv, kv, need_weights=False)[0]
-        if code is not None and self.loc_gate_proj is not None:
-            # Deliberately unbounded: 1 + tanh(g) would forbid the sign
-            # inversion that opposite-signed teleconnections require.
-            attended = attended * (1 + self.loc_gate_proj(code).unsqueeze(1))
-        x = x + attended.reshape(bn, t, d)
-        return x + self.mlp(self.ln2(x))
-
-
-class MTSViTFusion(nn.Module):
-    """Multi-step temporo-spatial fusion (TSViT/MTSViT-inspired).
-
-    Stage 1 (temporal): each spatio-temporal modality is patch-embedded per
-    frame; a temporal transformer encoder (shared across modalities) runs
-    self-attention over each patch location's time series with cross-attention
-    to temporal context tokens (e.g. monthly oceanic indices), and a per-
-    modality cls token summarizes the series. With `climate_loc_attn`, that
-    cross-attention is conditioned on the tile's coordinates, so the climate
-    response can vary geographically instead of being one global function
-    (see `CrossAttnTemporalLayer`); `context_dropout` blanks the context for a
-    fraction of training samples to keep that pathway a correction.
-    Stage 2 (spatial): modality tokens (optionally plus the patch-embedded
-    single-timestep spatial branches, when `spatial_in_encoder`) are fused per
-    patch location and mixed by a spatial transformer encoder.
-    Stage 3 (decoder): tokens are progressively upsampled to full resolution,
-    concatenated with the (full-resolution) single-timestep spatial branches,
-    and passed through a convolutional segmentation head. With num_classes == 1
-    (binary) returns (batch, H, W) sigmoid probabilities; with num_classes > 1
-    returns (batch, H, W, num_classes) softmax probabilities.
-
-    Branch routing: identity branches with (T, H, W, C) inputs are the
-    spatio-temporal modalities; identity branches with (T, F) inputs are the
-    temporal context; all other branches provide spatial features to the
-    segmentation head (at full resolution) and, when `spatial_in_encoder` is set,
-    also to the spatial encoder (patch-embedded).
-    """
-
-    def __init__(self, branch_models, num_classes=1, embed_dim=128,
-                 patch_size=8, temporal_depth=2, spatial_depth=2, num_heads=4,
-                 mlp_ratio=2, dropout=0.1, spatial_in_encoder=False,
-                 branch_norm=None, branch_norm_exclude=None,
-                 transformer_out_channels=16, climate_film=False,
-                 film_location=None, film_cond_dim=128, film_num_freqs=16,
-                 film_sigma=1.0, film_location_features=2,
-                 climate_loc_attn=False, loc_dim=64, loc_rank=4,
-                 loc_inject_q=True, loc_inject_gate=True, context_dropout=0.0,
-                 year_group=None, year_offset=None):
-        super().__init__()
-        self.num_classes = num_classes
-        self.embed_dim = embed_dim
-        self.patch_size = patch_size
-        self.spatial_in_encoder = spatial_in_encoder
-
-        # Frozen gamma(t): the same additive log-odds year offset the factored
-        # model carries (see factored.YearOffset). The md_year group is pulled out
-        # of branch routing here -- its identity branch has a rank-2 shape and would
-        # otherwise mis-route as (T, F) temporal context -- and only the raw
-        # inputs[year_group] value is read, in forward, just before the sigmoid.
-        self.year_group = year_group
-        if year_offset is not None and num_classes != 1:
-            raise ValueError(
-                "MTSViTFusion year_offset is an additive log-odds term and is "
-                f"binary-only; got num_classes={num_classes}. Use a fusion decoder "
-                "for multiclass.")
-        # Local import: factored.py imports TransformerLayer from this module, so a
-        # module-level import here would be circular (mirrors the factories below).
-        from .factored import build_year_offset
-        self.year = build_year_offset(year_offset, year_group)
-        if year_group is not None:
-            branch_models = [b for b in branch_models if b.input_name != year_group]
-
-        spatiotemporal_branches = []
-        temporal_branches = []
-        spatial_branches = []
-        for branch in branch_models:
-            # Only identity branches expose `input_shape` and are routed by rank:
-            # (T, H, W, C) -> spatio-temporal modality, (T, F) -> temporal
-            # context, (H, W, C) -> spatial features. Every other branch (e.g. a
-            # unet_lite CNN) is a spatial feature branch whose output is
-            # concatenated into the segmentation head.
-            shape = getattr(branch, "input_shape", None)
-            if shape is None:
-                spatial_branches.append(branch)
-            elif len(shape) == 4:
-                spatiotemporal_branches.append(branch)
-            elif len(shape) == 2:
-                temporal_branches.append(branch)
-            elif len(shape) == 3:
-                spatial_branches.append(branch)
-            else:
-                raise ValueError(f'Cannot determine type of branch model {branch}')
-        if not spatiotemporal_branches:
-            raise ValueError(
-                "decoder_mtsvit needs at least one spatio-temporal input: an "
-                "identity branch with timesteps and shape [H, W]")
-        self.spatial_branches = nn.ModuleList(spatial_branches)
-        self.temporal_names = [b.input_name for b in spatiotemporal_branches]
-        self.context_names = [b.input_name for b in temporal_branches]
-
-        # Per-modality patch embedding, temporal position embedding, cls token
-        self.patch_embeds = nn.ModuleDict()
-        self.temporal_pos = nn.ParameterDict()
-        self.cls_tokens = nn.ParameterDict()
-        height, width = spatiotemporal_branches[0].input_shape[1:3]
-        if height % patch_size or width % patch_size:
-            raise ValueError(f"patch_size {patch_size} must divide H, W "
-                             f"({height}, {width})")
-        self.grid = (height // patch_size, width // patch_size)
-        num_patches = self.grid[0] * self.grid[1]
-        for branch in spatiotemporal_branches:
-            steps, h, w, channels = branch.input_shape
-            if (h, w) != (height, width):
-                raise ValueError("All spatio-temporal inputs must share H, W")
-            name = branch.input_name
-            self.patch_embeds[name] = nn.Conv2d(channels, embed_dim,
-                                                patch_size, stride=patch_size)
-            self.temporal_pos[name] = nn.Parameter(
-                torch.zeros(steps, embed_dim))
-            self.cls_tokens[name] = nn.Parameter(
-                torch.zeros(1, 1, 1, embed_dim))
-
-        # Temporal context (climate indices): project + position embedding
-        self.context_projs = nn.ModuleDict()
-        self.context_pos = nn.ParameterDict()
-        for branch in temporal_branches:
-            steps, features = branch.input_shape
-            name = branch.input_name
-            self.context_projs[name] = nn.Linear(features, embed_dim)
-            self.context_pos[name] = nn.Parameter(
-                torch.zeros(steps, embed_dim))
-
-        # Optional per-tile location conditioning of the stage-1 cross-attention
-        # (see CrossAttnTemporalLayer). Off by default; the location code is
-        # read from `film_location`'s raw input, so that branch keeps its normal
-        # route into the spatial branches.
-        self.climate_loc_attn = climate_loc_attn
-        self.context_dropout = context_dropout
-        self.loc_dim = loc_dim if climate_loc_attn else None
-        if climate_loc_attn:
-            if not temporal_branches:
-                raise ValueError(
-                    "climate_loc_attn needs at least one temporal-context "
-                    "input: an identity branch with shape [T, F]")
-            if film_location is None:
-                raise ValueError(
-                    "climate_loc_attn needs film_location (the input key "
-                    "holding the per-tile coordinates, e.g. 'md_single')")
-
-        # Stage 1: temporal encoder (cross-attends to context when present)
-        if temporal_branches:
-            self.temporal_layers = nn.ModuleList([
-                CrossAttnTemporalLayer(
-                    embed_dim, num_heads, mlp_ratio, dropout,
-                    loc_dim=self.loc_dim, loc_rank=loc_rank,
-                    loc_inject_q=loc_inject_q, loc_inject_gate=loc_inject_gate)
-                for _ in range(temporal_depth)])
-        else:
-            self.temporal_layers = nn.ModuleList([
-                TransformerLayer(embed_dim, num_heads, mlp_ratio, dropout)
-                for _ in range(temporal_depth)])
-
-        # Stage 2: fuse the temporal modality summaries per patch, then spatial
-        # encoder. When `spatial_in_encoder`, single-timestep spatial branches
-        # are also patch-embedded down to the token grid so they join cross-patch
-        # attention (they feed the head at full resolution either way).
-        num_token_sources = len(spatiotemporal_branches)
-        if spatial_in_encoder:
-            self.spatial_patch_embeds = nn.ModuleDict()
-            for branch in spatial_branches:
-                self.spatial_patch_embeds[branch.input_name] = nn.Conv2d(
-                    branch.out_channels, embed_dim, patch_size, stride=patch_size)
-            num_token_sources += len(spatial_branches)
-        self.modality_fuse = nn.Linear(num_token_sources * embed_dim, embed_dim)
-        self.spatial_pos = nn.Parameter(torch.zeros(num_patches, embed_dim))
-        self.spatial_layers = nn.ModuleList([
-            TransformerLayer(embed_dim, num_heads, mlp_ratio, dropout)
-            for _ in range(spatial_depth)])
-
-        # Stage 3: upsample tokens back to full resolution.
-        # `transformer_out_channels` floors the halving, setting the width the
-        # transformer contributes to the fusion concat (default 16). This
-        # controls how much of the head's channel budget the temporal/
-        # weather/climate pathway gets vs the full-res spatial branches.
-        upsample = []
-        in_ch = embed_dim
-        scale = patch_size
-        while scale > 1:
-            out_ch = max(in_ch // 2, transformer_out_channels)
-            upsample.append(nn.Upsample(scale_factor=2, mode="bilinear"))
-            upsample.append(nn.Conv2d(in_ch, out_ch, 3, padding=1))
-            upsample.append(nn.ReLU())
-            in_ch = out_ch
-            scale //= 2
-        self.upsample = nn.Sequential(*upsample)
-
-        # Segmentation head over upsampled tokens + spatial branch features.
-        # The concat order is [upsampled transformer features] + spatial branches;
-        # branch_norm matches that order (label "<transformer>" for the former).
-        self.branch_norm = BranchNorm(
-            [in_ch] + [b.out_channels for b in spatial_branches],
-            ["<transformer>"] + [b.input_name for b in spatial_branches],
-            mode=branch_norm, exclude=branch_norm_exclude)
-        head_in = in_ch + sum(b.out_channels for b in spatial_branches)
-        self.head = nn.Sequential(
-            nn.Conv2d(head_in, 128, 3, padding=1), nn.ReLU(), nn.BatchNorm2d(128),
-            nn.Conv2d(128, 64, 3, padding=1), nn.ReLU(), nn.BatchNorm2d(64),
-            nn.Conv2d(64, 32, 3, padding=1), nn.ReLU(), nn.BatchNorm2d(32),
-            nn.Conv2d(32, 16, 3, padding=1), nn.ReLU(),
-        )
-        self.out_conv = nn.Conv2d(16, num_classes, 1)
-
-        # Optional climate x location FiLM over the head (the MTSViT port of
-        # the standalone FiLMFusion decoder's mechanism. The rank-2 context
-        # branches (monthly climate indices) are encoded to a conditioning
-        # vector, optionally gated per tile by the `film_location` coordinates
-        # (random Fourier features, zero-init gate -- ENSO teleconnections are
-        # spatially uneven), and zero-init FiLM layers modulate each head
-        # stage. Identity at init, and `head.*` parameter names are unchanged.
-        self.climate_film = climate_film
-        self.film_location = film_location
-        if climate_film:
-            if not temporal_branches:
-                raise ValueError(
-                    "climate_film needs at least one temporal-context input: "
-                    "an identity branch with shape [T, F]")
-            cond_in = sum(b.input_shape[0] * b.input_shape[1]
-                          for b in temporal_branches)
-            self.film_conditioner = nn.Sequential(
-                nn.Linear(cond_in, film_cond_dim), nn.ReLU(),
-                nn.Linear(film_cond_dim, film_cond_dim), nn.ReLU(),
-            )
-            if film_location is not None:
-                in_features = _location_features(branch_models, film_location,
-                                                 film_location_features)
-                self.register_buffer(
-                    "film_freq_proj",
-                    torch.randn(in_features, film_num_freqs) * film_sigma)
-                self.film_loc_encoder = nn.Sequential(
-                    nn.Linear(in_features + 2 * film_num_freqs,
-                              film_cond_dim), nn.ReLU(),
-                    nn.Linear(film_cond_dim, film_cond_dim), nn.ReLU(),
-                )
-                self.film_loc_gate = nn.Linear(film_cond_dim,
-                                               2 * film_cond_dim)
-                nn.init.zeros_(self.film_loc_gate.weight)
-                nn.init.zeros_(self.film_loc_gate.bias)
-            # One FiLM per head stage (the head's conv widths are fixed).
-            self.films = nn.ModuleList(
-                [FiLM(film_cond_dim, c) for c in (128, 64, 32, 16)])
-
-        # Shared per-tile location encoder feeding the stage-1 cross-attention
-        # layers. Mirrors the film_location encoder above (random Fourier
-        # features over the normalized coordinates) with its own registered
-        # buffer, so the two mechanisms stay independent and each is saved with
-        # the model.
-        if climate_loc_attn:
-            loc_in_features = _location_features(branch_models, film_location,
-                                                 film_location_features)
-            self.register_buffer(
-                "loc_freq_proj",
-                torch.randn(loc_in_features, film_num_freqs) * film_sigma)
-            self.loc_encoder = nn.Sequential(
-                nn.Linear(loc_in_features + 2 * film_num_freqs, loc_dim),
-                nn.ReLU(),
-                nn.Linear(loc_dim, loc_dim), nn.ReLU(),
-            )
-
-        for pos in list(self.temporal_pos.values()) + list(self.context_pos.values()):
-            nn.init.trunc_normal_(pos, std=0.02)
-        nn.init.trunc_normal_(self.spatial_pos, std=0.02)
-        for cls in self.cls_tokens.values():
-            nn.init.trunc_normal_(cls, std=0.02)
-
-    def _film_condition(self, inputs):
-        """Climate conditioning vector, optionally gated by tile location
-        (mirrors FiLMFusion._condition)."""
-        flat = [inputs[name].flatten(1) for name in self.context_names]
-        cond = self.film_conditioner(torch.cat(flat, dim=1))
-        if self.film_location is not None:
-            coord = inputs[self.film_location].flatten(1)
-            proj = 2 * math.pi * (coord @ self.film_freq_proj)
-            feats = torch.cat([coord, proj.sin(), proj.cos()], dim=-1)
-            gamma, beta = self.film_loc_gate(
-                self.film_loc_encoder(feats)).chunk(2, dim=1)
-            cond = cond * (1 + gamma) + beta  # location gates climate
-        return cond
-
-    def _loc_code(self, inputs):
-        """Per-tile location embedding (B, loc_dim) for the stage-1 layers.
-
-        Same random-Fourier recipe as `_film_condition`'s location gate, with
-        its own buffer and encoder.
-        """
-        coord = inputs[self.film_location].flatten(1)
-        proj = 2 * math.pi * (coord @ self.loc_freq_proj)
-        feats = torch.cat([coord, proj.sin(), proj.cos()], dim=-1)
-        return self.loc_encoder(feats)
-
-    @torch.no_grad()
-    def location_gates(self, inputs):
-        """Per-tile stage-1 climate gates, (B, temporal_depth, embed_dim).
-
-        Row norms plotted against the tile coordinates give a map of how
-        strongly each place's temporal encoder responds to the climate context.
-        A partial view only -- it says nothing about the query bias -- so treat
-        `scripts/probe_year_sensitivity.py` as the primary diagnostic.
-        """
-        code = self._loc_code(inputs)
-        return torch.stack([layer.loc_gate_proj(layer.loc_down(code))
-                            for layer in self.temporal_layers], dim=1)
-
-    def _encode_context(self, inputs):
-        if not self.context_names:
-            return None
-        tokens = [self.context_projs[name](inputs[name]) + self.context_pos[name]
-                  for name in self.context_names]
-        context = torch.cat(tokens, dim=1)
-        if self.training and self.context_dropout > 0:
-            # Blank the whole climate context for a random subset of samples so
-            # the rest of the model stays predictive without it and the climate
-            # pathway can only earn a correction -- a guard against keying on
-            # the handful of distinct index series in the training years.
-            # Deliberately not rescaled by 1/(1-p): a null context is a state
-            # the model must handle, not an expectation to preserve.
-            keep = (torch.rand(context.shape[0], 1, 1, device=context.device)
-                    >= self.context_dropout).to(context.dtype)
-            context = context * keep
-        return context
-
-    def _encode_temporal(self, x, name, context, loc=None):
-        # x: (B, T, H, W, C) -> patch tokens (B, N, T, D)
-        batch, steps = x.shape[:2]
-        x = _time_distributed(self.patch_embeds[name],
-                              x.permute(0, 1, 4, 2, 3))
-        x = x.flatten(3).permute(0, 3, 1, 2)  # (B, N, T, D)
-        x = x + self.temporal_pos[name]
-        cls = self.cls_tokens[name].expand(batch, x.shape[1], 1, -1)
-        x = torch.cat([cls, x], dim=2).flatten(0, 1)  # (B*N, T+1, D)
-        for layer in self.temporal_layers:
-            x = layer(x, context, loc) if context is not None else layer(x)
-        return x[:, 0].unflatten(0, (batch, -1))  # cls token: (B, N, D)
-
-    def forward(self, inputs):
-        loc = self._loc_code(inputs) if self.climate_loc_attn else None
-        context = self._encode_context(inputs)
-
-        # Stage 1: temporal encoding per modality
-        tokens = [self._encode_temporal(inputs[name], name, context, loc)
-                  for name in self.temporal_names]
-
-        # Spatial branches: full-res feature maps (channels-first), computed once
-        # and reused by the (optional) spatial-encoder tokens and the decoder head.
-        spatial_feats = [branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
-                         for branch in self.spatial_branches]
-
-        # Optionally patch-embed each spatial map to the patch grid and add it as
-        # another token source for the spatial encoder.
-        if self.spatial_in_encoder:
-            for branch, feat in zip(self.spatial_branches, spatial_feats):
-                emb = self.spatial_patch_embeds[branch.input_name](feat)  # (B,D,gh,gw)
-                tokens.append(emb.flatten(2).permute(0, 2, 1))           # (B, N, D)
-
-        # Stage 2: fuse all token sources, spatial encoding
-        x = self.modality_fuse(torch.cat(tokens, dim=-1)) + self.spatial_pos
-        for layer in self.spatial_layers:
-            x = layer(x)
-
-        # Stage 3: upsample and fuse with spatial branches
-        batch = x.shape[0]
-        x = x.permute(0, 2, 1).reshape(batch, self.embed_dim, *self.grid)
-        x = self.upsample(x)
-        x = torch.cat(self.branch_norm([x] + spatial_feats), dim=1)
-        if self.climate_film:
-            cond = self._film_condition(inputs)
-            # Head layout is [Conv, ReLU, BN] x3 + [Conv, ReLU]; apply one
-            # FiLM at each stage boundary (after indices 2, 5, 8, 10).
-            film_at = {2: 0, 5: 1, 8: 2, 10: 3}
-            for i, module in enumerate(self.head):
-                x = module(x)
-                if i in film_at:
-                    x = self.films[film_at[i]](x, cond)
-        else:
-            x = self.head(x)
-        # Head output runs in float32 even under autocast
-        with torch.autocast(device_type=x.device.type, enabled=False):
-            logits = self.out_conv(x.float())
-            if self.num_classes == 1:
-                if self.year is not None:
-                    # gamma(t): frozen (B,1,1,1) log-odds offset, broadcasts over (B,1,H,W)
-                    logits = logits + self.year(inputs[self.year_group])
-                return torch.sigmoid(logits).squeeze(1)
-            return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
-
-
 class VanillaViT(nn.Module):
     """Textbook Vision Transformer segmentation baseline (no domain structure).
 
     Deliberately the naive-practitioner reference point for the architecture
-    comparison: every branch is expected to be an ``identity`` (or
-    ``projection``) branch, so there are NO per-modality encoders. Any other
-    branch kind raises -- that structure is exactly what this baseline exists to
-    do without.
-
-    Spatial branches (rank-3 ``[H, W, C]`` input_shape; time is folded into the
-    channel axis via ``stack_timesteps: false``) are concatenated on the channel
-    axis. Non-spatial branches (e.g. per-tile coordinates ``[1, F]`` or a
-    climate-index series ``[T, F]``) are flattened per sample and broadcast as
-    spatially constant channels, so scalar covariates simply enter as extra
-    image channels.
+    comparison: every branch must be a spatial ``identity`` branch (rank-3
+    ``[H, W, C]`` input_shape; time is folded into the channel axis via
+    ``stack_timesteps: false``), so there are NO per-modality encoders.
 
     The stacked channel image is patch-embedded with a single strided conv, a
     learned position embedding is added, ``depth`` standard (joint) self-
@@ -1357,62 +418,35 @@ class VanillaViT(nn.Module):
     There is no convolutional segmentation head -- that absence is the point of
     the vanilla baseline, and a known confound vs the other decoders (whose
     shared conv head supplies most of their fine-scale spatial context) when the
-    result is reported.
-
-    With num_classes == 1 (binary) returns (batch, H, W) sigmoid probabilities;
-    with num_classes > 1 returns (batch, H, W, num_classes) softmax
-    probabilities -- matching FusionDecoder / MTSViTFusion.
+    result is reported. Returns (batch, H, W) sigmoid probabilities.
     """
 
-    def __init__(self, branch_models, num_classes=1, embed_dim=128,
-                 patch_size=8, depth=4, num_heads=4, mlp_ratio=2, dropout=0.1):
+    def __init__(self, branch_models, embed_dim=128, patch_size=8, depth=4,
+                 num_heads=4, mlp_ratio=2, dropout=0.1):
         super().__init__()
-        self.num_classes = num_classes
         self.embed_dim = embed_dim
         self.patch_size = patch_size
         self.branches = nn.ModuleList(branch_models)
 
-        # Route branches by the rank of the input they consume. Only identity /
-        # projection branches expose `input_shape`; a branch without one is a
-        # per-modality encoder, which this vanilla baseline forbids on purpose.
-        self.broadcast_names = set()
-        height = width = None
-        spatial_channels = 0
-        broadcast_channels = 0
+        shapes = set()
         for branch in branch_models:
             shape = getattr(branch, "input_shape", None)
-            if shape is None:
+            if shape is None or len(shape) != 3:
                 raise ValueError(
-                    f"decoder_vit expects identity/projection branches only "
-                    f"(no per-modality encoders); branch '{branch.input_name}' "
-                    f"is a {type(branch).__name__}")
-            if len(shape) == 3:
-                h, w, _ = shape
-                if height is None:
-                    height, width = h, w
-                elif (h, w) != (height, width):
-                    raise ValueError(
-                        "All spatial inputs must share H, W; got "
-                        f"({h}, {w}) vs ({height}, {width})")
-                spatial_channels += branch.out_channels
-            else:
-                # Flattened per-sample width: the product of every non-batch dim
-                # (e.g. a [T, F] series -> T*F spatially constant channels).
-                self.broadcast_names.add(branch.input_name)
-                broadcast_channels += math.prod(shape)
-        if height is None:
-            raise ValueError(
-                "decoder_vit needs at least one spatial input: an identity "
-                "branch with shape [H, W] (stack_timesteps false folds time "
-                "into channels)")
+                    f"decoder_vit expects spatial identity branches only; branch "
+                    f"'{branch.input_name}' is a {type(branch).__name__} with "
+                    f"input_shape {shape}")
+            shapes.add(tuple(shape[:2]))
+        if len(shapes) != 1:
+            raise ValueError(f"All spatial inputs must share H, W; got {sorted(shapes)}")
+        height, width = shapes.pop()
         if height % patch_size or width % patch_size:
             raise ValueError(f"patch_size {patch_size} must divide H, W "
                              f"({height}, {width})")
-        self.height, self.width = height, width
         self.grid = (height // patch_size, width // patch_size)
         num_patches = self.grid[0] * self.grid[1]
 
-        in_channels = spatial_channels + broadcast_channels
+        in_channels = sum(m.out_channels for m in branch_models)
         self.patch_embed = nn.Conv2d(in_channels, embed_dim, patch_size,
                                      stride=patch_size)
         self.pos = nn.Parameter(torch.zeros(num_patches, embed_dim))
@@ -1420,23 +454,12 @@ class VanillaViT(nn.Module):
             TransformerLayer(embed_dim, num_heads, mlp_ratio, dropout)
             for _ in range(depth)])
         self.decode_norm = nn.LayerNorm(embed_dim)
-        self.decode = nn.Linear(embed_dim,
-                                patch_size * patch_size * num_classes)
+        self.decode = nn.Linear(embed_dim, patch_size * patch_size)
         nn.init.trunc_normal_(self.pos, std=0.02)
 
     def forward(self, inputs):
-        h, w = self.height, self.width
-        feats = []
-        for branch in self.branches:
-            out = branch(inputs[branch.input_name])
-            if branch.input_name in self.broadcast_names:
-                # (B, ...) -> (B, K) -> (B, K, H, W) spatially constant channels
-                flat = out.reshape(out.shape[0], -1)
-                feats.append(flat[:, :, None, None].expand(-1, -1, h, w))
-            else:
-                # (B, H, W, C) -> (B, C, H, W)
-                feats.append(out.permute(0, 3, 1, 2))
-        x = torch.cat(feats, dim=1)
+        x = torch.cat([branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
+                       for branch in self.branches], dim=1)
 
         # Patchify -> tokens, add position embedding, joint self-attention.
         batch = x.shape[0]
@@ -1445,46 +468,24 @@ class VanillaViT(nn.Module):
         for layer in self.layers:
             x = layer(x)
 
-        # Linear patch-decode: each token -> its p x p x num_classes block,
-        # reassembled into a full-resolution map (a transposed patch embed).
+        # Linear patch-decode: each token -> its p x p block, reassembled into a
+        # full-resolution map (a transposed patch embed).
         gh, gw = self.grid
-        p, c = self.patch_size, self.num_classes
-        x = self.decode(self.decode_norm(x))          # (B, N, p*p*c)
-        x = x.reshape(batch, gh, gw, p, p, c)
-        x = x.permute(0, 5, 1, 3, 2, 4).reshape(batch, c, gh * p, gw * p)
+        p = self.patch_size
+        x = self.decode(self.decode_norm(x))          # (B, N, p*p)
+        x = x.reshape(batch, gh, gw, p, p)
+        x = x.permute(0, 1, 3, 2, 4).reshape(batch, gh * p, gw * p)
         # Head output runs in float32 even under autocast (matches other decoders).
         with torch.autocast(device_type=x.device.type, enabled=False):
-            logits = x.float()
-            if self.num_classes == 1:
-                return torch.sigmoid(logits).squeeze(1)
-            return torch.softmax(logits, dim=1).permute(0, 2, 3, 1)
+            return torch.sigmoid(x.float())
 
 
 # ---------------------------------------------------------------------------
 # Factories (looked up dynamically by trainer.build_model / build_decoder)
 # ---------------------------------------------------------------------------
 
-def get_unet(input_shape, input_name=None, for_fusion=True, base_filters=64):
-    return UNet(input_shape, input_name, for_fusion=for_fusion,
-                base_filters=base_filters)
-
-
-def get_unet_lite(input_shape, input_name=None, for_fusion=True,
-                  base_filters=16):
-    return UNetLite(input_shape, input_name, for_fusion=for_fusion,
-                    base_filters=base_filters)
-
-
-def get_projection(input_shape, input_name=None, out_channels=16):
-    return ProjectionModel(input_shape, input_name, out_channels=out_channels)
-
-
-def get_mlp(input_shape, input_name=None):
-    return MLP(input_shape, input_name)
-
-
-def get_mlp_for_fusion(input_shape, input_name=None):
-    return MLPForFusion(input_shape, input_name)
+def get_unet(input_shape, input_name=None, base_filters=64):
+    return UNet(input_shape, input_name, base_filters=base_filters)
 
 
 def get_coord_fourier(input_shape, input_name=None):
@@ -1493,24 +494,12 @@ def get_coord_fourier(input_shape, input_name=None):
 
 def get_pixel_mlp(input_shape, input_name=None, hidden=(128, 64), out_channels=32,
                   dropout=0.3):
-    # `hidden`/`dropout` pass through so a pixel_mlp branch can be capacity-matched
-    # to the pixel_temporal encoder it replaces (factored_v1_pixelmlp). Defaults are
-    # PixelMLP's own, so every existing config is unaffected.
     return PixelMLP(input_shape, input_name, hidden=hidden,
                     out_channels=out_channels, dropout=dropout)
 
 
 def get_pixel_lstm(input_shape, input_name=None, hidden=32):
     return PixelLSTM(input_shape, input_name, hidden=hidden)
-
-
-def get_multi_scale_mlp_head(input_shape, input_name=None, hidden=128):
-    return MultiScaleMLPHead(input_shape, input_name, hidden=hidden)
-
-
-def get_simple_convlstm(input_shape, input_name=None):
-    return SimpleConvLSTM(input_shape, input_name)
-
 
 def get_convlstm(input_shape, input_name=None, for_fusion=True):
     return ConvLSTMModel(input_shape, input_name, for_fusion=for_fusion)
@@ -1520,54 +509,28 @@ def get_convlstm_bottleneck(input_shape, input_name=None, for_fusion=True):
     return ConvLSTMBottleneck(input_shape, input_name, for_fusion=for_fusion)
 
 
-def get_lstm(input_shape, input_name=None):
-    return LSTMModel(input_shape, input_name)
-
-
-def get_transformer(input_shape, input_name=None):
-    return TransformerModel(input_shape, input_name)
-
 
 def get_identity(input_shape, input_name=None):
     return IdentityModel(input_shape, input_name)
 
 
-def decoder_fusion(branch_models, num_classes=1, **kwargs):
-    """branch_models: list of branch modules (e.g. [lstm_branch, cnn_branch]).
-
-    kwargs come from config['decoder_config'] (e.g. branch_norm, head_kernel)."""
-    return FusionDecoder(branch_models, num_classes=num_classes, **kwargs)
+def decoder_fusion(branch_models, **kwargs):
+    """Conv-head fusion of the branches; kwargs from config['decoder_config']."""
+    return FusionDecoder(branch_models, **kwargs)
 
 
-def decoder_simple(branch_models, num_classes=1, **kwargs):
-    """Bare 1x1 linear readout over the branches (see SimpleReadout).
-
-    For the naive per-pixel MLP baseline: pair with a single all-bands PixelMLP
-    branch so the model is that MLP plus a linear output layer, nothing else.
-    Takes no decoder_config kwargs."""
-    return SimpleReadout(branch_models, num_classes=num_classes)
+def decoder_simple(branch_models):
+    """Bare 1x1 linear readout over the branches (see SimpleReadout)."""
+    return SimpleReadout(branch_models)
 
 
-def decoder_mtsvit(branch_models, num_classes=1, **kwargs):
-    """Multi-step temporo-spatial fusion; kwargs come from config['decoder_config']."""
-    return MTSViTFusion(branch_models, num_classes=num_classes, **kwargs)
-
-
-def decoder_film(branch_models, num_classes=1, **kwargs):
-    """Climate(×location)-conditioned spatial fusion; kwargs from config['decoder_config']."""
-    return FiLMFusion(branch_models, num_classes=num_classes, **kwargs)
-
-
-def decoder_vit(branch_models, num_classes=1, **kwargs):
-    """Vanilla Vision Transformer baseline; kwargs come from config['decoder_config']."""
-    return VanillaViT(branch_models, num_classes=num_classes, **kwargs)
+def decoder_vit(branch_models, **kwargs):
+    """Vanilla Vision Transformer baseline; kwargs from config['decoder_config']."""
+    return VanillaViT(branch_models, **kwargs)
 
 
 # --- Factored two-scale model (src/aic_risk_modeling/train/factored.py) --------
-# Thin wrappers so trainer.build_model / build_decoder find these by name via
-# getattr(models, ...). The imports are function-local on purpose: factored.py
-# imports TransformerLayer from this module, so a module-level import here would
-# be circular.
+# Function-local imports: factored.py imports TransformerLayer from this module.
 
 def get_pixel_temporal(input_shape, input_name=None, **kwargs):
     """Per-pixel temporal transformer; full resolution, no patch tokenization."""
@@ -1581,7 +544,7 @@ def get_coarse_temporal(input_shape, input_name=None, **kwargs):
     return CoarseTemporalEncoder(input_shape, input_name=input_name, **kwargs)
 
 
-def decoder_factored(branch_models, num_classes=1, **kwargs):
+def decoder_factored(branch_models, **kwargs):
     """logit = gamma(t) + m(x,t) + s(x,t) + c(x,t); kwargs from config['decoder_config']."""
     from .factored import FactoredFireModel
-    return FactoredFireModel(branch_models, num_classes=num_classes, **kwargs)
+    return FactoredFireModel(branch_models, **kwargs)
