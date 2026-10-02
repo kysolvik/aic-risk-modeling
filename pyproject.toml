@@ -7,7 +7,7 @@ name = "aic-risk-modeling"
 version = "0.3.6"
 description = "Amazon fire risk modeling utilities"
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = { text = "MIT" }
 authors = [
     { name = "Kylen Solvik", email = "kylen.solvik@columbia.edu" }
     ]
