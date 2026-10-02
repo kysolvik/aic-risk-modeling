@@ -128,51 +128,6 @@ def _probs_to_logits(scores, eps=_PROB_EPS):
     return np.log(p / (1.0 - p))
 
 
-def apply_temperature(scores, temperature, eps=_PROB_EPS):
-    """Temperature-scale saved sigmoid probabilities.
-
-    Recovers logits from ``scores``, divides by ``temperature`` (T > 1 softens an
-    overconfident model toward 0.5; T < 1 sharpens), and re-applies the sigmoid.
-    Returns probabilities with the same shape as ``scores``.
-    """
-    if temperature is None or temperature <= 0:
-        raise ValueError(f"temperature must be a positive float, got {temperature!r}")
-    logits = _probs_to_logits(scores, eps=eps) / float(temperature)
-    # Stable sigmoid (avoids overflow in exp for large-magnitude logits).
-    out = np.where(logits >= 0,
-                   1.0 / (1.0 + np.exp(-logits)),
-                   np.exp(logits) / (1.0 + np.exp(logits)))
-    return out.reshape(np.shape(scores))
-
-
-def fit_temperature(scores, labels, eps=_PROB_EPS, bounds=(1e-2, 1e2)):
-    """Fit the NLL-minimizing temperature for saved sigmoid probabilities.
-
-    Recovers logits from ``scores`` and finds the scalar T that minimizes the
-    binary cross-entropy of ``sigmoid(logit / T)`` against ``labels`` (the
-    standard temperature-scaling objective of Guo et al. 2017). The NLL is
-    computed directly from logits via softplus for numerical stability.
-
-    Fit T on a held-out calibration split and apply it to the test set; fitting
-    and reporting on the same set (in-sample). Returns the fitted temperature
-    as a float (1.0 if there are no usable samples).
-    """
-    from scipy.optimize import minimize_scalar
-
-    logits = _probs_to_logits(scores, eps=eps)
-    y = np.asarray(labels).reshape(-1).astype(np.float64)
-    if logits.size == 0:
-        return 1.0
-
-    def nll(temperature):
-        s = logits / temperature
-        # -log-likelihood per sample = softplus(s) - y * s; mean over pixels.
-        return float(np.mean(np.logaddexp(0.0, s) - y * s))
-
-    result = minimize_scalar(nll, bounds=bounds, method="bounded")
-    return float(result.x)
-
-
 def _sigmoid_stable(s):
     """Numerically stable elementwise sigmoid."""
     return np.where(s >= 0, 1.0 / (1.0 + np.exp(-s)), np.exp(s) / (1.0 + np.exp(s)))
@@ -236,17 +191,12 @@ def fit_calibrator(method, scores, labels):
 
     ``transform_fn`` maps a probability array to calibrated probabilities;
     ``info_str`` summarizes the fitted parameters for logging. ``method`` is one
-    of ``'temperature'``, ``'platt'``, ``'isotonic'``.
+    of ``'platt'``, ``'isotonic'``.
 
-    Temperature scaling is monotonic *and* fixes the p=0.5 crossing, so it leaves
-    threshold-0.5 hard metrics unchanged; Platt and isotonic are monotonic (so PR
-    AUC is preserved) but can move the 0.5 operating point, so hard-label metrics
-    may shift.
+    Both are monotonic (so PR AUC is preserved) but can move the 0.5 operating
+    point, so hard-label metrics may shift.
     """
     method = method.lower()
-    if method == 'temperature':
-        t = fit_temperature(scores, labels)
-        return (lambda s: apply_temperature(s, t)), f"temperature (T={t:.4f})"
     if method == 'platt':
         a, b = fit_platt(scores, labels)
         return (lambda s: apply_platt(s, a, b)), f"platt (a={a:.4f}, b={b:.4f})"
@@ -255,7 +205,7 @@ def fit_calibrator(method, scores, labels):
         return (lambda s: apply_isotonic(s, iso)), "isotonic (non-parametric)"
     raise ValueError(
         f"unknown calibration method {method!r} "
-        "(use 'temperature', 'platt', or 'isotonic')")
+        "(use 'platt' or 'isotonic')")
 
 
 def reliability_table_str(bins):
