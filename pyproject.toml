@@ -39,7 +39,7 @@ dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["scripts/analysis", "scripts/cross_validation", "scripts/train", "scripts/preprocessing"]
+pythonpath = ["scripts/analysis", "scripts/cross_validation", "scripts/preprocessing"]
 
 # CPU-only local installs: pull torch from the CPU index, not the default CUDA wheel.
 [tool.uv.sources]
