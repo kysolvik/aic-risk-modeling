@@ -31,12 +31,12 @@ def _inputs(year=2020, batch=2, coords=False):
     return x
 
 
-def _model(num_classes=1, **kw):
+def _model(**kw):
     kw.setdefault("pixel_groups", ["im_annual", "im_single_cnn"])
     kw.setdefault("context_groups", ["md_monthly"])
     kw.setdefault("year_group", "md_year")
     kw.setdefault("year_offset", {"offsets": OFFSETS})
-    return models.decoder_factored(_branches(), num_classes=num_classes, **kw)
+    return models.decoder_factored(_branches(), **kw)
 
 
 def _gain_model(**kw):
@@ -46,7 +46,7 @@ def _gain_model(**kw):
     kw.setdefault("year_offset", {"offsets": OFFSETS})
     kw.setdefault("year_gain_group", "md_single")
     kw.setdefault("year_gain", {})
-    return models.decoder_factored(_branches(), num_classes=1, **kw)
+    return models.decoder_factored(_branches(), **kw)
 
 
 def test_forward_shape_and_range():
@@ -193,7 +193,7 @@ def test_year_gain_requires_year_offset():
     """The gain multiplies gamma(t), so it is meaningless without a year offset."""
     with pytest.raises(ValueError, match='year_gain requires year_offset'):
         models.decoder_factored(
-            _branches(), num_classes=1,
+            _branches(),
             pixel_groups=["im_annual", "im_single_cnn"],
             context_groups=["md_monthly"], year_group="md_year",
             year_offset=None, year_gain_group="md_single", year_gain={})
@@ -202,7 +202,7 @@ def test_year_gain_requires_year_offset():
 def test_unrouted_group_raises():
     branches = _branches() + [models.get_pixel_mlp([H, W, 3], "im_extra", out_channels=4)]
     with pytest.raises(ValueError, match='im_extra'):
-        models.decoder_factored(branches, num_classes=1,
+        models.decoder_factored(branches,
                                 pixel_groups=["im_annual", "im_single_cnn"],
                                 context_groups=["md_monthly"], year_group="md_year",
                                 year_offset={"offsets": OFFSETS})
@@ -214,12 +214,6 @@ def test_extra_input_keys_are_ignored():
     x["md_sidecar"] = torch.randn(2, 1, 2)
     with torch.no_grad():
         assert tuple(m(x).shape) == (2, H, W)
-
-
-def test_multiclass_is_rejected():
-    with pytest.raises(ValueError) as ei:
-        _model(num_classes=5)
-    assert "binary" in str(ei.value).lower(), ei.value
 
 
 def test_trains_end_to_end():

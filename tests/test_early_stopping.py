@@ -68,12 +68,11 @@ def test_last_saves_every_epoch_and_never_stops():
 
 def test_monitoring_defaults_and_no_val_guard():
     val = {'val_data_dirs': ['gs://b/allpreds_2023/']}
-    assert _monitoring(val, 1) == (True, 'pr_auc', 'pr_auc')
-    assert _monitoring(val, 5) == (True, 'fire_iou', 'fire_iou')
-    assert _monitoring({**val, 'checkpoint_metric': 'last'}, 1) == (True, 'last', 'last')
-    assert _monitoring({'checkpoint_metric': 'last'}, 1) == (False, 'last', 'last')
-    assert _monitoring({'val_data_dirs': [], 'checkpoint_metric': 'last'}, 1)[0] is False
+    assert _monitoring(val) == (True, 'pr_auc', 'pr_auc')
+    assert _monitoring({**val, 'checkpoint_metric': 'last'}) == (True, 'last', 'last')
+    assert _monitoring({'checkpoint_metric': 'last'}) == (False, 'last', 'last')
+    assert _monitoring({'val_data_dirs': [], 'checkpoint_metric': 'last'})[0] is False
     for bad in ({}, {'checkpoint_metric': 'pr_auc'},
                 {'checkpoint_metric': 'last', 'early_stopping_metric': 'loss'}):
         with pytest.raises(ValueError):
-            _monitoring(bad, 1)
+            _monitoring(bad)

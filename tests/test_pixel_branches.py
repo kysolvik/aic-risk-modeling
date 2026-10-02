@@ -45,7 +45,7 @@ def test_pixel_branches_train_in_fusion_decoder():
         models.get_pixel_mlp([H, W, 14], "im_single_cnn", out_channels=16),
         models.get_coord_fourier([1, 2], "md_single"),
     ]
-    model = models.decoder_fusion(branches, num_classes=1)
+    model = models.decoder_fusion(branches)
     inputs = {
         "im_annual": torch.randn(2, 6, H, W, 7),
         "im_single_cnn": torch.randn(2, H, W, 14),
