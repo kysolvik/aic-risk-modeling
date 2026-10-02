@@ -8,7 +8,7 @@ import pandas as pd
 import cv_collect_results as cc
 import cv_year_sensitivity as ys
 
-# BurnDate burned fraction, measured from the panel 2026-09-15
+# BurnDate burned fraction per year, from the chip panel.
 BURN = {2013: .0115, 2014: .0164, 2015: .0200, 2016: .0190, 2017: .0227, 2018: .0112, 2019: .0216,
         2020: .0253, 2021: .0150, 2022: .0182, 2023: .0173, 2024: .0346, 2025: .0110}
 

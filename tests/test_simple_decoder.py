@@ -8,7 +8,7 @@ from aic_risk_modeling.train import models
 def _model(H=128, W=128, C=259):
     branch = models.get_pixel_mlp([H, W, C], "im_all",
                                   hidden=(256, 128, 64), out_channels=32)
-    return models.decoder_simple([branch], num_classes=1), C
+    return models.decoder_simple([branch]), C
 
 
 def test_simple_readout_shape_and_finite():

@@ -1,11 +1,11 @@
-"""fit_year_offset: frozen global year offset gamma(t) on the chip-year panel (local panel only)."""
+"""eval.year_offset: frozen global year offset gamma(t) on the chip-year panel (local panel only)."""
 
 import os
 
 import numpy as np
 import pytest
 
-import fit_year_offset as fyo
+from aic_risk_modeling.eval import year_offset as fyo
 
 PANEL = os.path.join(os.path.dirname(__file__), "..", "out", "chip_panel", "panel.parquet")
 pytestmark = pytest.mark.skipif(not os.path.exists(PANEL), reason=f"no local panel at {PANEL}")

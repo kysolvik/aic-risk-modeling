@@ -1,18 +1,7 @@
-"""Print one tab-separated row per (fold, eval year) of a CV-protocol arch/stage.
+"""Print one TSV row per (fold, eval year) of a CV-protocol arch/stage, for the docker scripts.
 
-Shared by run_cv_predict.sh (submit) and download_cv_preds.sh (fetch) so both
-walk exactly the same executions. Parsed with csv because protocol.csv has
-quoted, comma-bearing fields like train_years.
-
-    python3 docker/cv_protocol_rows.py <arch> <stage> [protocol.csv]
-
-Fields: fold_id, year, config_gs, model_gs, stats_gs, predict_root.
-
-Env overrides (space/;/,-separated), read here so both scripts agree:
-  FOLDS  keep only these fold_ids.
-  YEARS  replace each fold's eval years with these (one row per fold x year).
-         These years are off-protocol: the scorer never sees them.
-"""
+Usage: cv_protocol_rows.py <arch> <stage> [protocol.csv]  (env FOLDS / YEARS filter or override)
+Fields: fold_id, year, config_gs, model_gs, stats_gs, predict_root."""
 import csv
 import os
 import re

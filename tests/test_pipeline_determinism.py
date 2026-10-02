@@ -51,7 +51,6 @@ def _order(data_dirs, seed):
     ds = data_loader.build_merged_dataset(
         data_dirs=data_dirs,
         tfrecord_pattern="*.tfrecord.gz",
-        axis="examples",
         shuffle=True,
         batch_size=1,
         seed=seed,

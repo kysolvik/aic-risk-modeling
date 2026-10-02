@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-# Mosaic the per-chip rasters written by predict.py / attribute.py into single
-# GeoTIFFs.
-#
-#   mosaic.sh <chip_dir> <out_dir> [name] [prefixes]
-#
-# prefixes is a space-separated list of per-chip filename prefixes to stitch,
-# defaulting to the predict pair "out mask"; attribute runs pass "shap" or
-# "attr" (their rasters are named {prefix}_{x}-{y}.tif).
+# Mosaic per-chip rasters from predict.py / attribute.py into one GeoTIFF per prefix.
+# Usage: mosaic.sh <chip_dir> <out_dir> [name=preds] [prefixes="out mask"]
 set -euo pipefail
 
 in_dir=$1
@@ -25,15 +19,10 @@ for pfx in $prefixes; do
     fi
     echo "[mosaic] $(wc -l < "$list") ${pfx} chips -> ${name}_${pfx}.tif"
     gdalbuildvrt -input_file_list "$list" "$out_dir/${name}_${pfx}.vrt"
-    # BIGTIFF=YES, not IF_SAFER: with LZW the size estimate can fall under the 4GB
-    # threshold and pick classic TIFF, which then fails ("tile arrays larger than
-    # 2GB") mid-write on the full-basin mosaic (fullgrid_v3 = 2556 chips/yr). Forcing
-    # BigTIFF is universally readable and adds only 8-byte offsets on small mosaics.
+    # BIGTIFF=YES: IF_SAFER can pick classic TIFF under LZW and fail mid-write on a full basin.
     gdal_translate -co COMPRESS=LZW -co TILED=YES -co BIGTIFF=YES \
         "$out_dir/${name}_${pfx}.vrt" "$out_dir/${name}_${pfx}.tif"
-    # gdalbuildvrt drops per-band descriptions, so a Shapley/attr mosaic would
-    # open as "Band 1..10". Copy them off one chip (rasterio ships in the image);
-    # a no-op for the single-band, unnamed out/mask rasters.
+    # gdalbuildvrt drops band descriptions; copy them from one chip.
     python - "$(head -n1 "$list")" "$out_dir/${name}_${pfx}.tif" <<'PY'
 import sys
 import rasterio

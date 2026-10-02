@@ -317,7 +317,7 @@ def _factored(seed=0):
         models.get_identity([1], 'md_year'),
     ]
     m = models.decoder_factored(
-        branches, num_classes=1, pixel_groups=['im_annual', 'im_single_cnn'],
+        branches, pixel_groups=['im_annual', 'im_single_cnn'],
         context_groups=['md_monthly'], year_group='md_year',
         year_offset={'offsets': YEAR_OFFSETS}, year_gain_group='md_single', year_gain={})
     torch.nn.init.normal_(m.year_gain.out.weight, std=0.5)   # undo the zero-init no-op

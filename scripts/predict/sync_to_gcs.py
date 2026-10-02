@@ -1,7 +1,6 @@
-"""Upload the contents of a local directory to a GCS prefix.
+"""Upload a local directory to a GCS prefix.
 
-    python sync_to_gcs.py <local_dir> gs://bucket/prefix/
-"""
+Usage: sync_to_gcs.py <local_dir> gs://bucket/prefix/"""
 import os
 import sys
 

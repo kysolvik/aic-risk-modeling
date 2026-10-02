@@ -92,34 +92,29 @@ def test_arms_differ_from_base_by_exactly_the_intended_years():
     assert mk.arm_diff_errors(arm, specs["fwdpair_2018"]), "ablation arm changing the seed not caught"
 
 
-def test_stats_and_gamma_reuse_by_training_years():
+def test_stats_and_gamma_names():
     specs = mk.protocol_specs()
     res = mk.protocol_resources(specs)
-    by_id = {s["fold_id"]: s for s in specs}
-    # a protocol fold trains on 2013..t-1 == legacy fwd_{t+1}'s training set
-    for t in range(2018, 2023):
-        assert res[f"fwdpair_{t}"] == {"stats_name": f"fwd_{t + 1}", "gamma_name": f"fwd_{t + 1}"}
-    # final_all trains on 2013..2023 == legacy fwd_2025's training set
-    assert res["final_all"] == {"stats_name": "fwd_2025", "gamma_name": "fwd_2025"}
-    assert res["fwdpair_2020_s55"]["stats_name"] == res["fwdpair_2020"]["stats_name"]
-    for fid, s in by_id.items():
+    for s in specs:
+        fid = s["fold_id"]
+        assert res[fid]["gamma_name"] == fid, "gamma is refit per job"
         if s["stage"] in ("ablateA", "ablateB"):
             assert res[fid]["stats_name"] == res[s["base_fold"]]["stats_name"], "arm must keep base stats"
-            assert res[fid]["gamma_name"] == fid, "arm gamma must be refit on its own years"
+        else:
+            assert res[fid]["stats_name"] == fid
 
 
-def test_model_paths_unique_and_legacy_layout():
+def test_model_paths_unique_and_nested():
     specs = mk.protocol_specs()
-    paths = [mk.arch_paths(a, s["fold_id"])["model_gs"] for a in ("factored_v1", "other") for s in specs]
+    paths = [mk.arch_paths(a, s["fold_id"])["model_gs"] for a in ("arch_a", "arch_b") for s in specs]
     assert len(paths) == len(set(paths)), "model_output_path collision"
-    legacy = {mk.model_gs(mk.fold_id(sc, t)) for sc, t, _, _ in mk.fold_specs()}
-    assert not set(paths) & legacy, "protocol job would overwrite a legacy checkpoint"
-    assert mk.arch_paths("factored_v1", "final")["config_local"] == "configs/cv/final.json"
-    assert mk.arch_paths("mtsvit_v58_gamma", "final")["model_gs"].endswith("/models/cv/mtsvit_v58_gamma/final.pt")
+    p = mk.arch_paths("unet_v3p_union4", "final_all")
+    assert p["config_local"] == "configs/cv/unet_v3p_union4/final_all.json"
+    assert p["model_gs"].endswith("/models/cv/unet_v3p_union4/final_all.pt")
 
 
 def test_config_guards(repo_config):
-    base = repo_config("factored_v1")
+    base = repo_config("factored_v3p_union4_monthlyattn_wide_yeargain")
     assert mk.config_guard_errors(base) == []
     leak = copy.deepcopy(base)
     leak["input_features"]["im_annual"]["feature_names"].append("im_lossyear")
@@ -166,7 +161,7 @@ def test_gates():
 
 
 def test_no_val_final_config(repo_config):
-    base = repo_config("factored_v1")
+    base = repo_config("factored_v3p_union4_monthlyattn_wide_yeargain")
     base["val_cache_dir"] = "/tmp/vc"
     spec = _by_id()["final_all"]
     with tempfile.TemporaryDirectory() as d:

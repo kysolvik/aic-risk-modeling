@@ -1,4 +1,4 @@
-"""FusionDecoder head_kernel / dilation: configurable head receptive field."""
+"""FusionDecoder head_kernel: configurable head receptive field."""
 
 import pytest
 import torch
@@ -12,7 +12,7 @@ def _branches(h=16, w=16, c=5):
 
 def test_default_is_unchanged():
     """Default must reproduce the pre-feature module exactly, so checkpoints load."""
-    d = models.decoder_fusion(_branches(), num_classes=1)
+    d = models.decoder_fusion(_branches())
     assert d.head_kernel == 3
     assert d.receptive_field == 9
     for name in ("conv1", "conv2", "conv3", "conv4"):
@@ -24,7 +24,7 @@ def test_default_is_unchanged():
 
 def test_kernel_sets_receptive_field_and_shape_is_preserved():
     for k, rf in [(1, 1), (3, 9), (5, 17), (9, 33)]:
-        d = models.decoder_fusion(_branches(), num_classes=1, head_kernel=k)
+        d = models.decoder_fusion(_branches(), head_kernel=k)
         assert d.receptive_field == rf, f"k={k}"
         for name in ("conv1", "conv2", "conv3", "conv4"):
             conv = getattr(d, name)
@@ -36,7 +36,7 @@ def test_kernel_sets_receptive_field_and_shape_is_preserved():
 def test_kernel_one_is_actually_pointwise():
     """With k=1 a single-pixel input perturbation must not move any other pixel."""
     torch.manual_seed(0)
-    d = models.decoder_fusion(_branches(), num_classes=1, head_kernel=1).eval()
+    d = models.decoder_fusion(_branches(), head_kernel=1).eval()
     x = torch.randn(1, 16, 16, 5)
     base = d({"im_px": x})
     x2 = x.clone()
@@ -49,7 +49,7 @@ def test_kernel_one_is_actually_pointwise():
 
 def test_kernel_three_reaches_exactly_nine_pixels():
     torch.manual_seed(0)
-    d = models.decoder_fusion(_branches(h=32, w=32), num_classes=1, head_kernel=3).eval()
+    d = models.decoder_fusion(_branches(h=32, w=32), head_kernel=3).eval()
     x = torch.randn(1, 32, 32, 5)
     x2 = x.clone()
     x2[0, 16, 16, :] += 5.0
@@ -61,41 +61,14 @@ def test_kernel_three_reaches_exactly_nine_pixels():
     assert (cols.min().item(), cols.max().item()) == (12, 20), f"cols {cols.min()}..{cols.max()}"
 
 
-def test_dilation_changes_reach_at_identical_parameter_count():
-    def n_head_params(**kw):
-        d = models.decoder_fusion(_branches(), num_classes=1, **kw)
-        return sum(p.numel() for n, p in d.named_parameters() if n.startswith("conv"))
-
-    assert n_head_params(head_kernel=3) == n_head_params(head_kernel=3, head_dilation=2)
-    assert n_head_params(head_kernel=5) > 2 * n_head_params(head_kernel=3)
-
-    for k, dil, rf in [(3, 1, 9), (3, 2, 17), (3, 4, 33), (5, 1, 17), (1, 4, 1)]:
-        d = models.decoder_fusion(_branches(), num_classes=1,
-                                  head_kernel=k, head_dilation=dil)
-        assert d.receptive_field == rf, f"k={k} d={dil}"
-
-
-def test_dilated_head_reaches_the_stated_distance():
-    torch.manual_seed(0)
-    d = models.decoder_fusion(_branches(h=64, w=64), num_classes=1,
-                              head_kernel=3, head_dilation=2).eval()
-    x = torch.randn(1, 64, 64, 5)
-    x2 = x.clone()
-    x2[0, 32, 32, :] += 5.0
-    moved = (d({"im_px": x2}) - d({"im_px": x})).abs()[0] > 1e-6
-    rows = torch.nonzero(moved.any(1)).flatten()
-    # RF 17 -> 8 px either side of centre.
-    assert (rows.min().item(), rows.max().item()) == (24, 40), f"{rows.min()}..{rows.max()}"
-
-
 def test_rejects_even_and_nonpositive_kernels():
     for bad in (0, 2, 4, -1):
         with pytest.raises(ValueError):
-            models.decoder_fusion(_branches(), num_classes=1, head_kernel=bad)
+            models.decoder_fusion(_branches(), head_kernel=bad)
 
 
 def test_trains_end_to_end():
-    d = models.decoder_fusion(_branches(), num_classes=1, head_kernel=5)
+    d = models.decoder_fusion(_branches(), head_kernel=5)
     out = d({"im_px": torch.randn(2, 16, 16, 5)})
     torch.nn.functional.binary_cross_entropy(out, torch.zeros_like(out)).backward()
     grads = [p.grad is not None and torch.isfinite(p.grad).all()

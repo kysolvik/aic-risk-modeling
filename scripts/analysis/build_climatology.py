@@ -1,19 +1,7 @@
-"""Build a per-pixel burn-frequency climatology from label mosaics.
+"""Per-pixel burn-frequency climatology (mean of label_<year> > 0 over --years) from label mosaics.
 
-climatology(pixel) = mean over --years of (label_<year> > 0), a float32 raster on
-the label-mosaic grid. This is the free "climatology" baseline used by
-`compare_forest_split.py` / `pyramid_compare.py`: the long-run fire frequency at
-each pixel. Default years 2013-2022 exclude every evaluation year (2023/2024/2025)
-so there is no leakage.
-
-The label mosaics are the full-basin `label_<year>.tif` (a copy of
-`gs://aic-amazon/preds/mtsvit_v44_<year>/preds_mask.tif`, pixel-identical to the
-per-chip `mask_` rasters).
-
-    .venv/bin/python scripts/analysis/build_climatology.py \
-        --label_dir out/label_mosaics --years 2013-2022 \
-        --out out/label_mosaics/climatology_2013_2022.tif
-"""
+Keep --years before every evaluation year to avoid leakage.
+Usage: build_climatology.py --label_dir out/label_mosaics --years 2013-2022 --out clim.tif"""
 
 import argparse
 import os
@@ -33,9 +21,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--label_dir", required=True,
-                    help="dir of label_<year>.tif full-basin mosaics")
+                    help="dir of label_<year>.tif mosaics")
     ap.add_argument("--years", default="2013-2022",
-                    help="'2013-2022' range or a comma list of years")
+                    help="'2013-2022' or a comma list")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
