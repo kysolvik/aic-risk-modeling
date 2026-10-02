@@ -4,12 +4,13 @@ Subpackages:
 - `preprocess` (preprocessing utilities)
 - `train` (training utilities and data loaders)
 - `eval` (evaluation utilities)
+- `predict` (prediction pipeline)
 
-Uses __getattr__ to do lazy submodule imports (according to PEP 562) to
-reduce imports of heavy optional dependencies (e.g., `tensorflow-data-validation`).
+Uses __getattr__ to do lazy submodule imports (according to PEP 562) so that
+`import aic_risk_modeling` does not pull in torch / tensorflow.
 """
 
-__all__ = ["train", "eval", "preprocess"]
+__all__ = ["train", "eval", "preprocess", "predict"]
 
 # Lazily import subpackages on attribute access (PEP 562)
 import importlib
@@ -17,7 +18,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     # Help type checkers see these names without importing heavy deps at runtime
-    from . import train, eval, preprocess # type: ignore
+    from . import train, eval, preprocess, predict  # type: ignore
 
 def __getattr__(name: str):
     """Lazily import subpackages when accessed as attributes.
