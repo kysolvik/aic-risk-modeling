@@ -1,14 +1,6 @@
-"""Defines PyTorch models used in training.
+"""PyTorch branch models and decoders; inputs and outputs are channels-last.
 
-All models take channels-last inputs, exactly as produced by the tf.data
-pipeline (images are (batch, H, W, C), time series are (batch, T, H, W, C) or
-(batch, T, features)), and return channels-last outputs. Layouts are permuted
-to channels-first internally where torch layers require it.
-
-Branch models expose `input_name` (the key of the input dict they consume)
-and `out_channels` (feature channels of their output) so `decoder_fusion`
-can route inputs and size its first convolution.
-"""
+Branches expose `input_name` (their input-dict key) and `out_channels`."""
 
 import math
 
@@ -16,12 +8,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-PATCH_SIZE = 128  # Spatial size that non-image branches are broadcast to
+PATCH_SIZE = 128
 
 
-# ---------------------------------------------------------------------------
-# Building blocks
-# ---------------------------------------------------------------------------
 
 class SeparableConv2d(nn.Module):
     """Depthwise + pointwise convolution (Keras SeparableConv2D equivalent)."""
@@ -70,12 +59,7 @@ class DecoderBlock(nn.Module):
 
 
 class ConvLSTM2d(nn.Module):
-    """Single-layer ConvLSTM (Keras ConvLSTM2D equivalent), batch-first.
-
-    Input is (batch, T, C, H, W). Returns the full hidden sequence
-    (batch, T, hidden, H, W) when `return_sequences`, else the final hidden
-    state (batch, hidden, H, W).
-    """
+    """Single-layer ConvLSTM: (B, T, C, H, W) -> last hidden state, or the sequence if return_sequences."""
 
     def __init__(self, in_channels, hidden_channels, kernel_size,
                  return_sequences=False):
@@ -106,24 +90,16 @@ class ConvLSTM2d(nn.Module):
 
 
 def _time_distributed(module, x):
-    """Apply a module to each step of a (batch, T, ...) tensor."""
     batch, steps = x.shape[:2]
     return module(x.flatten(0, 1)).unflatten(0, (batch, steps))
 
 
-# ---------------------------------------------------------------------------
-# Models
-# ---------------------------------------------------------------------------
 
 class UNet(nn.Module):
     def __init__(self, input_shape, input_name=None, base_filters=64):
         super().__init__()
         self.input_name = input_name
         in_channels = input_shape[-1]
-        # Width-parametric: channels double each level from `base_filters`. The
-        # bottleneck ConvTranspose scales ~quadratically with width, so lowering
-        # base_filters (e.g. 48) shrinks the model substantially with the same
-        # 4-level depth. Default 64 preserves the original UNet exactly.
         b = base_filters
         c1, c2, c3, c4, cb = b, 2 * b, 4 * b, 8 * b, 16 * b
         self.e1 = EncoderBlock(in_channels, c1)
@@ -152,15 +128,7 @@ class UNet(nn.Module):
 
 
 class PixelMLP(nn.Module):
-    """Per-pixel (pointwise) MLP over a channels-last spatial input.
-
-    Applies the same small MLP independently at every pixel:
-    ``(B, H, W, C_in) -> (B, H, W, out_channels)`` with no spatial mixing --
-    ``nn.Linear`` acts on the last axis, so this is equivalent to a stack of 1x1
-    convolutions. The neural analogue of the tabular random-forest baseline (each
-    pixel classified from its own stacked band/timestep values), exposed as a
-    fusion branch so it shares the decoder head with the other baselines.
-    """
+    """Per-pixel MLP: (B, H, W, C) -> (B, H, W, out_channels), no spatial mixing."""
 
     def __init__(self, input_shape, input_name=None, hidden=(128, 64),
                  out_channels=32, dropout=0.3):
@@ -178,32 +146,20 @@ class PixelMLP(nn.Module):
         self.out_channels = out_channels
 
     def forward(self, x):
-        # x: (B, H, W, C_in); Linear over the last axis == per-pixel MLP.
         return self.net(x)
 
 
 class CoordFourierForFusion(nn.Module):
-    """Encode a per-tile coordinate (e.g. lon/lat) into broadcast fusion features.
-
-    Front-ends the broadcast MLP with random Fourier features (Tancik et al. 2020)
-    so the network can represent high-frequency spatial structure -- raw normalized
-    coordinates through a small Linear cannot. Intended for static, low-dimensional
-    metadata such as `md_single`'s (md_x, md_y); not for absolute year, which does
-    not generalize to unseen years and is dropped from `feature_names`.
-
-    The per-tile vector is broadcast across the spatial grid.
-    """
+    """Per-tile coordinates -> random Fourier features + MLP, broadcast over the tile."""
 
     def __init__(self, input_shape, input_name=None, num_freqs=16, sigma=1.0,
                  out_channels=16):
         super().__init__()
         self.input_name = input_name
         in_features = input_shape[-1]
-        # Fixed random projection (seeded by the trainer's torch.manual_seed) saved
-        # with the model so encoding is identical across save/load.
         self.register_buffer("freq_proj",
                              torch.randn(in_features, num_freqs) * sigma)
-        feat_dim = in_features + 2 * num_freqs  # raw coords + sin/cos
+        feat_dim = in_features + 2 * num_freqs
         self.net = nn.Sequential(
             nn.Linear(feat_dim, 64), nn.ReLU(), nn.Dropout(0.1),
             nn.Linear(64, 32), nn.ReLU(),
@@ -212,8 +168,7 @@ class CoordFourierForFusion(nn.Module):
         self.out_channels = out_channels
 
     def forward(self, x):
-        # x: (B, 1, in_features)
-        proj = 2 * math.pi * (x @ self.freq_proj)  # (B, 1, num_freqs)
+        proj = 2 * math.pi * (x @ self.freq_proj)
         feats = torch.cat([x, proj.sin(), proj.cos()], dim=-1)
         h = self.net(feats)
         h = h.reshape(h.shape[0], 1, 1, self.out_channels)
@@ -277,13 +232,7 @@ class ConvLSTMBottleneck(nn.Module):
 
 
 class PixelLSTM(nn.Module):
-    """Per-pixel temporal LSTM over a spatio-temporal input.
-
-    Runs an LSTM over time independently at every pixel:
-    ``(B, T, H, W, C) -> (B, H, W, hidden)``, taking the final hidden state. No
-    spatial mixing -- the sequence counterpart of ``PixelMLP``. Exposed as a
-    fusion branch so it shares the decoder head with the other baselines.
-    """
+    """Per-pixel LSTM over time: (B, T, H, W, C) -> (B, H, W, hidden) final state."""
 
     def __init__(self, input_shape, input_name=None, hidden=32, num_layers=2,
                  dropout=0.2):
@@ -297,11 +246,10 @@ class PixelLSTM(nn.Module):
         self.out_channels = hidden
 
     def forward(self, x):
-        # x: (B, T, H, W, C) -> per-pixel sequences (B*H*W, T, C)
         b, t, h, w, c = x.shape
         x = x.permute(0, 2, 3, 1, 4).reshape(b * h * w, t, c)
         seq, _ = self.lstm(x)
-        last = seq[:, -1]                          # (B*H*W, hidden)
+        last = seq[:, -1]
         return last.reshape(b, h, w, self.hidden)
 
 
@@ -317,12 +265,9 @@ class IdentityModel(nn.Module):
 
 
 class FusionDecoder(nn.Module):
-    """Runs each branch on its named input, concatenates the channels-last
-    outputs, and applies a conv head. Returns (batch, H, W) sigmoid probabilities.
-    """
+    """Concatenate branch outputs and apply a 4-layer conv head -> (B, H, W) probabilities."""
 
     def __init__(self, branch_models, head_kernel=3):
-        """Receptive field of the shared head = 1 + 4 * (head_kernel - 1)."""
         super().__init__()
         if head_kernel < 1 or head_kernel % 2 == 0:
             raise ValueError(f"head_kernel must be a positive odd int, got {head_kernel}")
@@ -341,7 +286,7 @@ class FusionDecoder(nn.Module):
 
     @property
     def receptive_field(self):
-        """Effective receptive field of the head, in pixels."""
+        """Head receptive field in pixels."""
         return 1 + 4 * (self.head_kernel - 1)
 
     def forward(self, inputs):
@@ -358,15 +303,7 @@ class FusionDecoder(nn.Module):
 
 
 class SimpleReadout(nn.Module):
-    """Bare per-pixel linear readout over concatenated branch outputs.
-
-    Unlike FusionDecoder, this has no hidden head and no spatial mixing: it
-    concatenates the channels-last branch outputs and applies a single 1x1 conv
-    to the class logits. All model capacity is meant to live in the branch
-    encoder(s) -- e.g. a single all-bands PixelMLP -- so the whole model is a
-    naive per-pixel MLP with a linear output layer, and this decoder adds nothing
-    but the readout (and the sigmoid). Returns (B, H, W) sigmoid probabilities.
-    """
+    """Single 1x1 conv readout over concatenated branch outputs -> (B, H, W) probabilities."""
 
     def __init__(self, branch_models):
         super().__init__()
@@ -378,7 +315,6 @@ class SimpleReadout(nn.Module):
         feats = [branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
                  for branch in self.branches]
         x = torch.cat(feats, dim=1)
-        # Match FusionDecoder: run the float32 readout even under autocast.
         with torch.autocast(device_type=x.device.type, enabled=False):
             return torch.sigmoid(self.out_conv(x.float())).squeeze(1)
 
@@ -404,22 +340,9 @@ class TransformerLayer(nn.Module):
 
 
 class VanillaViT(nn.Module):
-    """Textbook Vision Transformer segmentation baseline (no domain structure).
+    """Plain ViT segmentation baseline over spatial identity branches -> (B, H, W) probabilities.
 
-    Deliberately the naive-practitioner reference point for the architecture
-    comparison: every branch must be a spatial ``identity`` branch (rank-3
-    ``[H, W, C]`` input_shape; time is folded into the channel axis via
-    ``stack_timesteps: false``), so there are NO per-modality encoders.
-
-    The stacked channel image is patch-embedded with a single strided conv, a
-    learned position embedding is added, ``depth`` standard (joint) self-
-    attention layers mix all patches, and each token is linearly decoded back to
-    its ``patch_size x patch_size`` output block (a transposed patch embed).
-    There is no convolutional segmentation head -- that absence is the point of
-    the vanilla baseline, and a known confound vs the other decoders (whose
-    shared conv head supplies most of their fine-scale spatial context) when the
-    result is reported. Returns (batch, H, W) sigmoid probabilities.
-    """
+    Patch embed, joint self-attention, linear patch decode; no conv head by design."""
 
     def __init__(self, branch_models, embed_dim=128, patch_size=8, depth=4,
                  num_heads=4, mlp_ratio=2, dropout=0.1):
@@ -461,28 +384,22 @@ class VanillaViT(nn.Module):
         x = torch.cat([branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
                        for branch in self.branches], dim=1)
 
-        # Patchify -> tokens, add position embedding, joint self-attention.
         batch = x.shape[0]
-        x = self.patch_embed(x)                       # (B, D, gh, gw)
-        x = x.flatten(2).permute(0, 2, 1) + self.pos  # (B, N, D)
+        x = self.patch_embed(x)
+        x = x.flatten(2).permute(0, 2, 1) + self.pos
         for layer in self.layers:
             x = layer(x)
 
-        # Linear patch-decode: each token -> its p x p block, reassembled into a
-        # full-resolution map (a transposed patch embed).
         gh, gw = self.grid
         p = self.patch_size
-        x = self.decode(self.decode_norm(x))          # (B, N, p*p)
+        x = self.decode(self.decode_norm(x))
         x = x.reshape(batch, gh, gw, p, p)
         x = x.permute(0, 1, 3, 2, 4).reshape(batch, gh * p, gw * p)
-        # Head output runs in float32 even under autocast (matches other decoders).
         with torch.autocast(device_type=x.device.type, enabled=False):
             return torch.sigmoid(x.float())
 
 
-# ---------------------------------------------------------------------------
-# Factories (looked up dynamically by trainer.build_model / build_decoder)
-# ---------------------------------------------------------------------------
+# Factories: trainer.build_model / build_decoder look these up by name.
 
 def get_unet(input_shape, input_name=None, base_filters=64):
     return UNet(input_shape, input_name, base_filters=base_filters)
@@ -520,31 +437,27 @@ def decoder_fusion(branch_models, **kwargs):
 
 
 def decoder_simple(branch_models):
-    """Bare 1x1 linear readout over the branches (see SimpleReadout)."""
     return SimpleReadout(branch_models)
 
 
 def decoder_vit(branch_models, **kwargs):
-    """Vanilla Vision Transformer baseline; kwargs from config['decoder_config']."""
+    """Vanilla ViT baseline; kwargs from config['decoder_config']."""
     return VanillaViT(branch_models, **kwargs)
 
 
-# --- Factored two-scale model (src/aic_risk_modeling/train/factored.py) --------
-# Function-local imports: factored.py imports TransformerLayer from this module.
+# Local imports: factored.py imports TransformerLayer from this module.
 
 def get_pixel_temporal(input_shape, input_name=None, **kwargs):
-    """Per-pixel temporal transformer; full resolution, no patch tokenization."""
     from .factored import PixelTemporalEncoder
     return PixelTemporalEncoder(input_shape, input_name=input_name, **kwargs)
 
 
 def get_coarse_temporal(input_shape, input_name=None, **kwargs):
-    """Temporal transformer on a pooled grid, for natively-coarse (>=4 km) bands."""
     from .factored import CoarseTemporalEncoder
     return CoarseTemporalEncoder(input_shape, input_name=input_name, **kwargs)
 
 
 def decoder_factored(branch_models, **kwargs):
-    """logit = gamma(t) + m(x,t) + s(x,t) + c(x,t); kwargs from config['decoder_config']."""
+    """Factored model (factored.py); kwargs from config['decoder_config']."""
     from .factored import FactoredFireModel
     return FactoredFireModel(branch_models, **kwargs)

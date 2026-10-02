@@ -1,22 +1,7 @@
-"""Figure: October SOI of the previous year vs basin burned area.
+"""Figure: previous-year October SOI vs basin MCD64 burned area, as time series (A, B) and a scatter (C).
 
-A simple illustration of the ENSO signal behind the year offset gamma(t). Left,
-two stacked panels on a shared fire-year axis Y: (A) basin MCD64 burned area in Y
-and (B) the Southern Oscillation Index for SOI_MONTHS of Y-1 (default October),
-already known at a November forecast issue date. Right, (C) the same two series as a
-scatter with a least-squares trend line (order POLY_ORDER) and Spearman rho.
-Negative SOI (El Nino-like) precedes big fire years. The N_EXTREME
-highest / lowest burned-area years are highlighted in every panel (shaded in A/B,
-coloured in all three, labelled in C). (gamma itself uses the Oct-Dec mean; this
-is an illustration.)
-
-Burned area = MCD64A1 burned pixels summed over the 2556 grid chips, from the
-targets-only panel (build_target_panel.py), times the 463.3 m pixel area. SOI is
-NOAA's monthly index via download_clim_indices.
-
-    .venv/bin/python scripts/figures/make_soi_burn_figure.py
-    .venv/bin/python scripts/figures/make_soi_burn_figure.py --from_csv out/figures/fig_soi_burn.csv
-"""
+Illustrates the ENSO signal behind gamma (which uses the Oct-Dec mean); extreme years highlighted.
+Usage: make_soi_burn_figure.py [--from_csv CSV]"""
 
 import argparse
 import os
@@ -27,14 +12,14 @@ import pandas as pd
 from style import INK_PRIMARY, INK_SECONDARY, SURFACE, save_figure, style_axes
 
 LINE = "#52514e"
-HIGH = "#d55e00"       # top burned-area years
-LOW = "#0072b2"        # bottom burned-area years
+HIGH = "#d55e00"
+LOW = "#0072b2"
 HIGH_BAND = "#f3d9c6"
 LOW_BAND = "#d3e3ef"
 
-SOI_MONTHS = (10,)                  # averaged if more than one
+SOI_MONTHS = (10,)
 SOI_LABEL = "October SOI"
-POLY_ORDER = 1                      # scatter trend line (checked monotonic over the data)
+POLY_ORDER = 1
 N_EXTREME = 3
 PANEL = "out/target_panel/panel.parquet"
 PIXEL_KM2 = 0.463312716528 ** 2
@@ -95,14 +80,12 @@ def plot(t, out_png):
                 ax.axvspan(y - 0.42, y + 0.42, color=HIGH_BAND if y in high else LOW_BAND,
                            linewidth=0, zorder=1)
 
-    # A: burned area
     a1.plot(years, burn, color=LINE, linewidth=2.0, zorder=3)
     a1.scatter(years, burn, s=34, color=colors, edgecolor=SURFACE, linewidth=0.8, zorder=4)
     a1.set_ylim(0, burn.max() * 1.08)
     a1.set_ylabel("Burned Area\n(Thousand km²)", fontsize=10.5, color=INK_SECONDARY)
     a1.tick_params(labelbottom=False)
 
-    # B: SOI
     a2.axhline(0, color=INK_SECONDARY, linewidth=0.8, zorder=2)
     a2.plot(years, soi, color=LINE, linewidth=1.6, zorder=3)
     a2.scatter(years, soi, s=34, color=colors, edgecolor=SURFACE, linewidth=0.8, zorder=4)
@@ -111,7 +94,6 @@ def plot(t, out_png):
     a2.set_xticks(years[::2])
     a2.set_xlim(years[0] - 0.6, years[-1] + 0.6)
 
-    # C: scatter, extremes labelled
     _style(a3, grid_axis="both")
     a3.axvline(0, color=INK_SECONDARY, linewidth=0.8, zorder=2)
     xs = np.linspace(soi.min(), soi.max(), 200)
@@ -125,11 +107,10 @@ def plot(t, out_png):
             transform=a3.transAxes, ha="left", va="bottom", fontsize=9.5,
             color=INK_SECONDARY, zorder=6,
             bbox=dict(facecolor=SURFACE, edgecolor="none", pad=2.0))
-    order = np.argsort([c != LINE for c in colors], kind="stable")   # extremes on top
+    order = np.argsort([c != LINE for c in colors], kind="stable")
     a3.scatter(soi[order], burn[order], s=46, color=colors[order],
                edgecolor=SURFACE, linewidth=0.8, zorder=4)
-    # Label each extreme on the first side (right, left, below, above) whose
-    # approximate text box holds no other point.
+    # Label each extreme on the first side whose text box holds no other point.
     w, h = 0.14 * np.ptp(soi), 0.035 * burn.max()
     sides = [((6, 0), "left", "center", (0.01 * w, w), (-h / 2, h / 2)),
              ((-6, 0), "right", "center", (-w, -0.01 * w), (-h / 2, h / 2)),

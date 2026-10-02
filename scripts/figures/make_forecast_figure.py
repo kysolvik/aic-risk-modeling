@@ -1,33 +1,8 @@
-"""Figure: one year's fire-risk forecast (A) and its deviation from climatology (B).
+"""Figure: one year's forecast expected burned fraction (A) and its difference from climatology (B).
 
-  A  Basin map of the forecast expected burned fraction, per BLOCK_MAP-px block.
-  B  Forecast minus climatology (mean union4 burn frequency over --clim_years,
-     default 2013 .. --year minus 1, i.e. only years before the forecast year), per
-     BLOCK_DIFF-px block, in percentage points: vermillion = more fire than normal,
-     blue = less.
-
-Model output is put on a burned-fraction scale in two steps:
-  1. `deflate` inverts the weighted-BCE inflation (pos_weight).
-  2. A single LEVEL factor, expected / actual burned pixels pooled over the
-     model's own evaluation years (--level_chips; for a CV fold these are its
-     val years, never the 2024-25 test years), divides the deflated output. The
-     deflated yeargain model under-predicts the level (~0.72 on fwdpair_2022), and
-     uncorrected that bias would paint all of B "less fire than normal".
-By default (--calibrator) both steps are replaced by the frozen Platt calibrator
-fit on the CV fold-years 2018-23 (calibrated_year_totals.py --save-calibrator, the
-one Fig 5 uses), applied to the raw output of the yeargain final_all model.
-`--calibrator ''` restores the deflate + level path, which then needs an explicit
---level_factor or --level_chips (final_all has no val years to derive one from).
-Both panels are masked to the RAISG outline and drawn in the grid's own MODIS
-sinusoidal CRS (near-equatorial, so close to true shape).
-
-    .venv/bin/python scripts/figures/make_forecast_figure.py
-    for y in 2024 2025 2026; do       # comparable set: shared colour scales
-        .venv/bin/python scripts/figures/make_forecast_figure.py --year $y --risk_vmax 50 --diff_vmax 15
-    done
-    .venv/bin/python scripts/figures/make_forecast_figure.py --calibrator '' \
-        --pred out/cv/preds/<arch>/fwdpair_2022/2026/preds_out.tif --level_factor 0.717
-"""
+Calibrated by default with the frozen Platt calibrator; --calibrator '' uses deflate + a level
+factor from the model's own val years (never test years).
+Usage: make_forecast_figure.py [--year 2026] [--risk_vmax 50 --diff_vmax 15]"""
 
 import argparse
 import os
@@ -40,7 +15,7 @@ from style import (CALIBRATOR, DIFF_CMAP, GRID, INK_PRIMARY, INK_SECONDARY, LABE
                    OUTSIDE, RISK_CMAP, SHP, SURFACE, save_figure)
 
 PRED_ROOT = "out/cv/preds/factored_v3p_union4_monthlyattn_wide_yeargain/final_all"
-BLOCK_MAP = 8      # ~3.7 km
+BLOCK_MAP = 8
 BLOCK_DIFF = 16    # ~7.4 km: smooths the k/13 steps of a 13-year pixel climatology
 
 
@@ -93,7 +68,6 @@ def plot(pred, clim, tr, gdf, out_png, year, clim_years, risk_vmax=None, diff_vm
         return [tr.c, tr.c + w * b * tr.a, tr.f + h * b * tr.e, tr.f]
 
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(12.6, 6.4), facecolor=SURFACE)
-    # auto (98th percentile) scales differ by year; pass both to compare years
     vmax = risk_vmax if risk_vmax is not None else float(np.nanpercentile(risk, 98))
     im1 = a1.imshow(risk, extent=extent(risk, BLOCK_MAP), origin="upper", cmap=RISK_CMAP,
                     vmin=0, vmax=vmax, interpolation="nearest", zorder=2)
@@ -134,21 +108,19 @@ def main():
     ap.add_argument("--year", type=int, default=2026)
     ap.add_argument("--pred", default=None, help="default <PRED_ROOT>/<year>/preds_out.tif")
     ap.add_argument("--level_chips", nargs="+", default=None,
-                    help="with --calibrator '': chip dirs (with labels) for the level "
-                         "factor, from the --pred model's own val years; never test years")
+                    help="with --calibrator '': val-year chip dirs for the level factor")
     ap.add_argument("--level_factor", type=float, default=None,
-                    help="with --calibrator '': skip the chip pass and use this factor")
+                    help="with --calibrator '': use this level factor")
     ap.add_argument("--calibrator", default=CALIBRATOR, metavar="NPZ",
-                    help="frozen Platt calibrator; replaces deflate + level factor. "
-                         "Pass '' to use --level_factor / --level_chips instead")
+                    help="frozen Platt calibrator; '' = deflate + level factor")
     ap.add_argument("--pos_weight", type=float, default=10.0)
     ap.add_argument("--label_dir", default=LABEL_DIR)
     ap.add_argument("--clim_years", default=None, help="default 2013-<year - 1>")
     ap.add_argument("--shp", default=SHP)
     ap.add_argument("--risk_vmax", type=float, default=None,
-                    help="panel A colour-scale max in %%; default = this year's 98th percentile")
+                    help="panel A max in %%; default 98th percentile")
     ap.add_argument("--diff_vmax", type=float, default=None,
-                    help="panel B +/- limit in pp; default = this year's 98th percentile of |diff|")
+                    help="panel B +/- limit in pp; default 98th percentile")
     ap.add_argument("--out_png", default=None, help="default out/figures/fig_forecast_<year>.png")
     a = ap.parse_args()
 

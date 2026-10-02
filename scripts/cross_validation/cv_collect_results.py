@@ -1,36 +1,10 @@
 #!/usr/bin/env python
-"""Score temporal-CV protocol predictions and write the protocol reports.
+"""Score temporal-CV protocol predictions (out/cv/protocol.csv) and write the protocol reports.
 
-PROTOCOL mode (`--protocol folds|final|ablate`, see cv_make_folds.py) scores every
-(job, eval year) of out/cv/protocol.csv that has predictions, caching rows in
-out/cv/protocol_scores.csv and per-chip totals in out/cv/scores/:
-
-  per year   pr_auc, within_chip_only, chip_r (decompose), prevalence, A (actual burned
-             px), E_defl (deflated expected px), logbias = log(E_defl/A), brier (deflated),
-             clim_pr_auc + pr_auc_skill vs the fold climatology (PIXEL-WISE burn
-             frequency over the train-year label mosaics -- the primary, standard
-             forecast-verification reference; folds/final only), plus clim_pr_auc_9x9
-             + pr_auc_skill_9x9 against a 9x9-box-mean (receptive-field-matched)
-             climatology reported as a secondary; persist_pr_auc + pr_auc_skill_persist
-             against last-year persistence (label_{year-1}); clim_/persist_ E, logbias,
-             brier for both references (cached rows are backfilled without rescoring the
-             model), and the same E/logbias/brier
-             with gamma REMOVED (network only) and, for ablation arms, with the BASE
-             fold's gamma swapped in. Gamma is an additive logit term, so the swap
-             sigmoid(logit q - gamma_job(t) + gamma_other(t)) is exact.
-  per job    best / best_ep / last3 / truncated from its training CSV
-             (out/cv/train_csv/[<arch>/]<job>.csv; --fetch_train_csv pulls it from GCS)
-  per pair   (report time) R_A, R_E, log_ratio_err = log(R_E/R_A), amp_frac =
-             log R_E / log R_A (turn pairs only), per-chip r(dE, dA); total and network-only
-
-`final` and `ablate` are gated exactly like the run scripts (cv_make_folds.gate_errors).
-`--protocol final` writes out/cv/final_scored.json, which opens the ablation gate.
-`--protocol ablate` only scores; cv_year_sensitivity.py writes that report.
-
-Usage:
-    .venv/bin/python scripts/cross_validation/cv_collect_results.py --protocol folds
-    .venv/bin/python scripts/cross_validation/cv_collect_results.py --protocol final
-"""
+Per year: PR-AUC (+ decomposition), deflated expected vs actual, Brier, and skill vs pixel-wise
+climatology, 9x9 climatology and persistence; also network-only (gamma removed) totals.
+--protocol final writes out/cv/final_scored.json, which opens the ablation gate.
+Usage: cv_collect_results.py --protocol {folds|final|ablate}"""
 
 import argparse
 import csv
@@ -52,9 +26,6 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 OUT_DIR = os.path.join(REPO, "out", "cv")
 
 
-# ===========================================================================
-# PROTOCOL scoring
-# ===========================================================================
 PROTOCOL = os.path.join(OUT_DIR, "protocol.csv")
 SCORES = os.path.join(OUT_DIR, "protocol_scores.csv")
 CHIP_SCORES_DIR = os.path.join(OUT_DIR, "scores")
@@ -69,13 +40,13 @@ EPS = 1e-7
 
 
 def swap_gamma(q, g_from, g_to):
-    """Re-express probabilities under a different additive year offset (exact)."""
+    """Re-express probabilities under a different additive year offset (exact logit swap)."""
     q = np.clip(np.asarray(q, dtype=np.float64), EPS, 1.0 - EPS)
     return 1.0 / (1.0 + np.exp(-(np.log(q / (1.0 - q)) - g_from + g_to)))
 
 
 def box_mean(a, k):
-    """k x k mean over a 2-D array, zero-padded at the edges (integral image, odd k)."""
+    """k x k zero-padded mean via an integral image (odd k)."""
     r = k // 2
     p = np.pad(np.asarray(a, dtype=np.float64), r)
     c = np.cumsum(np.cumsum(p, axis=0), axis=1)
@@ -121,14 +92,7 @@ def load_year_chips(pred_dir):
 
 
 class Climatology:
-    """Fold climatology from the full-basin label mosaics, windowed onto the chips.
-
-    The primary reference is the PIXEL-WISE burn frequency (`kernel=1`, no spatial
-    pooling) -- the standard forecast-verification climatology (grid-cell-wise
-    long-run frequency). A `kernel>1` box mean gives the receptive-field-matched
-    variant reported as a secondary. The per-fold pixel-wise frequency is cached
-    once and box-meaned per kernel on demand, so both references share one mosaic read.
-    """
+    """Fold climatology (pixel-wise train-year burn frequency, optionally box-meaned) windowed onto chips."""
 
     def __init__(self, label_dir=LABEL_DIR):
         self.label_dir = label_dir
@@ -158,12 +122,12 @@ class Climatology:
 
     def chips(self, train_years, bounds, kernel=CLIM_KERNEL_PIXELWISE):
         key = tuple(sorted(train_years))
-        if self._fold_key != key:                    # recompute only when the fold changes
+        if self._fold_key != key:
             total = np.zeros(self._mosaic(key[0]).shape, dtype=np.uint16)
             for y in key:
                 total += self._mosaic(y)
             self._fold_key = key
-            self._fold_freq = (total / len(key)).astype(np.float32)   # pixel-wise burn frequency
+            self._fold_freq = (total / len(key)).astype(np.float32)
             self._fold_clim = {}
         if kernel not in self._fold_clim:
             self._fold_clim[kernel] = (self._fold_freq if kernel == 1
@@ -171,7 +135,7 @@ class Climatology:
         return self._cut(self._fold_clim[kernel], bounds)
 
     def persistence(self, year, bounds, kernel=CLIM_KERNEL_PIXELWISE):
-        """Last-year reference: the label mosaic of `year` (= eval year - 1), windowed."""
+        """Last-year reference: label mosaic of `year` (= eval year - 1), windowed."""
         if (year, kernel) not in self._persist:
             m = self._mosaic(year).astype(np.float32)
             self._persist[(year, kernel)] = m if kernel == 1 else box_mean(m, kernel)
@@ -252,16 +216,9 @@ SKILL_COLS = ("pr_auc_skill", "pr_auc_skill_9x9", "pr_auc_skill_persist")
 
 
 def reference_scores(labels, bounds, train, year, clim):
-    """No-skill references on the same chips + labels as the model.
+    """No-skill references (climatology, persistence) on the model's chips -> (columns, per-chip E).
 
-    clim     pixel-wise train-year burn frequency (+ 9x9 box mean as a secondary)
-    persist  last year's burned mask, label_{year-1}. Legitimate at the January issue
-             date (every driver is already Y-1), so for the t+1 eval year of a fold it is
-             the t label even though t is held out from training.
-    Each gets PR-AUC, expected burned px E (the reference summed as a probability),
-    log(E/A) and Brier; persist_skill = persistence PR-AUC skill vs climatology.
-    Returns (columns, per-chip E arrays for the pair metrics).
-    """
+    Persistence uses label_{year-1}, legitimate at the January issue date."""
     n = labels.shape[0]
     lab = labels.reshape(-1)
     a = float(labels.sum())
@@ -284,14 +241,12 @@ def reference_scores(labels, bounds, train, year, clim):
 
 
 def add_skills(out):
-    """Model PR-AUC skill vs each reference (primary = pixel-wise climatology)."""
     out["pr_auc_skill"] = pr_auc_skill(out["pr_auc"], out["clim_pr_auc"])
     out["pr_auc_skill_9x9"] = pr_auc_skill(out["pr_auc"], out["clim_pr_auc_9x9"])
     out["pr_auc_skill_persist"] = pr_auc_skill(out["pr_auc"], out["persist_pr_auc"])
 
 
 def score_protocol_year(row, year, base_row, clim, fetch=False):
-    """One cached row of protocol_scores.csv (+ per-chip totals npz)."""
     pred_dir = os.path.join(REPO, row["predict_root"], str(year))
     keys, bounds, scores, labels = load_year_chips(pred_dir)
     n, hw = scores.shape[0], scores.shape[1] * scores.shape[2]
@@ -340,7 +295,7 @@ def score_protocol_year(row, year, base_row, clim, fetch=False):
 
 
 def backfill_references(cache, rows, clim):
-    """Fill reference columns on cached rows scored before they existed (no model rescore)."""
+    """Fill reference columns on cached rows without rescoring the model."""
     by_key = {(r["arch"], r["fold_id"]): r for r in rows}
     for c in REF_COLS + SKILL_COLS:
         if c not in cache.columns:
@@ -435,7 +390,7 @@ def pairs_table(scores, rows):
                                c0["A"], c1["A"], c0["E_nogamma"], c1["E_nogamma"])
             rec.update({f"{k}_nogamma": net[k] for k in ("R_E", "log_ratio_err", "amp_frac", "r_dE_dA")})
         out.append(rec)
-        for name in ("clim", "persist"):        # references on this arch's chips + labels
+        for name in ("clim", "persist"):
             e0, e1 = t.get(f"{name}_E", float("nan")), t1.get(f"{name}_E", float("nan"))
             if f"E_{name}" not in c0 or f"E_{name}" not in c1 or not (e0 > 0 and e1 > 0):
                 continue
@@ -448,11 +403,11 @@ def pairs_table(scores, rows):
     return df
 
 
-SKILL_TOL, AMP_TOL, N_FOLDS = 0.02, 0.10, 5      # notes/cv_preregistration.md section 5
+SKILL_TOL, AMP_TOL, N_FOLDS = 0.02, 0.10, 5      # pre-registered
 
 
 def selection_verdicts(scores, pairs, ref):
-    """The pre-registered winner rule, challenger vs reference, on fold scores + pairs."""
+    """Pre-registered winner rule, challenger vs reference, on fold scores + pairs."""
     s = scores[scores.stage == "folds"]
     r = s[s.arch == ref]
     out = []
@@ -465,7 +420,7 @@ def selection_verdicts(scores, pairs, ref):
         largest = m.loc[m.n_train_years.idxmax(), "fold_id"]
         pm = pd.DataFrame()
         if not pairs.empty:
-            mp = pairs[pairs.ref == ""]         # model pairs only, not the references
+            mp = pairs[pairs.ref == ""]
             pm = mp[(mp.arch == arch) & mp.turn].merge(
                 mp[(mp.arch == ref) & mp.turn], on="fold_id", suffixes=("", "_ref"))
         pair_d = (pm.log_ratio_err.abs() - pm.log_ratio_err_ref.abs()) if len(pm) else pd.Series(dtype=float)
@@ -549,7 +504,6 @@ def write_protocol_report(report, scores, rows, ref_arch="factored_v1"):
             L.append(f"| {p.arch} | {p.fold_id} | {p.ref} | {p.years} | {p.R_A:.3f} | {p.R_E:.3f} | "
                      f"{p.log_ratio_err:+.3f} | {_fmt(p.amp_frac, '+.2f')} | {_fmt(p.r_dE_dA, '.3f')} |")
 
-    # selection axes per arch
     L += ["", "## Selection axes", "",
           "| arch | years scored | mean skill (a) | mean \\|log-ratio err\\| on turns (b) | mean last3 | TRUNC runs |",
           "|---|---|---|---|---|---|"]
@@ -559,7 +513,6 @@ def write_protocol_report(report, scores, rows, ref_arch="factored_v1"):
         L.append(f"| {arch} | {len(g)} | {_fmt(g.pr_auc_skill.mean())} | "
                  f"{_fmt(pa.log_ratio_err.abs().mean() if len(pa) else float('nan'), '.3f')} | "
                  f"{_fmt(g.drop_duplicates('fold_id').last3.mean())} | {trunc} |")
-    # the no-skill references on the same fold-years (per arch: v2/v3 chip sets differ)
     for arch, g in s.groupby("arch"):
         g = g.drop_duplicates(["fold_id", "year"])
         for name, label in (("clim", "climatology"), ("persist", "persistence")):
@@ -571,7 +524,6 @@ def write_protocol_report(report, scores, rows, ref_arch="factored_v1"):
             L.append(f"| *ref: {label}* ({arch} chips) | {int(g[f'{name}_pr_auc'].notna().sum())} | "
                      f"{_fmt(skill)} | {_fmt(pa.log_ratio_err.abs().mean() if len(pa) else float('nan'), '.3f')} | — | — |")
 
-    # the pre-registered winner rule, then the paired differences behind it
     if report == "folds" and ref_arch in set(s.arch) and len(set(s.arch)) > 1:
         v = selection_verdicts(s, pairs, ref_arch)
         L += ["", f"## Selection rule vs {ref_arch} (notes/cv_preregistration.md §5)", "",
@@ -622,7 +574,7 @@ def main():
     ap.add_argument("--ref_arch", default="factored_v3p_union4_monthlyattn_wide_yeargain")
     ap.add_argument("--rescore", action="store_true")
     ap.add_argument("--fetch_train_csv", action="store_true",
-                    help="gsutil cp missing training CSVs next to their checkpoints")
+                    help="gsutil cp missing training CSVs")
     ap.add_argument("--label_dir", default=LABEL_DIR)
     args = ap.parse_args()
 

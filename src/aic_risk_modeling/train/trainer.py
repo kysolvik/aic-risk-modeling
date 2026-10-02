@@ -1,13 +1,6 @@
-"""Entry point for training risk model on Vertex AI.
+"""PyTorch training loop with tf.data input; checkpoints and early-stops on configurable val metrics.
 
-This module provides functionality to train a segmentation model for predicting burned areas.
-Models and the training loop are PyTorch; data loading runs via tf.data TFRecord
-pipeline in `data_loader`.
-Training includes checkpointing and early stopping on configurable validation
-metrics ('checkpoint_metric' / 'early_stopping_metric'); 'loss' is minimized,
-every other metric is maximized. checkpoint_metric 'last' trains a fixed
-number of epochs and keeps the final one; only then may 'val_data_dirs' be omitted.
-"""
+checkpoint_metric 'last' keeps the final epoch and is the only mode that allows no val set."""
 
 import csv
 import glob
@@ -36,12 +29,7 @@ tf.random.set_seed(SEED)
 
 
 def set_seed(seed):
-    """Re-seed torch / numpy / tf, and return the seed for the data pipeline.
-
-    Same-config runs differ by ~0.0107 PR-AUC, which is larger than most effects
-    worth chasing here, so a run's seed has to be part of its config rather than a
-    module constant. Pass `seed` in the config to get a distinct replicate.
-    """
+    """Re-seed torch/numpy/tf from the config's seed; returns it for the data pipeline."""
     global RNG
     RNG = np.random.default_rng(seed)
     torch.manual_seed(seed)
@@ -50,17 +38,9 @@ def set_seed(seed):
 
 
 def upload_file_to_gcs(local_path, gcs_uri):
-    """
-    Upload a local file to Google Cloud Storage.
-
-    Args:
-        local_path (str): Path to local file.
-        gcs_uri (str): Full GCS URI (e.g. "gs://my-bucket/path/to/file.csv")
-    """
     if not gcs_uri.startswith("gs://"):
         raise ValueError("gcs_uri must start with 'gs://'")
 
-    # Parse bucket and blob path
     parsed = urlparse(gcs_uri)
     bucket_name = parsed.netloc
     blob_path = parsed.path.lstrip("/")
@@ -92,7 +72,6 @@ def _gcs_join(base: str, name: str) -> str:
 def build_decoder(decoder_type, branch_models, decoder_config=None):
     function_name = f"decoder_{decoder_type}"
     try:
-        # Attempt to get the function dynamically
         model_fn = getattr(models, function_name)
         model = model_fn(branch_models, **(decoder_config or {}))
         print(f"Successfully initialized {decoder_type} model.")
@@ -116,7 +95,6 @@ def build_decoder(decoder_type, branch_models, decoder_config=None):
 def build_model(model_type, input_shape, input_name, **model_kwargs):
     function_name = f"get_{model_type}"
     try:
-        # Attempt to get the function dynamically
         model_fn = getattr(models, function_name)
         model = model_fn(input_shape=input_shape, input_name=input_name,
                          **model_kwargs)
@@ -144,18 +122,14 @@ def build_all_models(inputs_config):
         n_timesteps = len(input_dict['timesteps'])
         n_features = len(input_dict['feature_names'])
         if n_timesteps > 0 and input_dict.get('stack_timesteps'):
-            # (T, ...spatial, C): the loader keeps time as its own axis.
+            # Time stays its own axis; otherwise it is folded into channels.
             input_shape = [n_timesteps] + input_dict['shape'] + [n_features]
         elif n_timesteps > 0:
-            # stack_timesteps false: the loader folds time into the channel axis
-            # (feature x timestep), so there is no separate time dim.
             input_shape = input_dict['shape'] + [n_features * n_timesteps]
         else:
             input_shape = input_dict['shape'] + [n_features]
         print(input_shape)
         input_name = input_key
-        # Optional per-branch factory kwargs (e.g. a projection branch's
-        # out_channels) from the config's input_features group.
         model_kwargs = input_dict.get('model_kwargs') or {}
         all_models.append(
             build_model(model_type, input_shape, input_name, **model_kwargs))
@@ -164,7 +138,7 @@ def build_all_models(inputs_config):
 
 
 def save_model(model, config, output_path):
-    """Save model weights (with the config needed to rebuild it); supports gs:// paths."""
+    """Save weights plus the config needed to rebuild the model (local or gs://)."""
     payload = {'config': config, 'model_state_dict': model.state_dict()}
     if output_path.startswith('gs://'):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -195,17 +169,9 @@ def load_model(model_path, map_location='cpu'):
 
 
 def _cache_dataset_to_disk(dataset, cache_dir):
-    """Cache a finished (normalized, band-selected) dataset to local disk.
+    """Replay a deterministic (validation) dataset from local disk after the first pass.
 
-    The first full pass pays the GZIP-decode / parse / normalize cost and writes
-    the decoded batches under `cache_dir`; every later pass replays them from
-    disk. Only valid for a deterministic dataset (validation: no shuffle, no
-    augmentation), since replays return the first pass's batches verbatim.
-
-    `Dataset.cache(filename)` silently serves whatever is already on disk at that
-    path, so leftovers from an earlier run (other config or data, same path) are
-    deleted first; otherwise they would be read in place of this run's data.
-    """
+    Deletes stale cache files first: Dataset.cache() silently serves whatever is on disk."""
     os.makedirs(cache_dir, exist_ok=True)
     prefix = os.path.join(cache_dir, 'val')
     for stale in glob.glob(prefix + '*'):
@@ -221,8 +187,7 @@ def _torch_batches(dataset, device):
 
 
 def _cosine_warmup_schedule(optimizer, warmup_steps, decay_steps):
-    """Per-step linear warmup from 0, then cosine decay to 0
-    (keras CosineDecay with warmup_target equivalent)."""
+    """Per-step linear warmup from 0, then cosine decay to 0."""
     def factor(step):
         if step < warmup_steps:
             return step / max(warmup_steps, 1)
@@ -248,7 +213,6 @@ def _run_epoch(model, dataset, loss_function, device, metrics,
             with torch.autocast(device_type=device.type, dtype=amp_dtype,
                                 enabled=amp_enabled):
                 preds = model(inputs)
-            # preds are float32 (the fusion head opts out of autocast).
             loss = loss_function(labels, preds)
 
             if training:
@@ -271,13 +235,7 @@ def _run_epoch(model, dataset, loss_function, device, metrics,
 
 
 class _BestTracker:
-    """Tracks whether a monitored validation metric has improved.
-
-    `metric` names a key of the per-epoch validation results; 'loss' is
-    minimized, every other metric is maximized. Ties are not improvements.
-    'last' improves every epoch: the checkpoint is the final epoch and early
-    stopping never fires (fixed-epoch training, e.g. with no validation set).
-    """
+    """Whether a val metric improved ('loss' minimized, others maximized; 'last' always improves)."""
 
     def __init__(self, metric):
         self.metric = metric
@@ -295,12 +253,7 @@ class _BestTracker:
 
 
 def _monitoring(config):
-    """(has_val, checkpoint_metric, early_stopping_metric) for a config.
-
-    'val_data_dirs' may be omitted only with checkpoint_metric 'last' (train a
-    fixed number of epochs, keep the final one); any other metric needs a
-    validation set to watch.
-    """
+    """(has_val, checkpoint_metric, early_stopping_metric); without val data only 'last' is allowed."""
     has_val = bool(config.get('val_data_dirs'))
     checkpoint_metric = config.get('checkpoint_metric', 'pr_auc')
     early_stopping_metric = config.get('early_stopping_metric',
@@ -315,7 +268,6 @@ def _monitoring(config):
 
 
 def run(config):
-    # Some options that have defaults
     seed = set_seed(config.get('seed', SEED))
     steps_per_epoch = config.get('steps_per_epoch', 5000)
     weight_decay = config.get('weight_decay', 0.01)
@@ -326,7 +278,6 @@ def run(config):
 
     loss_function = losses.get_loss(config['loss_function'], pos_weight=pos_weight)
 
-    # Get datasets
     training_ds = data_loader.build_merged_dataset(
         data_dirs=config['data_dirs'],
         tfrecord_pattern=config['tfrecord_pattern'],
@@ -342,8 +293,7 @@ def run(config):
         seed=seed,
     ) if has_val else None
 
-    # Normalize. Prefer an explicit stats file (e.g. pooled stats.json from
-    # data_stats); fall back to the first dir's stats.pbtxt.
+    # Explicit stats file if given, else the first data dir's stats.pbtxt.
     stats_path = config.get(
         'stats_path', _gcs_join(config['data_dirs'][0], 'stats.pbtxt'))
     normalize_list = data_norm.get_normalize_list(config)
@@ -365,17 +315,13 @@ def run(config):
             input_feature_config=config['input_features'],
             output_feature_config=config['output_features'],
         )
-    # Optional: replay validation from local disk after epoch 1 (config key
-    # 'val_cache_dir'). Needs ~10 MB/example free on that disk, and must be the
-    # LAST validation op so the cache holds the fully processed batches.
+    # Must be the last validation op so the cache holds fully processed batches.
     if has_val and config.get('val_cache_dir'):
         validation_ds = _cache_dataset_to_disk(
             validation_ds, config['val_cache_dir'])
 
-    # Get branch models
     all_models = build_all_models(config['input_features'])
 
-    # Build decoder (note: can build an identity decoder, if desired)
     model = build_decoder(config['decoder'], all_models,
                           config.get('decoder_config'))
 
@@ -386,24 +332,17 @@ def run(config):
     print(f"Trainable parameters: {n_params:,}")
     print(f"Training on device: {device}")
 
-    # Optimizer and learning rate scheduler
     optimizer = torch.optim.AdamW(model.parameters(),
                                   lr=config['learning_rate'],
                                   weight_decay=weight_decay)
     decay_steps = (config['epochs'] - 1) * steps_per_epoch
     warmup_steps = 1 * steps_per_epoch
     scheduler = _cosine_warmup_schedule(optimizer, warmup_steps, decay_steps)
-    # Mixed precision (mirrors the old keras mixed_float16 policy)
     scaler = torch.amp.GradScaler(enabled=device.type == 'cuda')
 
-    # The area_ratio metric deflates predictions by the loss's pos_weight.
     train_metrics = SegmentationMetrics(pos_weight=pos_weight)
     val_metrics = SegmentationMetrics(pos_weight=pos_weight)
 
-    # Early stopping watches its own (configurable) metric, defaulting to the
-    # checkpoint metric, so e.g. checkpointing on val loss while stopping on
-    # PR AUC stagnation (or vice versa) is possible. Both resolved in
-    # _monitoring above.
     checkpoint_tracker = _BestTracker(checkpoint_metric)
     early_stop_tracker = _BestTracker(early_stopping_metric)
 
@@ -432,7 +371,6 @@ def run(config):
               " - ".join(f"{k}={v:.6f}" for k, v in row.items() if k != 'epoch'),
               flush=True)
 
-        # Checkpoint on best val checkpoint_metric, stop on early_stopping_metric
         if checkpoint_tracker.improved(val_results):
             torch.save({'config': config, 'model_state_dict': model.state_dict()},
                        checkpoint_filepath)
@@ -445,12 +383,10 @@ def run(config):
                       f"improvement in {patience} epochs.")
                 break
 
-    # Load best checkpoint
     checkpoint = torch.load(checkpoint_filepath, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     save_model(model, config, config['model_output_path'])
 
-    # Copy logged data to gs
     output_root, _ = os.path.splitext(config['model_output_path'])
     csv_output_path = output_root + '.csv'
     if csv_output_path.startswith("gs://"):
@@ -466,7 +402,6 @@ if __name__ == "__main__":
     parser.add_argument('--config_path', type=str, required=True)
     args = parser.parse_args()
 
-    # Note: should add a schema verifier
     config = load_config(args.config_path)
 
     run(config)

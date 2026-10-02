@@ -1,41 +1,7 @@
-"""Factored two-scale fire model.
+"""Factored fire model: logit = gamma(t) + year_gain + m (coarse) + s (pixel) + c (local).
 
-    logit(x, t) = gamma(t) + m(x, t) + s(x, t) + c(x, t)
-                  ^when      ^where,     ^pixel     ^local
-                              coarsely    suscept.   spread
-
-Additive in log-odds, so risk factorises multiplicatively and each term is
-readable per pixel with no occlusion pass. The split is driven by three
-measurements on this dataset rather than by architecture fashion:
-
-  * Patch tokens cannot represent the target. Of patches containing any fire,
-    74.3% are mixed at 2x2, 94.2% at 4x4, 99.1% at 8x8. So every image pathway
-    here stays at full resolution or is pooled only where the DATA is
-    coarse -- never patch-tokenized as a compression device.
-  * Real within-chip spatial structure is gone by ~18 km and zero by 36 km
-    (label autocorrelation with the chip mean removed: 0.580 at 0.56 km, 0.126 at
-    8.9 km, 0.046 at 17.8 km, -0.016 at 35.6 km). So `c` is a short-range kernel
-    with an explicitly measured receptive field, and there is no long-range
-    attention because there is nothing at long range to attend to.
-  * Pooled PR-AUC is mostly a chip-intensity metric: an oracle that knows each
-    71 km chip's burn rate and predicts it flat already scores 0.3145 of the best
-    model's 0.3566, and rescaling a model's chips to the true rate lifts it to
-    0.4193. So `m` exists as an explicit coarse term rather than being left
-    implicit.
-
-`s` and `c` are disjoint by construction: `c` starts with a CENTRE-MASKED
-depthwise conv, so the pixel's own features never enter the local term. That is
-what makes the additive decomposition an actual ignition-vs-spread split rather
-than an arbitrary partition of a sum.
-
-`gamma` is a frozen, global, offline-fit per-year offset -- see
-scripts/analysis/fit_year_offset.py for why it is not learned in-network and why
-its AMPLITUDE is not learned. An optional `year_gain` term makes the year effect
-spatially explicit without touching that amplitude: the year contribution becomes
-`gamma(t)*(1 + g_res(x)) = gamma(t) + gamma(t)*g_res(x)`, where `g_res(x)` (the
-`year_gain` term) is a per-chip loading of the LOCATION CODE ONLY, mean-centred so
-the basin-aggregate amplitude stays exactly `gamma(t)` -- see SpatialYearGain.
-"""
+`c` masks its centre tap, so s and c are disjoint (ignition vs spread); gamma is a
+frozen offline-fit year offset (eval/year_offset.py)."""
 
 import json
 import math
@@ -56,18 +22,8 @@ def _read_json(path):
         return json.load(f)
 
 
-# --------------------------------------------------------------------- encoders
-
 class PixelTemporalEncoder(nn.Module):
-    """Per-pixel temporal transformer: (B, T, H, W, C) -> (B, H, W, D).
-
-    TSViT's stage-1 ordering (attend over time first) with the patch tokenization
-    removed. Every pixel is its own length-T sequence, so nothing is spatially
-    compressed and no sub-patch detail has to be reconstructed afterwards. Cost
-    scales as H*W*T^2*D, which is why `dim` defaults to 32 rather than the 128 used
-    by the patch-token model -- full resolution at D=128 is ~64x the stage-1 FLOPs
-    and does not fit at batch_size 2.
-    """
+    """Per-pixel temporal transformer: (B, T, H, W, C) -> (B, H, W, D); cost ~ H*W*T^2*D."""
 
     def __init__(self, input_shape, input_name=None, dim=32, depth=2, num_heads=4,
                  mlp_ratio=2, dropout=0.1):
@@ -86,8 +42,6 @@ class PixelTemporalEncoder(nn.Module):
 
     def forward(self, x):
         batch, steps, height, width, _ = x.shape
-        # (B, T, H, W, C) -> (B*H*W, T, C): every pixel becomes an independent
-        # sequence, so attention is purely temporal.
         x = x.permute(0, 2, 3, 1, 4).reshape(batch * height * width, steps, -1)
         x = self.proj(x) + self.temporal_pos
         for layer in self.layers:
@@ -97,13 +51,7 @@ class PixelTemporalEncoder(nn.Module):
 
 
 class CoarseTemporalEncoder(nn.Module):
-    """Temporal transformer on a pooled grid: (B, T, H, W, C) -> (B, H, W, D).
-
-    For inputs whose NATIVE resolution is already coarse -- CHIRPS, ERA5/AgERA5
-    CWD, VPD, temperature, evaporation, precipitation are all >=4km --
-    average-pooling to `grid` before the temporal encoder discards
-    nothing real and cuts cost by (H*W)/(grid^2).
-    """
+    """PixelTemporalEncoder on a `grid` x `grid` pooled input, upsampled back; for >=4 km inputs."""
 
     def __init__(self, input_shape, input_name=None, grid=16, dim=32, depth=2,
                  num_heads=4, mlp_ratio=2, dropout=0.1):
@@ -123,27 +71,15 @@ class CoarseTemporalEncoder(nn.Module):
         flat = x.reshape(batch * steps, height, width, channels).permute(0, 3, 1, 2)
         pooled = F.adaptive_avg_pool2d(flat, self.grid)
         pooled = pooled.permute(0, 2, 3, 1).reshape(batch, steps, self.grid, self.grid, channels)
-        feats = self.encoder(pooled).permute(0, 3, 1, 2)          # (B, D, g, g)
+        feats = self.encoder(pooled).permute(0, 3, 1, 2)
         up = F.interpolate(feats, size=(height, width), mode="bilinear", align_corners=False)
         return up.permute(0, 2, 3, 1)
 
 
-# ------------------------------------------------------------------------ terms
-
 class YearOffset(nn.Module):
-    """Frozen global year term `gamma(t)`, looked up by the raw `md_year` input.
+    """Frozen per-year logit offset gamma(t), looked up by the raw md_year input.
 
-    The offsets themselves are fit offline (SOI(Aug-Oct, Y-1) + log basin burn(Y-1),
-    forward-chained) because the network cannot identify a year effect: it sees
-    ~360 year-constant scalars against 10-13 distinct year-values. `md_year` is used
-    ONLY as a lookup key, never as a learned feature -- the extrapolating content
-    lives in the climate/burn regressors, which is why an absolute year here does
-    not reintroduce the generalization problem that got `md_year` dropped from the
-    v11-lineage configs.
-
-    Requires the group carrying `md_year` to be configured with `normalize: false`,
-    or the key arrives scaled and the lookup is meaningless.
-    """
+    md_year is a lookup key only; its group must have `normalize: false`."""
 
     def __init__(self, offsets, input_name="md_year", trainable=False, strict=True):
         super().__init__()
@@ -187,20 +123,14 @@ class YearOffset(nn.Module):
 
 
 def build_year_offset(spec, year_group):
-    """Build a `YearOffset` from a decoder_config `year_offset` block, or None.
-
-    Architecture-agnostic on purpose: any log-odds-additive decoder (the factored
-    model, and now MTSViT) can bolt on the same frozen gamma(t). `spec` accepts
-    exactly one of `coeffs_path` (a JSON with `per_year_offset`) or inline
-    `offsets`, plus optional `trainable`/`strict`; `terms` is documentation only.
-    """
+    """YearOffset from a decoder_config `year_offset` block (coeffs_path or offsets), or None."""
     if not spec:
         return None
     if not year_group:
         raise ValueError("year_offset given but year_group is unset")
     spec = dict(spec)
     path = spec.pop("coeffs_path", None)
-    spec.pop("terms", None)                 # documentation only; the table is authoritative
+    spec.pop("terms", None)
     offsets = spec.pop("offsets", None)
     kw = {k: spec.pop(k) for k in ("trainable", "strict") if k in spec}
     if spec:
@@ -213,32 +143,10 @@ def build_year_offset(spec, year_group):
 
 
 class SpatialYearGain(nn.Module):
-    """Per-chip loading `g_res(x)` that makes the frozen `gamma(t)` spatially explicit.
+    """Per-chip loading g_res(location) so the year term becomes gamma * (1 + g_res).
 
-    The year contribution becomes `gamma(t)*(1 + g_res(x)) = gamma(t) + gamma(t)*g_res(x)`;
-    this module supplies `g_res`, added into the decomposition as the separate `year_gain`
-    term (`gamma * g_res`). `g_res` is a function of the LOCATION CODE ONLY -- the raw
-    per-chip coordinate (`md_single` = (md_x, md_y)) through fixed random Fourier features
-    (Tancik et al. 2020) + a small MLP -- and never sees the pixel feature stack, so it is a
-    pure location x year interaction rather than a re-derivation of `s`/`c`/`m`.
-
-    Two properties keep it identifiable and consistent with "gamma's amplitude is global"
-    (see YearOffset and scripts/analysis/fit_year_offset.py):
-
-      * ZERO-INIT: the final Linear is zeroed, so `g_res == 0` at start and the `year_gain`
-        term is an exact no-op -- the model is identical to the global-gamma factored model
-        at init, mirroring `LocalContext`'s zero-init.
-      * MEAN-CENTRED (amplitude-preserving): `g_res` is centred so its basin mean is ~0,
-        hence `mean_x[gamma*(1 + g_res)] == gamma`. The gain only redistributes WHICH chips
-        carry the year signal; it cannot move the basin-aggregate amplitude the offline gamma
-        fit sets. Only the spatial LOADING is learned (from many chips), never the temporal
-        profile. Centring uses the batch mean in train mode and a frozen running-mean buffer
-        at eval, so a chip's prediction never depends on batch composition.
-
-    The location code is per-chip -- there is no per-pixel coordinate grid -- so `g_res` is
-    one scalar per example `(B, 1, 1, 1)`, constant within the 128x128 tile. That matches the
-    finding that the year signal is a chip-level amplitude (within-chip reshuffle is ~noise).
-    """
+    Zero-init (exact no-op at start) and mean-centred (batch mean in train, running mean in
+    eval), so the basin-mean year amplitude stays gamma."""
 
     def __init__(self, input_name="md_single", loc_features=2, num_freqs=16, sigma=1.0,
                  hidden=64, momentum=0.1):
@@ -246,20 +154,20 @@ class SpatialYearGain(nn.Module):
         self.input_name = input_name
         self.loc_features = loc_features
         self.momentum = momentum
-        # Fixed random projection, saved with the model so encoding is stable across save/load.
+        # Persistent buffer: the random projection must survive save/load.
         self.register_buffer("freq_proj", torch.randn(loc_features, num_freqs) * sigma)
         self.register_buffer("running_mean", torch.zeros(1))
-        feat_dim = loc_features + 2 * num_freqs                 # raw coords + sin/cos
+        feat_dim = loc_features + 2 * num_freqs
         self.body = nn.Sequential(nn.Linear(feat_dim, hidden), nn.ReLU())
         self.out = nn.Linear(hidden, 1)
-        nn.init.zeros_(self.out.weight)                         # g_res == 0 at init -> no-op
+        nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
     def forward(self, coords):
         coords = coords.reshape(coords.shape[0], -1)[:, :self.loc_features]
         proj = 2 * math.pi * (coords @ self.freq_proj)
         feats = torch.cat([coords, proj.sin(), proj.cos()], dim=-1)
-        raw = self.out(self.body(feats))                        # (B, 1)
+        raw = self.out(self.body(feats))
         if self.training:
             batch_mean = raw.mean()
             with torch.no_grad():
@@ -271,14 +179,7 @@ class SpatialYearGain(nn.Module):
 
 
 def build_year_gain(spec, year_gain_group):
-    """Build a `SpatialYearGain` from a decoder_config `year_gain` block, or None.
-
-    `spec` accepts optional `loc_features` / `num_freqs` / `sigma` / `hidden` / `momentum`.
-    Requires `year_gain_group` (the location group carrying the coordinates, e.g. `md_single`)
-    to be set; it is read directly from the input dict, like `year_group` for `YearOffset`.
-    Enabled whenever `spec` is not None (an empty `{}` means "on, with default hypers");
-    pass `null`/None to disable.
-    """
+    """SpatialYearGain from a decoder_config `year_gain` block ({} = defaults), or None."""
     if spec is None:
         return None
     if not year_gain_group:
@@ -292,12 +193,7 @@ def build_year_gain(spec, year_gain_group):
 
 
 class PixelSusceptibility(nn.Module):
-    """`s`: strictly pointwise (1x1) logit contribution over the full-res stack.
-
-    This is the term the routing audit was about: every per-pixel value reaches the
-    output at full resolution here, rather than 14 of 152 as in the patch-token
-    model. 1x1 convs only, so it contains no spatial mixing by construction.
-    """
+    """`s`: pointwise (1x1 conv) logit term on the full-resolution stack."""
 
     def __init__(self, in_channels, hidden=(128, 64), dropout=0.0):
         super().__init__()
@@ -317,22 +213,10 @@ class PixelSusceptibility(nn.Module):
 
 
 class LocalContext(nn.Module):
-    """`c`: neighbourhood contribution, with the centre pixel masked out.
+    """`c`: centre-masked depthwise k x k conv + 1x1 convs; receptive field is exactly `kernel`.
 
-    A learnable depthwise k x k kernel whose centre tap is forced to zero, followed
-    by 1x1 convs. Two consequences that matter:
-
-      * the receptive field is EXACTLY `kernel` -- not an emergent property of a
-        conv stack -- so it can be swept and reported in km (k=9 -> 5.0 km,
-        k=17 -> 9.5 km at 556 m/px);
-      * the pixel's own features never enter `c`, so `s` and `c` are disjoint and
-        the additive split is a real ignition-vs-spread decomposition. Stacked
-        convs cannot give this: masking only the first layer still lets the centre
-        leak back in at the second.
-
-    `kernel=1` degenerates to no context at all, which makes it the pointwise
-    control arm.
-    """
+    A single masked layer keeps the pixel's own features out (stacked convs would leak them).
+    kernel=1 disables the term."""
 
     def __init__(self, in_channels, kernel=9, hidden=64, dilation=1):
         super().__init__()
@@ -352,11 +236,11 @@ class LocalContext(nn.Module):
                                    padding=dilation * (kernel // 2), dilation=dilation,
                                    groups=in_channels, bias=False)
         mask = torch.ones(1, 1, kernel, kernel)
-        mask[0, 0, kernel // 2, kernel // 2] = 0.0          # centre tap permanently off
+        mask[0, 0, kernel // 2, kernel // 2] = 0.0
         self.register_buffer("centre_mask", mask)
         self.body = nn.Sequential(nn.Conv2d(in_channels, hidden, 1), nn.ReLU())
         self.out = nn.Conv2d(hidden, 1, 1)
-        nn.init.zeros_(self.out.weight)                      # starts as an exact no-op
+        nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
     @property
@@ -373,19 +257,7 @@ class LocalContext(nn.Module):
 
 
 class CoarseIntensity(nn.Module):
-    """`m`: coarse burn-intensity contribution on a `grid` x `grid` lattice.
-
-    Defaults to a 4x4 lattice = 17.8 km cells, which is where within-chip label
-    autocorrelation has already decayed to 0.046 -- finer than that is `s`/`c`'s
-    job, coarser loses nothing. Supervise this term with the per-chip area loss
-    (`weighted_bce_area`); that loss matches each chip's total independently, which
-    is exactly right for a chip-intensity term and exactly why it cannot teach the
-    global year factor that `gamma` carries.
-
-    `grid=None` disables the term entirely (it returns exact zeros and holds no
-    parameters), mirroring `local_kernel=1` for `c`. That makes every ablation of
-    the factorisation a config change rather than a code change.
-    """
+    """`m`: coarse intensity term on a `grid` x `grid` lattice, upsampled; grid=None disables."""
 
     def __init__(self, in_channels, context_dim=0, grid=4, hidden=64):
         super().__init__()
@@ -415,22 +287,8 @@ class CoarseIntensity(nn.Module):
         return F.interpolate(coarse, size=(height, width), mode="bilinear", align_corners=False)
 
 
-# ------------------------------------------------------------------------ model
-
 class FactoredFireModel(nn.Module):
-    """Combines the four terms into a per-pixel fire probability.
-
-    Routing is EXPLICIT: every branch's `input_name` must be listed in exactly one
-    of `pixel_groups` / `context_groups` / `year_group`, or construction fails. The
-    patch-token model routed by `hasattr(branch, "input_shape")`, so adding that
-    attribute to an encoder silently changed its pathway; naming the groups makes a
-    misrouted branch a loud error instead of a quiet regression.
-
-    Resolution is the ENCODER's business, not the decoder's: a group is coarse
-    because it uses `coarse_temporal`, not because the decoder demoted it. That
-    keeps "how finely is this modality resolved" in one place, next to the reason
-    (the band's native resolution).
-    """
+    """Sums the factored terms into a per-pixel probability; every branch must be routed explicitly."""
 
     def __init__(self, branch_models, pixel_groups=None,
                  context_groups=None, year_group=None, local_kernel=9, coarse_grid=4,
@@ -490,15 +348,10 @@ class FactoredFireModel(nn.Module):
 
     @property
     def receptive_field(self):
-        """Effective receptive field in pixels: the local kernel, exactly."""
         return self.local.receptive_field
 
     def forward_terms(self, inputs):
-        """The four additive log-odds terms, each broadcastable to (B, 1, H, W).
-
-        Exposed because it IS the explanation: gamma = when, m = where coarsely,
-        s = this pixel's own susceptibility, c = what the neighbourhood adds.
-        """
+        """The additive log-odds terms gamma, year_gain, m, s, c, each broadcastable to (B, 1, H, W)."""
         feats = [branch(inputs[branch.input_name]).permute(0, 3, 1, 2)
                  for branch in self.pixel_branches]
         x = torch.cat(feats, dim=1)
@@ -516,10 +369,6 @@ class FactoredFireModel(nn.Module):
         }
         terms["gamma"] = (self.year(inputs[self.year.input_name]) if self.year is not None
                           else x.new_zeros(x.shape[0], 1, 1, 1))
-        # year_gain = gamma(t) * g_res(x): the spatially-explicit part of the year effect,
-        # kept as its own additive term so gamma stays the global amplitude and this stays 0
-        # at init. g_res is mean-centred, so summing gamma + year_gain preserves the basin
-        # amplitude (mean_x[gamma*(1 + g_res)] == gamma).
         if self.year_gain is not None:
             g_res = self.year_gain(inputs[self.year_gain.input_name])
             terms["year_gain"] = terms["gamma"] * g_res

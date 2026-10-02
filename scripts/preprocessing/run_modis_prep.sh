@@ -1,6 +1,7 @@
-# Set to MODIS tile grid
-echo $1 # Input shp
-echo $2 # Output dir
+# Rasterize MODIS active-fire hotspots per satellite onto the 927 m MODIS sinusoidal grid.
+# Usage: run_modis_prep.sh <input shp> <output dir>
+echo $1
+echo $2
 python preprocess_fire_detections.py \
     $1 \
     $2 \

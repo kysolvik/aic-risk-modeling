@@ -36,7 +36,7 @@ def test_loss_is_minimized():
 
 
 def test_stop_epoch_on_loss():
-    # v22's actual val_loss trajectory: improvements at epochs 1, 2, and 7.
+    # A real val_loss trajectory: improvements at epochs 1, 2, and 7.
     v22_val_loss = [2.524, 2.035, 2.405, 2.448, 2.190, 2.132, 1.651, 1.673,
                     2.037]
     # patience 4 stops at epoch 6, missing the epoch-7 best.

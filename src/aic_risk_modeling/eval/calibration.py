@@ -1,50 +1,18 @@
-"""Calibration metrics for binary fire-risk predictions.
-
-Quantifies model overconfidence. With hard-label BCE the model is pushed to emit
-probabilities near 0 and 1, but fire is stochastic, so a well-calibrated model's
-predicted probability should match the empirical burn frequency. We bin
-predictions by predicted probability (the same binning ``SegmentationMetrics``
-uses for PR/ROC AUC in ``train/metrics.py``) and compare each bin's mean
-predicted confidence to the observed positive rate:
-
-  - Expected Calibration Error (ECE): count-weighted mean |confidence - frequency|.
-  - Maximum Calibration Error (MCE): worst-case bin |confidence - frequency|.
-  - Reliability diagram: confidence (x) vs frequency (y) against the y=x diagonal.
-
-It also provides post-hoc *temperature scaling* (Guo et al. 2017): a single
-scalar T > 1 softens an overconfident model by dividing the logits before the
-sigmoid. Because the saved predictions are already sigmoid probabilities (the
-model applies the sigmoid in ``forward``), we recover the logits as
-``log(p / (1 - p))``, divide by T, and re-apply the sigmoid. Temperature scaling
-is monotonic and fixes the p=0.5 crossing, so it leaves hard-label metrics and
-PR AUC untouched and only moves the calibration curve.
-
-Plotting uses matplotlib, imported lazily so it stays an optional dependency.
-"""
+"""Calibration: reliability bins, ECE, and Platt/isotonic fitting."""
 
 import numpy as np
 
-# Clip probabilities this far from {0, 1} before taking the logit, so saturated
-# predictions give finite logits (|logit| <= ~13.8 at 1e-6) instead of +/-inf.
 _PROB_EPS = 1e-6
 
 
 def _bin_edges(scores, n_bins, strategy):
-    """Bin edges over [0, 1] for ECE binning.
-
-    ``uniform`` returns ``n_bins`` equal-width bins. ``quantile`` returns bins
-    with roughly equal *count* by placing edges at score quantiles, so the
-    sparse high-probability region gets real weight instead of being swallowed
-    by one giant near-zero bin (the usual failure of equal-width ECE under heavy
-    class imbalance). Tied quantiles are de-duplicated, which can yield fewer
-    than ``n_bins`` bins; the [0, 1] endpoints are always included.
-    """
+    """Bin edges on [0, 1]: 'uniform' width or 'quantile' (equal count, ties merged)."""
     if strategy == 'uniform':
         return np.linspace(0.0, 1.0, n_bins + 1)
     if strategy == 'quantile':
         edges = np.quantile(scores, np.linspace(0.0, 1.0, n_bins + 1))
         edges[0], edges[-1] = 0.0, 1.0
-        edges = np.unique(edges)  # drop degenerate (tied) edges
+        edges = np.unique(edges)
         if edges.size < 2:
             edges = np.array([0.0, 1.0])
         return edges
@@ -52,27 +20,12 @@ def _bin_edges(scores, n_bins, strategy):
 
 
 def reliability_bins(scores, labels, n_bins=15, strategy='uniform'):
-    """Bin predictions by predicted probability for a reliability diagram.
-
-    Args:
-        scores: predicted probabilities in [0, 1], any shape (flattened here).
-        labels: ground-truth labels (0/1 or bool), same shape as ``scores``.
-        n_bins: number of bins.
-        strategy: ``'uniform'`` (equal-width) or ``'quantile'`` (equal-count).
-
-    Returns:
-        dict of per-bin numpy arrays: ``bin_lo``/``bin_hi`` (bin edges), ``conf``
-        (mean predicted probability in the bin, NaN if empty), ``freq``
-        (empirical positive rate in the bin, NaN if empty), and ``count`` (number
-        of pixels in the bin). Length is ``n_bins`` for uniform, possibly fewer
-        for quantile when score ties collapse edges.
-    """
+    """Per-bin bin_lo/bin_hi, conf, freq (NaN if empty) and count for a reliability diagram."""
     scores = np.clip(np.asarray(scores).reshape(-1).astype(np.float64), 0.0, 1.0)
     labels = np.asarray(labels).reshape(-1).astype(np.float64)
 
     edges = _bin_edges(scores, n_bins, strategy)
     nb = edges.size - 1
-    # Bin index in [0, nb-1]; the right edge (score == 1.0) lands in the last bin.
     bin_idx = np.clip(np.searchsorted(edges, scores, side='right') - 1, 0, nb - 1)
 
     count = np.bincount(bin_idx, minlength=nb).astype(np.float64)
@@ -95,13 +48,7 @@ def reliability_bins(scores, labels, n_bins=15, strategy='uniform'):
 
 
 def expected_calibration_error(scores, labels, n_bins=15, strategy='uniform'):
-    """Expected and maximum calibration error for binary predictions.
-
-    Returns:
-        (ece, mce, bins) where ``ece`` is the count-weighted mean of
-        |confidence - frequency| over non-empty bins, ``mce`` is the maximum
-        over non-empty bins, and ``bins`` is the ``reliability_bins`` dict.
-    """
+    """(ece, mce, bins): count-weighted mean and max |conf - freq| over non-empty bins."""
     bins = reliability_bins(scores, labels, n_bins=n_bins, strategy=strategy)
     count = bins['count']
     total = count.sum()
@@ -116,62 +63,33 @@ def expected_calibration_error(scores, labels, n_bins=15, strategy='uniform'):
 
 
 def _probs_to_logits(scores, eps=_PROB_EPS):
-    """Recover logits from saved sigmoid probabilities: ``log(p / (1 - p))``.
-
-    Probabilities are clipped ``eps`` away from 0 and 1 first, so predictions
-    that saturated to exactly 0 or 1 in the float32 raster yield large but
-    finite logits rather than infinities. Note this caps the recoverable
-    confidence: a model that truly saturated has lost the information temperature
-    scaling would need, and gets pinned at ``|logit| <= log((1 - eps) / eps)``.
-    """
+    """log(p / (1 - p)) with p clipped eps from 0/1 so saturated scores stay finite."""
     p = np.clip(np.asarray(scores).reshape(-1).astype(np.float64), eps, 1.0 - eps)
     return np.log(p / (1.0 - p))
 
 
 def _sigmoid_stable(s):
-    """Numerically stable elementwise sigmoid."""
     return np.where(s >= 0, 1.0 / (1.0 + np.exp(-s)), np.exp(s) / (1.0 + np.exp(s)))
 
 
 def fit_platt(scores, labels, eps=_PROB_EPS):
-    """Fit Platt (logistic) scaling on saved sigmoid probabilities.
-
-    Recovers logits ``z`` from ``scores`` and fits ``sigmoid(a*z + b)`` by
-    logistic regression of ``labels`` on ``z`` (effectively unregularized). The
-    intercept ``b`` is what temperature scaling lacks: it shifts the whole
-    reliability curve, correcting a systematic bias/base-rate offset that a
-    single temperature (which pins the p=0.5 crossing) cannot. Temperature
-    scaling is the ``a = 1/T, b = 0`` special case.
-
-    Returns ``(a, b)``. Fit on a held-out calibration split.
-    """
+    """Fit sigmoid(a*logit(p) + b) by unregularized logistic regression; returns (a, b)."""
     from sklearn.linear_model import LogisticRegression
 
     z = _probs_to_logits(scores, eps=eps).reshape(-1, 1)
     y = np.asarray(labels).reshape(-1).astype(int)
-    # C large => negligible regularization, i.e. plain logistic calibration.
     lr = LogisticRegression(C=1e6, solver="lbfgs", max_iter=1000)
     lr.fit(z, y)
     return float(lr.coef_[0, 0]), float(lr.intercept_[0])
 
 
 def apply_platt(scores, a, b, eps=_PROB_EPS):
-    """Apply Platt scaling: ``sigmoid(a * logit(scores) + b)``."""
     s = a * _probs_to_logits(scores, eps=eps) + b
     return _sigmoid_stable(s).reshape(np.shape(scores))
 
 
 def fit_isotonic(scores, labels):
-    """Fit isotonic regression mapping scores -> calibrated probabilities.
-
-    Non-parametric and monotonic: it can bend the reliability curve onto the
-    diagonal at *any* probability level (unlike the single global squash of
-    temperature scaling), so it handles arbitrary monotonic miscalibration. With
-    pixel-scale data there are plenty of samples to fit it; the main risk is
-    overfitting the sparse high-probability tail, so fit it on a held-out split.
-
-    Returns a fitted ``sklearn.isotonic.IsotonicRegression``.
-    """
+    """Fit a monotonic IsotonicRegression from scores to probabilities."""
     from sklearn.isotonic import IsotonicRegression
 
     iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
@@ -181,21 +99,12 @@ def fit_isotonic(scores, labels):
 
 
 def apply_isotonic(scores, iso):
-    """Apply a fitted isotonic calibrator, preserving ``scores`` shape."""
     out = iso.predict(np.asarray(scores).reshape(-1).astype(np.float64))
     return out.reshape(np.shape(scores))
 
 
 def fit_calibrator(method, scores, labels):
-    """Fit a post-hoc calibrator and return ``(transform_fn, info_str)``.
-
-    ``transform_fn`` maps a probability array to calibrated probabilities;
-    ``info_str`` summarizes the fitted parameters for logging. ``method`` is one
-    of ``'platt'``, ``'isotonic'``.
-
-    Both are monotonic (so PR AUC is preserved) but can move the 0.5 operating
-    point, so hard-label metrics may shift.
-    """
+    """Fit 'platt' or 'isotonic'; returns (transform_fn, info_str)."""
     method = method.lower()
     if method == 'platt':
         a, b = fit_platt(scores, labels)
@@ -214,20 +123,17 @@ def deflate(q, pos_weight):
 
 
 def inflate(p, pos_weight):
-    """Calibrated probability -> raw weighted-BCE score (inverse of `deflate`)."""
+    """Inverse of deflate."""
     return pos_weight * p / (pos_weight * p + 1.0 - p)
 
 
 def to_prob(q, pos_weight, level=1.0, cal=None):
-    """Model score -> burn probability: the frozen calibrator if given, else deflate / level."""
+    """Model score -> burn probability: frozen calibrator if given, else deflate / level."""
     return cal(q) if cal is not None else deflate(q, pos_weight) / level
 
 
 def load_calibrator(path):
-    """Frozen calibrator (raw score -> probability) from an npz saved by
-    calibrated_year_totals.py --save-calibrator: platt (a, b) via apply_platt, or
-    isotonic breakpoints via np.interp (== the fitted curve). npz files without a
-    `method` key predate platt support and are isotonic."""
+    """Frozen calibrator from a calibrated_year_totals.py npz (platt, or isotonic if no `method`)."""
     d = np.load(path)
     method = str(d["method"]) if "method" in d.files else "isotonic"
     if method == "platt":
@@ -238,7 +144,6 @@ def load_calibrator(path):
 
 
 def reliability_table_str(bins):
-    """Format a reliability table (bin range, confidence, frequency, count)."""
     lines = [f"{'bin':>11}  {'conf':>6}  {'freq':>6}  {'count':>12}"]
     for lo, hi, conf, freq, count in zip(
             bins['bin_lo'], bins['bin_hi'], bins['conf'], bins['freq'],
@@ -251,18 +156,10 @@ def reliability_table_str(bins):
 
 
 def plot_reliability_diagram(bins, ece, mce, out_path, title=None):
-    """Save a reliability diagram PNG (calibration curve + count histogram).
-
-    matplotlib is imported lazily; if it is not installed, prints a notice and
-    returns False instead of raising, so calibration stays usable without a
-    plotting dependency.
-
-    Returns:
-        True if the figure was written, False if matplotlib is unavailable.
-    """
+    """Save a reliability diagram PNG; returns False if matplotlib is missing."""
     try:
         import matplotlib
-        matplotlib.use("Agg")  # headless backend, no display required
+        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
         print(f"matplotlib not installed; skipping reliability plot ({out_path}).")

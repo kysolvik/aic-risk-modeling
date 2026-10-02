@@ -1,5 +1,5 @@
-# Usage: DATAFLOW_SA=<service-account-email> scripts/preprocessing/run_df.sh <target_year> <random_seed> [extra args]
-#export IMAGE_URL=us-east1-docker.pkg.dev/macedo-lab-general-9051/geebeam/kysolvik/geebeam:latest
+# Launch the geebeam fullgrid export for one target year on Dataflow.
+# Usage: DATAFLOW_SA=<service-account-email> run_df.sh <target_year> <random_seed> [extra args]
 export IMAGE_URL=kysolvik/geebeam:0.5.3
 target_year=$1
 random_seed=$2
@@ -19,5 +19,4 @@ python scripts/preprocessing/geebeam_ali_inputs.py \
     --service_account_email="${DATAFLOW_SA:?set DATAFLOW_SA to the Dataflow service account email}" \
     $other_args \
     --use_public_ips
-#    --no_use_public_ips # For columbia project
 

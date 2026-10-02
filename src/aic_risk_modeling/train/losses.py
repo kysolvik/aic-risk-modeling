@@ -1,8 +1,4 @@
-"""PyTorch loss functions.
-
-Losses are called as `loss(y_true, y_pred)` where `y_pred` holds sigmoid
-probabilities, not logits.
-"""
+"""Losses, called as loss(y_true, y_pred) with y_pred as probabilities (not logits)."""
 
 import torch
 
@@ -15,10 +11,7 @@ def _bce_elementwise(y_true, y_pred):
 
 
 def weighted_bce(pos_weight):
-    """Weighted BCE loss for 2D segmentation problems.
-
-    Positive pixels are weighted by `pos_weight` and negatives by 1.0.
-    """
+    """BCE with positives weighted by pos_weight."""
     def loss(y_true, y_pred):
         y_true = y_true.float()
         weights = y_true * pos_weight + (1.0 - y_true)
@@ -27,19 +20,11 @@ def weighted_bce(pos_weight):
 
 
 def deflate_probs(y_pred, pos_weight):
-    """Invert the probability inflation caused by a weighted BCE.
-
-    Training with `pos_weight` w drives predictions toward the pointwise
-    optimum q = w*p / (w*p + 1 - p), an inflated version of the calibrated
-    probability p. This maps q back to p = q / (w - (w-1)*q) exactly
-    (identity when pos_weight is 1), so sums of deflated probabilities are
-    comparable to actual positive-pixel counts.
-    """
+    """Map a weighted-BCE optimum q = wp/(wp+1-p) back to the calibrated p."""
     return y_pred / (pos_weight - (pos_weight - 1.0) * y_pred)
 
 
-# Losses whose predictions are inflated by pos_weight (see deflate_probs);
-# consumers (e.g. the area_ratio metric) should deflate before summing.
+# Predictions from these losses must be deflated before summing.
 POS_WEIGHT_LOSSES = frozenset({'weighted_binary_crossentropy'})
 
 

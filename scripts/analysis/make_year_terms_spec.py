@@ -1,20 +1,6 @@
-"""Add a `year_terms` block to a Shapley driver spec from a gamma fit.
+"""Add a `year_terms` block to a Shapley driver spec by splitting gamma into its SOI and prev-burn parts.
 
-Splits the factored model's frozen year offset into its two regressor parts,
-each centred on the gamma's own centre years (as fit_year_offset.build_offsets
-centres their sum), so the parts add up to `per_year_offset` exactly:
-
-    gamma(t) = b_soi * (zsoi_t - mean zsoi) + b_prev * (zprev_t - mean zprev)
-
-and hands the SOI part to one driver and the previous-year-burn part to another
-(eval/attribution.py `year_terms`). Refuses if the parts don't rebuild the gamma
-table to 1e-9.
-
-    .venv/bin/python scripts/analysis/make_year_terms_spec.py \
-        --gamma out/cv/gamma/gamma_v3_patched_bd_2002_burn_final_all.json \
-        --spec configs/attribution_drivers_v3p_yeargain.json \
-        --out configs/attribution_drivers_v3p_yeargain_yearsplit.json
-"""
+Usage: make_year_terms_spec.py --gamma G.json --spec S.json --out OUT.json"""
 
 import argparse
 import json

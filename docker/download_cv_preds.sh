@@ -1,31 +1,8 @@
 #!/usr/bin/env bash
-# Download the per-chip tiles from finished CV-protocol predictions (submitted by
-# run_cv_predict.sh) into the local tree that cv_collect_results.py scores.
-#
-# Usage:
-#   docker/download_cv_preds.sh <arch> <stage>
-#     e.g. DATA_VERSION=v3_patched MOSAIC_DIR=out/label_mosaics_v3p_union4 \
-#            docker/download_cv_preds.sh unet_v3p_union4 folds
-#
-# Safe to rerun: rows already downloaded are skipped, and rows whose execution
-# hasn't finished (no preds_mask.tif in GCS yet) are reported as pending.
-#
-# - A run counts as finished only when preds_mask.tif exists: the container
-#   writes the mosaic after predict.py succeeds and uploads it after the chips.
-#   A crashed/timed-out run still uploads its partial chips but no mosaic, so it
-#   shows up as pending forever -- check its logs and resubmit with FORCE=1.
-# - Also copies preds_mask.tif to $MOSAIC_DIR/label_<year>.tif (ground-truth
-#   labels, identical across folds for a year) for the climatology reference.
-#   MOSAIC_DIR must hold THIS target's labels (e.g. the 4-way union for v3p).
-#   Skipped under a YEARS override (a predict-only year's mask is a placeholder).
-# - Also copies the prediction mosaic preds_out.tif to
-#   <predict_root>/<year>/preds_out.tif (next to chips/; the scorers glob
-#   out_*.tif, so it isn't picked up as a chip). Fetched for already-downloaded
-#   rows too. PRED_MOSAICS=0 skips it.
-# - YEARS / FOLDS: same overrides as run_cv_predict.sh (applied in
-#   cv_protocol_rows.py); pass the same values to fetch those executions.
-# - Chip counts should be identical across every row (same grid every year);
-#   a row with fewer chips than the others is flagged.
+# Download finished CV-protocol predictions (from run_cv_predict.sh) into the tree cv_collect_results.py scores.
+# Usage: [DATA_VERSION=..] [MOSAIC_DIR=..] [YEARS=..] [FOLDS=..] download_cv_preds.sh <arch> <stage>
+# A run is finished once preds_mask.tif exists; it is also copied to $MOSAIC_DIR/label_<year>.tif
+# (skipped under YEARS: predict-only masks are placeholders). Safe to rerun.
 set -euo pipefail
 cd "/home/ksolvik/research/firesat/risk_modeling/aic-risk-modeling"
 

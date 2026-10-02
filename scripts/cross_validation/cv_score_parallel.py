@@ -1,19 +1,7 @@
 #!/usr/bin/env python
-"""Resumable per-architecture protocol scoring, for running architectures in parallel.
+"""Resumable one-architecture protocol scoring (appends to out/cv/score_parts/<arch>.csv); --merge folds parts in.
 
-cv_collect_results.py --protocol scores every row in one process and writes
-protocol_scores.csv only at the end: slow (~10 min per fold-year on one core) and a
-killed run loses everything. This scores ONE architecture, appending each fold-year to
-out/cv/score_parts/<arch>.csv as soon as it is done (rerun = resume), so several
-architectures can run as separate processes without clobbering the shared cache.
-`--merge` then folds the part files into protocol_scores.csv and writes the report.
-
-Usage:
-    .venv/bin/python scripts/cross_validation/cv_score_parallel.py --arch unet_v3p_union4 \\
-        --label_dir out/label_mosaics_v3p_union4          # one per process
-    .venv/bin/python scripts/cross_validation/cv_score_parallel.py --merge \\
-        --arch mlp_v3p_union4_flat vit_test_v3p_union4 ... # after all finish
-"""
+Usage: cv_score_parallel.py --arch ARCH --label_dir DIR  |  cv_score_parallel.py --merge --arch ARCH ..."""
 import argparse
 import csv
 import glob
@@ -53,7 +41,7 @@ def score_arch(arch, report, label_dir):
             base = by_key.get((arch, r["base_fold"])) if r["base_fold"] else None
             rec = pd.DataFrame([cc.score_protocol_year(r, y, base, clim)])
             part = rec if part.empty else pd.concat([part, rec], ignore_index=True)
-            part.to_csv(path, index=False)                  # checkpoint after every fold-year
+            part.to_csv(path, index=False)
 
 
 def merge(archs, report, ref_arch):

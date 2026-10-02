@@ -1,16 +1,8 @@
 #!/usr/bin/env python
-"""CPU pre-flight for the CV protocol -- run before spending any Vertex $. Read-only.
+"""Read-only CPU pre-flight for the CV protocol: re-derive every job from the actual configs and check its guards.
 
-Re-derives every job in out/cv/protocol.csv from the ACTUAL config files, not the
-manifest: leakage guards (2024/25 never in a fold, final evaluates exactly them),
-each ablation arm / seed replicate differs from its base by exactly the intended
-thing, ablation arms keep the base's stats, matched budget, no im_loss* inputs,
-md_year only as the gamma year_group, gamma covers every train/val/eval year, gamma
-sign guard, unique model paths, and one model per architecture builds from a
-protocol config.
-
-Usage: .venv/bin/python scripts/cross_validation/cv_preflight.py [--arch ARCH ...]
-"""
+Checks leakage (2024/25), arm-vs-base diffs, budgets, inputs, gamma coverage and sign, and model builds.
+Usage: cv_preflight.py [--arch ARCH ...]"""
 
 import argparse
 import csv
@@ -34,7 +26,7 @@ def _dir_years(dirs):
 
 
 def protocol_row_errors(r, cfg):
-    """Every guard for one protocol row, evaluated on the config that will actually run."""
+    """Every guard for one protocol row, on the config that will actually run."""
     spec = {"fold_id": r["fold_id"], "stage": r["stage"],
             "train": _dir_years(cfg["data_dirs"]), "val": _dir_years(cfg.get("val_data_dirs", [])),
             "eval": mk.parse_years(r["eval_years"]), "seed": cfg.get("seed"),
@@ -43,7 +35,7 @@ def protocol_row_errors(r, cfg):
     if spec["train"] != mk.parse_years(r["train_years"]) or spec["val"] != mk.parse_years(r["val_years"]):
         errs.append("config years disagree with the manifest")
     want = mk.job_budget(mk.PROTOCOL_BUDGET, bool(spec["val"]))
-    if r.get("steps_per_epoch"):                     # per-fold value (--chips_per_year)
+    if r.get("steps_per_epoch"):
         want["steps_per_epoch"] = int(r["steps_per_epoch"])
     for k, v in want.items():
         if cfg.get(k) != v:
@@ -72,7 +64,6 @@ def protocol_row_errors(r, cfg):
 
 
 def check_protocol(archs=None):
-    """Protocol invariants for every architecture in out/cv/protocol.csv."""
     if not os.path.exists(PROTOCOL):
         print("no out/cv/protocol.csv -- run cv_make_folds.py first")
         return False

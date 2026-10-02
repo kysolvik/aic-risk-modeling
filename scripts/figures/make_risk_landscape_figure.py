@@ -1,22 +1,7 @@
-"""Conceptual figure: the fire-risk-model landscape (resolution x time horizon).
+"""Conceptual figure: fire-risk model classes on a resolution x time-horizon plane (no data).
 
-A single data-free schematic that situates three classes of fire-risk model on a
-log-log plane of spatial resolution (y) against forecast / assessment horizon (x):
-
-  - Short-term operational   -- weather-driven & real-time burn detection (<1 week)
-  - Medium-term strategic     -- THIS STUDY (1 month - 1 year, ~0.5-50 km), highlighted;
-                                 climate + human activity patterns
-  - Long-term outlooks        -- decadal climate-driven risk assessment
-
-Each class is drawn as a shaded zone with a few representative systems plotted as
-labelled points. Zone extents and example systems live in the ZONES / POINTS dicts
-at the top so they can be renamed / repositioned without touching the plot code.
-
-    .venv/bin/python scripts/figures/make_risk_landscape_figure.py
-
-House style is copied from make_risk_figure_2024.py (no shared plotting module):
-manuscript figure -> PNG @ 300 dpi + companion PDF in out/figures/.
-"""
+Zones and example systems are edited in the ZONES / POINTS dicts.
+Usage: make_risk_landscape_figure.py"""
 
 import argparse
 
@@ -24,19 +9,14 @@ import numpy as np
 
 from style import GRID, INK_PRIMARY, INK_SECONDARY, SURFACE, save_figure
 
-# Okabe-Ito colourblind-safe trio, one per model class.
-C_SHORT = "#0072b2"   # blue
-C_MEDIUM = "#009e73"  # green (this study, highlighted)
-C_LONG = "#d55e00"    # vermillion
+# Okabe-Ito, one per model class.
+C_SHORT = "#0072b2"
+C_MEDIUM = "#009e73"
+C_LONG = "#d55e00"
 
-# --------------------------------------------------------------------------- #
-# Editable content: axes are internal in (days, metres); tick labels are set below.
-# --------------------------------------------------------------------------- #
 DAY, WEEK, MONTH, SEASON, YEAR, DECADE = 1.0, 7.0, 30.0, 91.0, 365.0, 3650.0
 KM = 1000.0
 
-# Zone extents as (x0, x1) days and (y0, y1) metres. The title sits a fixed inset
-# inside the box's top-left corner and the description directly below the title.
 ZONES = {
     "short": dict(
         x=(0.5, 9.0), y=(100.0, 28.0 * KM), color=C_SHORT,
@@ -54,12 +34,9 @@ ZONES = {
         desc="Climate-driven\nrisk assessment",
     ),
 }
-TITLE_INSET = (9, -7)   # points from the box's top-left corner
-DESC_GAP = 3            # points between title and description
+TITLE_INSET = (9, -7)
+DESC_GAP = 3
 
-# Representative systems: marker at (x, y) in data coords; label offset (dx, dy) in
-# points from the marker with alignment ha/va. `leader=True` draws a thin line from
-# the label to the marker. `star` = the study.
 POINTS = [
     dict(zone="short", label="VIIRS / MODIS\nactive-fire detection",
          x=0.8, y=0.40 * KM, dx=9, dy=0, ha="left", va="center"),
@@ -73,7 +50,6 @@ POINTS = [
          x=4200.0, y=30.0 * KM, dx=0, dy=-9, ha="center", va="top"),
 ]
 
-# Axis ticks (position -> label).
 XTICKS = [(DAY, "1 day"), (WEEK, "1 week"), (MONTH, "1 month"),
           (SEASON, "1 season"), (YEAR, "1 year"), (DECADE, "decade")]
 YTICKS = [(10.0, "10 m"), (100.0, "100 m"), (1.0 * KM, "1 km"),
@@ -84,7 +60,6 @@ YLIM = (7.0, 160.0 * KM)
 
 
 def _axfrac(x, y):
-    """Map (days, metres) to axes-fraction coords for the given log limits."""
     lx0, lx1 = np.log10(XLIM[0]), np.log10(XLIM[1])
     ly0, ly1 = np.log10(YLIM[0]), np.log10(YLIM[1])
     fx = (np.log10(x) - lx0) / (lx1 - lx0)
@@ -93,10 +68,7 @@ def _axfrac(x, y):
 
 
 def check_layout(fig, ax, texts, boxes, pad_px=6):
-    """Warn about any text not inside its own zone box (inset by pad_px, which also
-    clears the rounded corners), touching another zone's box, overlapping other text,
-    or crossed by another label's leader line. Text extents exclude leader lines
-    (an Annotation's own extent would include its arrow)."""
+    """Warn about text outside its zone box, touching another zone, overlapping text, or crossed by a leader."""
     from matplotlib.text import Text
     from matplotlib.transforms import Bbox
     fig.canvas.draw()
@@ -145,10 +117,9 @@ def plot(out_png):
     ax.set_xlim(*XLIM)
     ax.set_ylim(*YLIM)
 
-    texts, boxes = [], {}   # (zone, Text) for the overlap check; zone -> axes-fraction box
+    texts, boxes = [], {}
 
-    # --- zones (rounded rectangles drawn in axes-fraction space for clean corners) ---
-    for key in ("short", "long", "medium"):  # draw medium last so it sits on top
+    for key in ("short", "long", "medium"):
         z = ZONES[key]
         hi = z.get("highlight", False)
         (x0, x1), (y0, y1) = z["x"], z["y"]
@@ -173,7 +144,6 @@ def plot(out_png):
         )
         ax.add_patch(edge)
 
-        # zone title (fixed inset from the top-left corner) + description below it
         t = ax.annotate(z["title"], xy=(x0, y1), xytext=TITLE_INSET,
                         textcoords="offset points", color=z["color"], fontsize=11.5,
                         fontweight="bold", ha="left", va="top", zorder=5,
@@ -189,7 +159,6 @@ def plot(out_png):
             texts.append((key, d))
         boxes[key] = (fx0, fy0, fx1, fy1)
 
-    # --- representative systems ---
     for p in POINTS:
         color = ZONES[p["zone"]]["color"]
         star = p.get("star", False)
@@ -213,7 +182,6 @@ def plot(out_png):
         )
         texts.append((p["zone"], a))
 
-    # --- axes cosmetics ---
     ax.set_xticks([t for t, _ in XTICKS])
     ax.set_xticklabels([lab for _, lab in XTICKS])
     ax.set_yticks([t for t, _ in YTICKS])

@@ -1,10 +1,4 @@
-"""Streaming metrics for binary segmentation.
-
-ROC AUC and PR AUC are computed from histograms of the predicted
-probabilities over a fixed threshold grid (the same approximation
-keras.metrics.AUC uses), so memory stays constant regardless of how many
-batches are accumulated.
-"""
+"""Streaming binary-segmentation metrics; AUCs from fixed-grid probability histograms."""
 
 import torch
 
@@ -12,18 +6,9 @@ from . import losses
 
 
 class SegmentationMetrics:
-    """Accumulates binary IoU, ROC AUC, PR AUC, and area ratio over batches.
+    """Accumulates binary IoU, ROC AUC, PR AUC and area ratio over batches.
 
-    `update` takes ground truth (any shape, bool or 0/1) and predicted
-    probabilities of the same shape. Histograms live on the same device as
-    the predictions, so no per-batch device transfers happen.
-
-    `area_ratio` is total expected positives / total actual positives — the
-    aggregate calibration of the epoch (1.0 = calibrated). Pass the
-    `pos_weight` the loss was built with so predictions are deflated back to
-    the calibrated scale first (see `losses.deflate_probs`); leave it at 1.0
-    for losses that don't inflate probabilities.
-    """
+    area_ratio = expected / actual positives, after deflating by the loss's pos_weight."""
 
     def __init__(self, num_thresholds=512, iou_threshold=0.5, pos_weight=1.0):
         self.num_thresholds = num_thresholds
@@ -60,14 +45,11 @@ class SegmentationMetrics:
 
     @torch.no_grad()
     def compute(self):
-        """Returns {'binary_iou', 'roc_auc', 'pr_auc', 'area_ratio'} as python
-        floats."""
+        """{'binary_iou', 'roc_auc', 'pr_auc', 'area_ratio'} as floats."""
         if self.pos_hist is None:
             return {'binary_iou': 0.0, 'roc_auc': 0.0, 'pr_auc': 0.0,
                     'area_ratio': self._area_ratio()}
 
-        # tp[k]/fp[k]: counts predicted positive at threshold k/num_thresholds,
-        # i.e. reverse cumulative sums of the histograms (k = 0..num_thresholds).
         zero = self.pos_hist.new_zeros(1)
         tp = torch.cat([self.pos_hist.flip(0).cumsum(0).flip(0), zero])
         fp = torch.cat([self.neg_hist.flip(0).cumsum(0).flip(0), zero])
@@ -82,11 +64,9 @@ class SegmentationMetrics:
         precision = torch.where(tp + fp > 0, tp / (tp + fp),
                                 torch.ones_like(tp))
 
-        # flip so x runs ascending for trapezoidal integration
         roc_auc = torch.trapz(tpr.flip(0), fpr.flip(0))
         pr_auc = torch.trapz(precision.flip(0), tpr.flip(0))
 
-        # IoU on class 1 at iou_threshold: tp / (tp + fp + fn), fn = P - tp
         k = min(int(round(self.iou_threshold * self.num_thresholds)),
                 self.num_thresholds)
         binary_iou = tp[k] / (total_pos + fp[k])

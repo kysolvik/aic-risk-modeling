@@ -21,21 +21,10 @@ def _gcs_join(base: str, name: str) -> str:
 
 
 def load_schema_from_gcs(gcs_dir: str) -> schema_pb2.Schema:
-    """Load a schema from `schema.pbtxt` in GCS or infer from `stats.tfrecord`.
-
-    Args:
-        gcs_dir: GCS path where Dataflow results were written (e.g. gs://.../results)
-
-    Returns:
-        A tensorflow_metadata.schema_pb2.Schema
-
-    Raises:
-        FileNotFoundError: if neither `schema.pbtxt` nor `stats.tfrecord` are found
-    """
+    """Load `schema.pbtxt` from a Dataflow results dir (local or gs://)."""
     schema_path = _gcs_join(gcs_dir, "schema.pbtxt")
     schema = schema_pb2.Schema()
 
-    # Prefer existing schema
     if tf.io.gfile.exists(schema_path):
         logger.info("Loading schema from %s", schema_path)
         with tf.io.gfile.GFile(schema_path, "r") as f:
@@ -50,22 +39,7 @@ def schema_to_feature_spec(
     non_img_features: Optional[List[str]] = None,
     patch_size: int = 128
 ) -> Dict[str, tf.io.FixedLenFeature]:
-    """Convert a schema proto to a TensorFlow feature_spec dictionary.
-
-    Note on conversion rules:
-    - BYTES -> tf.string scalar
-    - INT -> tf.int64 scalar
-    - FLOAT -> if feature name not in `non_img_features` assume image patch -> shape (patch_size, patch_size)
-              else scalar (float)
-
-    Args:
-        schema: schema proto
-        non_img_features: names to treat as non-image (scalar) floats; default ['lon','lat','id']
-        patch_size: size each side of square patch
-
-    Returns:
-        Dict suitable for tf.io.parse_single_example
-    """
+    """Schema -> parse spec: im_* floats are (patch_size, patch_size), others use the schema dim."""
     feature_spec = {}
     for feature in schema.feature:
         if feature.name.startswith('im_'):
@@ -92,7 +66,6 @@ def _apply_single_transform(result, feature_name, transform_fn):
     if callable(transform_fn):
         result[feature_name] = transform_fn(result[feature_name])
     elif isinstance(transform_fn, str):
-        # Look up in registry
         try:
             callable_fn = transforms.transform_registry[transform_fn]
             return callable_fn(result[feature_name])
@@ -110,33 +83,19 @@ def apply_transforms(
     transform_dict: Optional[Dict[str, Callable]] = None,
     timesteps: Optional[List[int]] = None,
 ) -> Dict:
-    """Apply custom transforms to specific fields in an example.
+    """Apply per-feature transforms; a bare name also applies to its `_<timestep>` variants.
 
-    Args:
-        example: Dictionary of features
-        transforms: Dict mapping feature names to transform functions.
-                   If a feature has a transform, apply it; otherwise keep as-is.
-
-    Returns:
-        Dictionary with transforms applied to specified features
-    """
+    An exact-name transform (e.g. BurnDate_2024) overrides the bare-name one for that feature."""
     if transform_dict is None or len(transform_dict)==0:
         return example
 
     result = example.copy()
     done_list = []
     for feature_name, transform_fn in transform_dict.items():
-        # First check for transforms with exact name match (no adding years)
-        # This could include "BurnDate_2024", which would override a general
-        # "BurnDate" transform
         if feature_name not in done_list and feature_name in result:
             result[feature_name] = _apply_single_transform(result, feature_name, transform_fn)
             done_list.append(feature_name)
         if timesteps is not None and len(timesteps) > 0:
-            # Then check for transforms with years appended
-            # If "BurnDate" transform is specified, it will be applied for all
-            # years (e.g. BurnDate_2023, BurnDate_2022...), but NOT those which
-            # had their own transform specified (e.g. BurnDate_2024, in the example above)
             for ts in timesteps:
                 feature_name_wyear = f"{feature_name}_{ts}"
                 if feature_name_wyear not in done_list and feature_name_wyear in result:
@@ -155,28 +114,7 @@ def dataset_from_dir(
     shuffle_buffer: int = 512,
     seed: Optional[int] = None,
 ) -> tf.data.Dataset:
-    """Builds a tf.data.Dataset from TFRecord files, returning all features as a dict.
-
-    Use this to load raw data that will be merged with other datasets before selecting
-    inputs/outputs. For input/output selection and transforms, use `select_bands_transform()`.
-
-    Args:
-        dir: Directory containing tfrecord.gz files
-        tfrecord_pattern: file glob (e.g., 'training-*.tfrecord.gz')
-        feature_spec: output of `schema_to_feature_spec`. Alternatively, if none will check
-            for schema.pbtxt file in dir and attempt to load feature spec.
-        batch_size: batch size
-        shuffle: whether to shuffle
-        compression: e.g., 'GZIP' or None
-        shuffle_buffer: buffer size for shuffling
-        seed: optional RNG seed. When set, file listing and shuffling are
-            reproducible and interleave is forced deterministic, so repeated
-            runs see the identical data order. When None (default), order is
-            random as before.
-
-    Returns:
-        A batched tf.data.Dataset yielding all features as a dict
-    """
+    """Batched dataset of feature dicts from TFRecords in `dir`; `seed` makes the order deterministic."""
     full_path_pattern = os.path.join(dir, tfrecord_pattern)
     files = tf.io.gfile.glob(full_path_pattern)
     if not files:
@@ -193,7 +131,6 @@ def dataset_from_dir(
                        num_parallel_calls=tf.data.AUTOTUNE,
                        deterministic=True if seed is not None else None)
 
-    # Get feature spec
     if feature_spec is None:
         schema = load_schema_from_gcs(dir)
         feature_spec = schema_to_feature_spec(schema)
@@ -226,10 +163,7 @@ def _stack_vars(features, input_keys):
 
 
 def _combine_output_bands(stacked):
-    """Union of the stacked label bands (trailing axis) into one binary target.
-
-    Positive where any source band is positive, e.g. a multi-sensor fire union.
-    """
+    """Union of the stacked label bands (last axis) into one binary target."""
     combined = tf.reduce_any(tf.cast(stacked, tf.bool), axis=-1)
     return tf.cast(combined, stacked.dtype)
 
@@ -238,22 +172,18 @@ def _single_feature_group_prep(
         example,
         feature_config
 ):
-    # Apply transforms
     example = apply_transforms(example,
                                feature_config['transforms'],
                                feature_config['timesteps']
                                )
 
-    # Append timesteps to input names, if necessary
     if feature_config['timesteps'] is None or len(feature_config['timesteps']) == 0:
         inputs_w_time = feature_config['feature_names']
     else:
         inputs_w_time = [f"{k}_{ts}" for k in feature_config['feature_names'] for ts in feature_config['timesteps']]
     all_inputs = {name: example[name] for name in inputs_w_time}
 
-    # Stack (if neither, returns dict)
     if feature_config['stack_timesteps']:
-        # Get groups of years
         all_inputs = _stack_time_series(all_inputs, inputs_w_time, feature_config['timesteps'])
     else:
         all_inputs = _stack_vars(all_inputs, inputs_w_time)
@@ -266,7 +196,6 @@ def _to_tuple_transform(
     input_feature_config: dict,
     output_feature_config: dict,
 ):
-    """Transform a parsed example into an (inputs_dict, label) tuple."""
     inputs = {}
     for feat_group in input_feature_config.keys():
         inputs[feat_group] = _single_feature_group_prep(
@@ -282,13 +211,7 @@ def select_bands_transform(
     input_feature_config: dict,
     output_feature_config: dict,
 ) -> tf.data.Dataset:
-    """Select input and output bands from a dataset of feature dicts, with transforms.
-
-    Use this after merging datasets to split features into inputs/outputs.
-
-    Returns:
-        A dataset yielding (inputs_dict, label) 2-tuples.
-    """
+    """Map feature dicts to (inputs_dict, label) using the input/output feature configs."""
     def select_fn(example):
         return _to_tuple_transform(example, input_feature_config, output_feature_config)
 
@@ -296,21 +219,12 @@ def select_bands_transform(
 
 
 def _remove_unshared_features(datasets):
-    """Remove features that aren't shared across all datasets.
-
-    Args:
-        datasets: List of tf.data.Datasets, each yielding feature dicts
-
-    Returns:
-        List of datasets with a map applied that filters to only shared feature keys
-    """
+    """Restrict every dataset to the feature keys they all share."""
     if not datasets:
         return datasets
 
-    # Get feature keys from first batch of each dataset
     shared_keys = None
     for ds in datasets:
-        # Take one batch to inspect keys
         batch_keys = set(ds.element_spec.keys())
         if shared_keys is None:
             shared_keys = batch_keys
@@ -320,7 +234,6 @@ def _remove_unshared_features(datasets):
     if shared_keys is None:
         raise ValueError("Could not determine feature keys from datasets")
 
-    # Filter each dataset to only include shared keys
     filtered_datasets = []
     for ds in datasets:
         def filter_features(features):
@@ -334,17 +247,7 @@ def merge_datasets(
     datasets: List[tf.data.Dataset],
     seed: Optional[int] = None,
 ) -> tf.data.Dataset:
-    """Merge datasets by sampling examples from each (features shared by all).
-
-    Args:
-        datasets: List of tf.data.Datasets to merge. Each should yield inputs_dict.
-        seed: optional RNG seed for the sampling, so the order in which datasets
-            are interleaved is reproducible. None (default) keeps the previous
-            random behavior.
-
-    Returns:
-        A merged tf.data.Dataset
-    """
+    """Sample examples across datasets (shared features only), seeded if `seed` is set."""
     if not datasets:
         raise ValueError("Must provide at least one dataset to merge")
     datasets = _remove_unshared_features(datasets)

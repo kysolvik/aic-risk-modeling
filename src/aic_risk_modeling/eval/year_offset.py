@@ -1,37 +1,12 @@
-"""Fit the frozen global year-intensity offset `gamma(t)` used by the factored model.
+"""Offline fit of the factored model's frozen global year offset:
 
-`gamma(t)` is a low-degree-of-freedom, GLOBAL, offline-fit additive logit offset:
+    gamma(t) = b0 + b_soi * z(SOI_{Oct-Dec, Y-1}) + b_prev * z(log basin burn_{Y-1})
 
-    gamma(t) = b0 + b_soi * z(SOI_{Aug-Oct, Y-1}) + b_prev * z(log basin burn_{Y-1})
-
-Why offline and low-dof: the network sees ~360 year-constant scalars against 10-13
-distinct year-values, so a learned year head fits without fully identifying the year
-Fitting <=3 parameters offline on the chip-year panel is well-conditioned;
-letting the network do it is not.
-
-Why global rather than spatially varying: a mean-zero spatial basis multiplied by a
-year scalar has zero basin mean, so it is ORTHOGONAL to the year effect and cannot
-change year-to-year amplitude at all. `run_checks` pins this as an invariant.
-
-Why the prev-burn term is safe: it fits NEGATIVE (mean-reverting -- a big burn year
-predicts a smaller next year), so it does not lag the turns the way a persistence
-term would. `run_checks` pins the sign, and the fit refuses to emit if it flips.
-
-The emitted offsets are MEAN-CENTERED over the fit years. Under weighted BCE the
-model's optimal output is inflated (logit(q) ~= logit(p) + log(pos_weight) for small
-p), so the level is absorbed by the network's own bias while the year-to-year
-component passes through unchanged. Centering makes
-gamma independent of `pos_weight`.
-"""
+Emitted mean-centered over the fit years, so gamma is independent of pos_weight."""
 
 import numpy as np
 import pandas as pd
 
-# Targets are summed over their columns. "union_sum" approximates the actual
-# training label (im_BurnDate OR im_viirs_snpp) by summing the two sensors; that
-# over-counts their overlap, but the overlap is a near-constant ~15-22% of the
-# union, so in log space it shifts the level and barely touches the YEAR effect,
-# which is all gamma uses.
 TARGETS = {"bd": ["burn_bd"], "snpp": ["burn_snpp"], "ft": ["burn_ft"],
            "union_sum": ["burn_bd", "burn_snpp"],
            "union3": ["burn_bd", "burn_snpp", "burn_mod14"]}
@@ -49,13 +24,7 @@ def _z(v):
 
 
 def load_panel(path, target="bd", prev_burn="union_sum", space="log1p"):
-    """Chip-year frame with the response and the two year-level regressors.
-
-    `prev_burn="union_sum"` sums the two sensors' previous-year bands. That
-    over-counts their overlap (the sensors share only 15-22% of the union), but the
-    scalar is z-scored per year, so a roughly proportional bias cancels. Use
-    `--check` / `--sensitivity` to confirm the choice does not matter.
-    """
+    """Chip-year frame with response `y` and year regressors zsoi/zprev (fullgrid chip panel)."""
     d = pd.read_parquet(path)
     cols = ["md_id", "year", "md_x", "md_y", SOI_COL] + list(TARGETS[target])
     cols += [c for c in PREV_BANDS[prev_burn] if c not in cols]
@@ -64,14 +33,13 @@ def load_panel(path, target="bd", prev_burn="union_sum", space="log1p"):
     burn = d[list(TARGETS[target])].sum(axis=1).to_numpy(dtype=float)
     if space == "log1p":
         d["y"] = np.log1p(burn)
-    elif space == "logit":                      # correct space for an additive logit offset
+    elif space == "logit":
         denom = CHIP_PIXELS * len(TARGETS[target])
         p = (burn + 0.5) / (denom + 1.0)
         d["y"] = np.log(p / (1.0 - p))
     else:
         raise ValueError(f"unknown space {space!r}")
 
-    # Year-level regressors. Both are one scalar per year, broadcast to every chip.
     soi = d.groupby("year")[SOI_COL].first()
     d["zsoi"] = d.year.map((soi - soi.mean()) / soi.std())
     prev = sum(d.groupby("year")[c].mean() for c in PREV_BANDS[prev_burn])
@@ -85,20 +53,9 @@ def load_panel(path, target="bd", prev_burn="union_sum", space="log1p"):
 
 
 def load_target_panel(path, target="bd", space="logit", emit_through=None):
-    """`load_panel` for the long targets-only panel (build_target_panel.py, 2001+).
+    """load_panel for the long targets-only panel; prev-burn is the chip's lagged MCD64 count.
 
-    Same columns out (`y`, `zsoi`, `zprev`), but the prev-burn term is the chip's own
-    lagged pixel COUNT (`prev_bd`) rather than the fullgrid `im_BurnDate_-1_mean`
-    band, which does not exist here. The two agree to log-corr 0.986 on 2013-2023.
-    The target is a true pixel count/union, so the logit denominator is one chip.
-
-    `emit_through` adds predict-only years past the panel (e.g. 2026). Their drivers
-    are known in January -- SOI Oct-Dec of Y-1 from NOAA and the basin MCD64 count of
-    Y-1 from the panel -- but they have no target, so they live only in
-    `d.attrs["per_year"]` (for `build_offsets`) and never enter a fit or `evaluate`.
-    z-scores are taken over panel + emit years together; OLS with an intercept is
-    invariant to that affine choice, so it changes no fitted offset.
-    """
+    emit_through adds predict-only years to d.attrs["per_year"]; they never enter a fit."""
     if space != "logit":
         raise ValueError("the target panel only supports space='logit'")
     raw = pd.read_parquet(path)
@@ -106,7 +63,7 @@ def load_target_panel(path, target="bd", space="logit", emit_through=None):
     d = raw.dropna(subset=[col, "prev_bd", SOI_COL]).copy()
     p = (d[col] + 0.5) / (CHIP_PIXELS + 1.0)
     d["y"] = np.log(p / (1.0 - p))
-    d["burn_w"] = d[col].astype(float)          # chip weights for weighting="burn"
+    d["burn_w"] = d[col].astype(float)
 
     per_year = d.groupby("year").agg(soi=(SOI_COL, "first"), prev=("prev_bd", "mean"))
     last = int(per_year.index.max())
@@ -119,7 +76,6 @@ def load_target_panel(path, target="bd", space="logit", emit_through=None):
             if len(ond) != 3 or (y - 1) not in basin.index:
                 raise ValueError(f"cannot emit {y}: needs SOI Oct-Dec {y - 1} and MCD64 {y - 1}")
             per_year.loc[y] = {"soi": float(ond.mean()), "prev": float(basin.loc[y - 1])}
-        # the downloaded SOI must agree with the panel's on the overlap year
         ond_last = s[(s.index.year == last - 1) & (s.index.month >= 10)].mean()
         if not np.isclose(ond_last, per_year.loc[last, "soi"], atol=1e-9):
             raise ValueError("NOAA SOI Oct-Dec disagrees with the panel -- calendar misaligned")
@@ -133,14 +89,7 @@ def load_target_panel(path, target="bd", space="logit", emit_through=None):
 
 
 def _chip_weights(tr, weighting):
-    """Per-chip weights from TRAINING rows only (normalised to sum 1), or None.
-
-    "equal": every chip counts the same (the gamma_v1 recipe). "burn": each chip is
-    weighted by its mean burn count over the training years, so the year effect is
-    measured where the fire -- and the loss -- is. Equal weighting gives the ~43% of
-    chips averaging <10 px/yr (0.2% of burn) 43% of the weight, and never-burning
-    chips contribute exact zeros, which shrinks the year effect ~1/3.
-    """
+    """Per-chip weights from training rows ('equal' -> None, 'burn' -> mean burn), summing to 1."""
     if weighting == "equal":
         return None
     if weighting != "burn":
@@ -175,17 +124,9 @@ def _design(frame, terms):
 
 def evaluate(d, terms, protocol="loyo", exclude_prev_from_clim=False, min_train_years=5,
              weighting="equal"):
-    """Out-of-sample fit of the year effect.
+    """Out-of-sample fit of the year effect ('loyo' or 'forward').
 
-    Chip climatology is always computed from TRAINING years only -- an in-sample
-    climatology leaks the held-out year straight into the residual. With
-    `exclude_prev_from_clim` the year t-1 is dropped too, which is what separates a
-    genuine mean-reverting prev-burn signal from a climatology artifact (a high t-1
-    raises the climatology and mechanically depresses the t residual).
-
-    `weighting` (see `_chip_weights`) sets both the WLS row weights and the average
-    that defines a year's effect; weights come from the training rows only.
-    """
+    Chip climatology uses training years only (in-sample climatology leaks the held-out year)."""
     years = sorted(d.year.unique())
     pred_year, act_year, betas = {}, {}, []
     for i, t in enumerate(years):
@@ -226,11 +167,7 @@ def evaluate(d, terms, protocol="loyo", exclude_prev_from_clim=False, min_train_
 
 
 def jackknife_r(result):
-    """(min, max, most-influential-year) of r_year under leave-one-evaluated-year-out.
-
-    With 8 evaluated years a single extreme year can carry the whole correlation --
-    here 2024 does -- so the point estimate alone overstates the evidence.
-    """
+    """(min, max, most-influential year) of r_year under leave-one-year-out."""
     P, A, years = result["pred_year"], result["act_year"], result["years"]
     rs = [(float(np.corrcoef(np.delete(P, i), np.delete(A, i))[0, 1]), int(years[i]))
           for i in range(len(years))]
@@ -243,7 +180,7 @@ BOTH = [("zsoi", None), ("zprev", None)]
 
 
 def fit_final(d, fit_years, terms=BOTH, weighting="equal"):
-    """Single in-sample fit over the training years -> the coefficients we ship."""
+    """In-sample fit over fit_years -> (beta, chip climatology)."""
     tr = d[d.year.isin(fit_years)]
     clim = tr.groupby("md_id")["y"].mean()
     res = (tr.y - tr.md_id.map(clim)).to_numpy()
@@ -253,11 +190,7 @@ def fit_final(d, fit_years, terms=BOTH, weighting="equal"):
 
 
 def build_offsets(d, beta, terms=BOTH, center_years=None):
-    """Per-year gamma, mean-centered over `center_years` (see module docstring).
-
-    Emits every year in `d.attrs["per_year"]` when present (the target panel's
-    predict-only years), otherwise every year in `d`.
-    """
+    """Per-year gamma mean-centered over center_years -> ({year: gamma}, mean)."""
     per_year = d.attrs.get("per_year")
     if per_year is None:
         per_year = d.groupby("year").first().reset_index()
@@ -268,11 +201,7 @@ def build_offsets(d, beta, terms=BOTH, center_years=None):
     return {int(y): float(v - mu) for y, v in out.items()}, mu
 
 
-# --------------------------------------------------------------------------- checks
-# Values measured 2026-09-04 on out/chip_panel/panel.parquet with
-# target=bd, prev_burn=bd, space=log1p. These are the reference configuration for
-# the regression checks; --sensitivity shows the other choices do not change the
-# conclusions. Changing a number here means the fit changed -- find out why.
+# Regression references from out/chip_panel/panel.parquet; changing a number means the fit changed.
 REF = dict(target="bd", prev_burn="bd", space="log1p")
 
 
@@ -305,9 +234,7 @@ def run_checks(panel, verbose=True):
     r.append((fwd["soi"]["turns"] == 5 and fwd["soi"]["n_turns"] == 7,
               f"forward-chained turns SOI-only: {fwd['soi']['turns']}/{fwd['soi']['n_turns']} (expect 5/7)"))
 
-    # LEAK-FREE INVARIANT: the load-bearing check for keeping the prev-burn term at
-    # all. If dropping year t-1 from the chip climatology moves b_prev, the negative
-    # sign was a climatology artifact rather than a real mean-reverting signal.
+    # Leak-free: dropping t-1 from the climatology must not move b_prev.
     incl = evaluate(d, BOTH, exclude_prev_from_clim=False)["beta_mean"][2]
     excl = evaluate(d, BOTH, exclude_prev_from_clim=True)["beta_mean"][2]
     _chk(r, "b_prev with t-1 in climatology", incl, -0.1650, 0.005)
@@ -315,12 +242,10 @@ def run_checks(panel, verbose=True):
     r.append((abs(incl - excl) < 0.005,
               f"leak-free invariant: |b_prev shift| = {abs(incl - excl):.5f} < 0.005"))
 
-    # SIGN GUARD: negative == mean-reverting (safe at turns). Positive == persistence,
-    # which would lag every turn; refuse to ship such coefficients.
+    # Sign guard: b_prev > 0 would be persistence, which lags every turn.
     r.append((excl < 0, f"sign guard: b_prev = {excl:+.4f} < 0 (mean-reverting, not persistence)"))
 
-    # ORTHOGONALITY INVARIANT: this is what "keep gamma global" rests on. A mean-zero
-    # spatial basis times a year scalar cannot move the year effect.
+    # A mean-zero spatial basis times a year scalar can't move the year effect.
     base = evaluate(d, BOTH)
     for basis in ("zlat", "zlon", "zne"):
         alt = evaluate(d, BOTH + [("zsoi", basis)])

@@ -1,44 +1,10 @@
 #!/usr/bin/env python
-"""Post-hoc year-sensitivity ablations for the selected architecture (see cv_make_folds.py).
+"""Post-hoc year-sensitivity ablations for the selected architecture (after final_scored.json).
 
-Runs only after the write-once final test has been scored (out/cv/final_scored.json),
-on rows already scored into out/cv/protocol_scores.csv by
-`cv_collect_results.py --protocol ablate`.
-
-Every quantity is a within-year paired difference, so year difficulty and prevalence
-cancel: Delta_arm(y) = M_arm(y) - M_base(y). Each base is scored on one HIGH and one LOW
-burn year (by panel BurnDate fraction), and the estimand is the contrast
-
-    C_arm = Delta_arm(high year) - Delta_arm(low year)
-
-  A  future probe   bases fwdpair_2018 (2018 low -> 2019 high), fwdpair_2020 (2020 high
-                    -> 2021 low); arms add 2024 (high), 2025 (low) or 2023 (average,
-                    placebo). All three add exactly one future year, so volume cancels.
-                    H1  C(+high) > 0     H2  C(+low) < 0     key  C(+high) - C(+low) > 0
-                    placebo C(+2023) ~ 0. Pooled over the two bases, which cross the
-                    high year's lead (lead 2 in fwdpair_2018, lead 1 in fwdpair_2020).
-  B  analog removal base = final (2024 high, 2025 low); arms drop the two highest, lowest
-                    or middle past years (volume-matched).
-                    prediction  C(-highs) < C(-lows)     key  C(-lows) - C(-highs) > 0
-                    placebo C(-mids) ~ 0.
-
-Metrics are oriented so + = better: -|log(E/A)| (year magnitude), -Brier, PR-AUC,
-within-chip PR-AUC, chip r. For the magnitude metrics each Delta is also split into
-  network  arm predictions re-expressed under the BASE's gamma (exact logit swap)
-  gamma    total - network (what refitting gamma with the extra/removed years did)
-Ranking metrics are (near-)invariant to a year-constant gamma, so they carry no split.
-
-Noise floor: the seed replicate fwdpair_2020_s55 vs fwdpair_2020 (no data change).
-sd(C) is taken as max(|C_seed|, sqrt(2) * rms Delta_seed) -- conservative, and a ONE
-replicate estimate, so it is a floor to beat, not an inference. MDE = 2 sd, scaled by
-1/sqrt(2) for the two-base pooled A contrasts and by sqrt(2) for key (difference) contrasts.
-A hypothesis reads "supported" only if the sign is as predicted, |value| > MDE, and (pooled
-A) both bases agree in sign.
-
-Outputs: out/cv/year_sensitivity.{csv,md}, out/cv/fig_year_sensitivity.{png,pdf}
-
-Usage: .venv/bin/python scripts/cross_validation/cv_year_sensitivity.py [--arch ARCH]
-"""
+Contrast C_arm = Delta_arm(high year) - Delta_arm(low year), Delta = arm - base on the same year.
+A adds one future year (2024 high, 2025 low, 2023 placebo); B drops past highs/lows/mids.
+Noise floor from the seed replicate fwdpair_2020_s55; supported = predicted sign and |C| > MDE.
+Usage: cv_year_sensitivity.py [--arch ARCH]"""
 
 import argparse
 import json
@@ -67,7 +33,7 @@ METRICS = [
     ("chip_r", "Chip r", "chip_r", None, "id"),
 ]
 FIG_METRICS = ("magnitude", "brier", "pr_auc")
-SERIES = {"total": "#2a78d6", "network": "#eb6834"}     # categorical slots 1-2
+SERIES = {"total": "#2a78d6", "network": "#eb6834"}
 INK, INK2, GRID, BAND = "#0b0b0b", "#52514e", "#e4e3de", "#d9d8d2"
 
 
@@ -111,7 +77,7 @@ def ablation_contrasts(scores, arch, burn, stage):
 
 
 def noise_floor(scores, arch, burn):
-    """metric -> sd of a single contrast, from the seed replicate (total component)."""
+    """metric -> sd of a single contrast, from the seed replicate."""
     rep = ablation_contrasts(scores.assign(stage=scores.stage.replace({"seedrep": "_rep"})),
                              arch, burn, "_rep")
     rep = rep[rep.component == "total"]
@@ -124,13 +90,11 @@ def noise_floor(scores, arch, burn):
 
 
 def probe_roles(burn, years=mk.PROBE_YEARS):
-    """{year: 'high'|'low'|'placebo'} by burn fraction."""
     order = sorted(years, key=lambda y: burn[y])
     return {order[-1]: "high", order[0]: "low", **{y: "placebo" for y in order[1:-1]}}
 
 
 def drop_roles(arms, burn):
-    """{arm fold_id: 'highs'|'lows'|'mids'} by the mean burn of the dropped years."""
     mean = {a: np.mean([burn[int(y)] for y in p.lstrip("-").split(",")]) for a, p in arms.items()}
     order = sorted(mean, key=mean.get)
     return {order[-1]: "highs", order[0]: "lows", **{a: "mids" for a in order[1:-1]}}
@@ -149,7 +113,6 @@ def _verdict(value, mde, predicted_sign, agree=True):
 
 
 def summarize(A, B, noise, burn):
-    """Hypothesis table: one row per (analysis, test, metric, component)."""
     rows = []
     if not A.empty:
         roles = probe_roles(burn)

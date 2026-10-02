@@ -1,24 +1,8 @@
-"""Figure set: calibrated risk and per-group Shapley maps, one figure per year.
+"""Per-year figure: calibrated risk (A) and per-group Shapley maps (B..F) with shared colour scales.
 
-  A      Calibrated burn probability (frozen Platt, as Figs 4, 5), per BLOCK-px block.
-  B..F   Shapley value of each driver group (make_shapley_figure.GROUPS order), in
-         percentage points: vermillion raises risk, blue lowers it.
-
-Reads the block-mean cache written by make_shapley_figure.py (built there if
-missing), so a figure renders in seconds. Colour scales are SHARED across the five
-group panels and across all cached years (pooled percentiles, or --risk_vmax /
---shap_vmax), so panels and years compare directly; small groups look faint
-because they are small.
-
-Read B..F with the caveats in make_shapley_figure.py: values are relative to a
-synthetic grid-average baseline pixel (the pooled 2013-2023 normalisation mean), so
-in low-risk intact forest land use and fire history carry large opposite-signed
-values that cancel, and climate mixes long-term spatial climate with the year's
-anomaly. Shapley values are on the deflated scale; A is calibrated.
-
-    .venv/bin/python scripts/figures/make_shapley_maps.py              # 2023-2025
-    .venv/bin/python scripts/figures/make_shapley_maps.py --years 2024
-"""
+Reads make_shapley_figure.py's block-mean cache. Shapley values are relative to a synthetic
+grid-average pixel and on the deflated scale; A is calibrated.
+Usage: make_shapley_maps.py [--years 2024]"""
 
 import argparse
 import os
@@ -59,7 +43,6 @@ def plot_year(data, gdf, year, risk_vmax, shap_vmax, out_png):
     diff_cmap = LinearSegmentedColormap.from_list("diff", DIFF_CMAP)
     diff_norm = TwoSlopeNorm(0, -shap_vmax, shap_vmax)
 
-    # rows: maps, colour bar (under A only), spacer, maps, shared Shapley colour bar
     fig = plt.figure(figsize=(13.2, 9.4), facecolor=SURFACE)
     gs = fig.add_gridspec(5, 3, height_ratios=[1, 0.035, 0.17, 1, 0.035],
                           hspace=0.12, wspace=0.05)
@@ -104,9 +87,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--years", type=int, nargs="+", default=[2023, 2024, 2025])
     ap.add_argument("--risk_vmax", type=float, default=None,
-                    help="%%; default = pooled 98th percentile over the cached years")
+                    help="%%; default pooled 98th percentile")
     ap.add_argument("--shap_vmax", type=float, default=None,
-                    help="pp; default = pooled 98th percentile of |value| over groups and years")
+                    help="pp; default pooled 98th percentile of |value|")
     ap.add_argument("--shp", default=SHP)
     ap.add_argument("--out_dir", default="out/figures")
     a = ap.parse_args()

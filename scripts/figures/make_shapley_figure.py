@@ -1,33 +1,9 @@
-"""Figure: which driver group raises fire risk where it is high (Shapley attribution).
+"""Figure: dominant Shapley driver group in high-risk blocks (top) and mean Shapley by risk class (bottom), per year.
 
-One column per year (default 2023, 2024, 2025), from the yeargain final_all
-Shapley mosaics (docker/download_cv_attr.sh -> out/cv/attr/<arch>/final_all/<y>/
-attr_shap.tif; 5 driver groups, configs/attribution_drivers_v3p_yeargain.json).
-
-  Top row     Dominant driver: per BLOCK-px block, the group with the largest mean
-              Shapley value, drawn only where the block's mean calibrated burn
-              probability is >= --threshold; lower-risk blocks are grey.
-  Bottom row  Mean Shapley value of each group by calibrated-risk class, with the
-              class's share of the basin in parentheses under each tick.
-
-Why only high-risk blocks: Shapley values are relative to a synthetic grid-average
-baseline pixel. For low-risk pixels (mostly intact forest) land use and fire
-history carry large, opposite-signed values (+0.16 / -0.13 on 2024 pixels under
-0.2% risk) that cancel -- an interaction split between the two groups, not "land
-use raises risk in intact forest". The bottom row shows that offset rather than
-mapping it.
-
-Scales: attr_shap.tif bands are DEFLATED probabilities (pos_weight 10). Risk
-classes use the frozen Platt calibrator (same as Figs 4, 5) applied to the
-re-inflated risk band (inflate(band 1) == predict's preds_out.tif to 1e-6); the
-Shapley values themselves stay on the deflated scale (Platt is nonlinear, so
-there is no additive calibrated version), plotted in percentage points.
-Year-level shifts (gamma, year gain) are not players: they sit in the baseline
-band, so this is within-year spatial attribution.
-
-    .venv/bin/python scripts/figures/make_shapley_figure.py
-    .venv/bin/python scripts/figures/make_shapley_figure.py --from_cache   # restyle only
-"""
+Only high-risk blocks are mapped: against the synthetic grid-average baseline, land use and fire
+history carry large cancelling values in low-risk forest. Shapley values stay on the deflated
+scale; risk classes use the frozen Platt calibrator. Year terms sit in the baseline band.
+Usage: make_shapley_figure.py [--from_cache]"""
 
 import argparse
 import os
@@ -42,11 +18,8 @@ from style import (CALIBRATOR, GRID, INK_PRIMARY, INK_SECONDARY, OUTSIDE, SHP, S
 ATTR_ROOT = "out/cv/attr/factored_v3p_union4_monthlyattn_wide_yeargain/final_all"
 CACHE = "out/figures/fig_shapley_drivers_cache.npz"
 POS_WEIGHT = 10.0
-BLOCK = 8          # ~3.7 km, as the forecast map
-# (band description, label, colour): Okabe-Ito; land use vs fire history (the two
-# groups that dominate the map) get the most distinct pair. Palette validated
-# all-pairs (dataviz validate_palette.js); worst CVD pair green/purple 7.6 is
-# carried by the legend labels and terrain is almost never dominant.
+BLOCK = 8
+# (band description, label, colour): Okabe-Ito, palette validated all-pairs for CVD.
 GROUPS = [
     ("shapley_land_use_human", "Land Use + Human", "#0072b2"),
     ("shapley_fire_history", "Fire History", "#d55e00"),
@@ -68,7 +41,7 @@ def year_summary(path, cal, inside):
         p = s.read(1).astype(np.float64)
         risk = np.where(inside, cal(inflate(p, POS_WEIGHT)), np.nan)
         del p
-        cls = np.digitize(risk, CLASS_EDGES) - 1          # NaN -> len(edges)-1, dropped
+        cls = np.digitize(risk, CLASS_EDGES) - 1
         valid = inside & (cls >= 0) & (cls < len(CLASS_LABELS))
         cls_share = np.bincount(cls[valid], minlength=len(CLASS_LABELS)) / valid.sum()
         blocks = [block_nanmean(risk, BLOCK)]
@@ -136,7 +109,7 @@ def plot(data, gdf, years, threshold, out_png):
     from matplotlib.colors import ListedColormap
     from matplotlib.patches import Patch
 
-    tr = data["transform"]          # affine a, b, c, d, e, f
+    tr = data["transform"]
     a, c, e, f = tr[0], tr[2], tr[4], tr[5]
     n = len(years)
     fig = plt.figure(figsize=(4.3 * n, 8.4), facecolor=SURFACE)
@@ -216,11 +189,11 @@ def main():
     ap.add_argument("--attr_root", default=ATTR_ROOT)
     ap.add_argument("--calibrator", default=CALIBRATOR)
     ap.add_argument("--threshold", type=float, default=0.05,
-                    help="calibrated burn probability above which a block gets a dominant driver")
+                    help="calibrated probability above which a block is mapped")
     ap.add_argument("--shp", default=SHP)
     ap.add_argument("--out_png", default="out/figures/fig_shapley_drivers.png")
     ap.add_argument("--from_cache", action="store_true",
-                    help=f"reuse {CACHE} (block means + class means) instead of reading the mosaics")
+                    help=f"reuse {CACHE} instead of reading the mosaics")
     a = ap.parse_args()
 
     if a.from_cache:

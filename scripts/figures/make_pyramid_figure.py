@@ -1,30 +1,8 @@
-"""Publication figure (Fig 3): model accuracy across the spatial pyramid.
+"""Fig 3: PR-AUC across the spatial pyramid (1 px to 128 px blocks) for the v3p CV archs + free baselines.
 
-PR-AUC for the five v3p CV
-architectures plus free baselines, scored on the SAME chip population: one CV
-fold's eval years (default fwdpair_2022 -> 2022 + 2023; model trained 2013-2021),
-pooled within chips from 1 px (~0.46 km) to 128 px (~59 km). Labels are the
-union4 target; Burn frequency (climatology) is the fold's pixel-wise burn frequency over its
-train years (as cv_collect_results.Climatology), Last-year burn the previous
-year's union4 label. Every series is given its own colour AND line
-pattern / marker so they stay distinguishable where the curves overlap;
-Burn frequency and Last-year burn are drawn in shades of grey as free baselines.
-
-Both panels use the mean-pooled score (the block's expected burned fraction) by
-default; `--score_pool max` pools every series (models and baselines) by the
-block MAX instead ("highest-risk pixel in the block"). A block is positive if
-any pixel in it burned. PR-AUC is a threshold-free ranking
-metric; Cohen's kappa is chance-corrected agreement, reported as the best value
-over a swept threshold (see `eval.metrics.best_kappa` for why the threshold
-is swept, not fixed). Read the curves ACROSS models at a fixed scale, not along
-the x axis -- block prevalence rises with block size, so PR-AUC rises with it.
-
-The per-block metrics are cached to a CSV; pass `--from_csv` to restyle without
-the ~minutes-long recompute.
-
-    .venv/bin/python scripts/figures/make_pyramid_figure.py
-    .venv/bin/python scripts/figures/make_pyramid_figure.py --from_csv out/figures/fig_pyramid_fwdpair_2022.csv
-"""
+All series are scored on one fold's eval-year chips; a block is positive if any pixel burned.
+Compare models at a fixed scale: block prevalence (and PR-AUC) rises with block size.
+Usage: make_pyramid_figure.py [--score_pool mean|max] [--from_csv CSV]"""
 
 import argparse
 import csv
@@ -37,14 +15,8 @@ from aic_risk_modeling.eval.metrics import best_f1, best_kappa, binary_metrics
 from style import INK_SECONDARY, SURFACE, save_figure, style_axes
 
 DEFAULT_BLOCKS = [1, 2, 4, 8, 16, 32, 64, 128]
-KM_PER_PIXEL = 0.463312716528  # v3 MODIS sinusoidal grid
+KM_PER_PIXEL = 0.463312716528
 
-# --------------------------------------------------------------------------- #
-# Series: (name, prediction dir, colour, linestyle, marker). Models first
-# (Okabe-Ito colours + distinct patterns), then the two grey baselines.
-# --------------------------------------------------------------------------- #
-# The "path" is the CV arch; chips are read from
-# <preds_root>/<arch>/<fold>/<year>/chips/ for each eval year.
 MODELS = [
     ("Factored",  "factored_v3p_union4_monthlyattn_wide_yeargain", "#0072b2", "-",  "o"),
     ("U-Net",     "unet_v3p_union4",     "#e69f00", ":",               "D"),
@@ -53,31 +25,20 @@ MODELS = [
     ("LSTM",      "lstm_v3p_union4",     "#009e73", "-.",              "^"),
 ]
 BASELINES = [
-    # (name, kind, colour, linestyle, marker) -- shades of grey.
     ("Burn frequency", "climatology", "#4d4d4d", (0, (4, 2)), "x"),
     ("Last-year burn", "last_year",   "#9a988f", (0, (1, 1.5)), "P"),
 ]
-# No-skill floor derived from the labels: PR-AUC = block prevalence, ROC-AUC = 0.5.
-RANDOM = ("Random", "#8a8880", "--", "")  # (name, colour, linestyle, marker)
+# No-skill floor: PR-AUC = block prevalence, ROC-AUC = 0.5.
+RANDOM = ("Random", "#8a8880", "--", "")
 
 DEFAULT_LABEL_DIR = "out/label_mosaics_v3p_union4"
 DEFAULT_PREDS_ROOT = "out/cv/preds"
 
-# Metric -> (axis label, y-limits), one panel each. PR-AUC: a threshold-free
-# ranking metric on the mean-pooled score. Cohen's kappa (best over swept
-# thresholds, still computed into the CSV) was a second panel until 9/30 --
-# add ("kappa", "Cohen's κ", (0.0, 0.9)) back to plot it.
 PANELS = [("pr_auc", "PR-AUC", (0.0, 1.0))]
 
 
 def _block_max_pool(arr, block):
-    """Non-overlapping ``block`` x ``block`` max-pool of a 2-D array.
-
-    When H/W are not multiples of ``block`` the array is zero-padded on the
-    bottom/right first. Zero padding is safe for both the fire-probability and
-    the 0/1 label fields because 0 is the minimum possible value, so a partial
-    edge block's max is effectively taken over its real pixels only.
-    """
+    """Non-overlapping block max-pool, zero-padding partial edge blocks (0 is the minimum)."""
     block = int(block)
     if block <= 1:
         return np.asarray(arr)
@@ -92,13 +53,7 @@ def _block_max_pool(arr, block):
 
 
 def _block_mean_pool(arr, block):
-    """Non-overlapping ``block`` x ``block`` MEAN-pool of a 2-D array.
-
-    Unlike `_block_max_pool`, partial edge blocks cannot be zero-padded without
-    biasing the mean downward, so this requires H and W to be exact multiples of
-    ``block``. Chips are 128x128 and the blocks are powers of two, so that holds
-    here; the check exists to fail loudly if a differently-shaped chip appears.
-    """
+    """Non-overlapping block mean-pool; H and W must be multiples of block."""
     block = int(block)
     if block <= 1:
         return np.asarray(arr, dtype=np.float32)
@@ -115,12 +70,10 @@ def _pool(arr, block, how):
 
 
 def _inventory(spec):
-    """[(out_path, mask_path, year)] for an explicit [(chips_dir, year), ...] spec."""
     return [(o, m, str(year)) for chips_dir, year in spec for o, m in chip_pairs(chips_dir)]
 
 
 def _levels_from_chips(score_iter, blocks, score_pool):
-    """Per-block metrics from an iterator of (score_2d, label_2d) chip pairs."""
     acc = {b: {"pa_s": [], "f1_s": [], "y": []} for b in blocks}
     for score, label in score_iter:
         lab_f = (np.asarray(label) > 0).astype(np.float32)
@@ -141,9 +94,6 @@ def _levels_from_chips(score_iter, blocks, score_pool):
         except Exception:
             roc = float("nan")
         f1_val, f1_p, f1_r, f1_thr = best_f1(y, f1_s)
-        # Best-kappa on the SAME mean-pooled score PR-AUC/ROC-AUC use, so the
-        # figure keeps one score convention across panels; threshold swept for
-        # the same calibration reason as best-F1.
         kappa_val, kappa_thr = best_kappa(y, pa_s)
         levels.append({
             "block": b, "n_blocks": int(y.size),
@@ -155,7 +105,7 @@ def _levels_from_chips(score_iter, blocks, score_pool):
             "f1": f1_val, "precision": f1_p, "recall": f1_r,
             "f1_threshold": f1_thr,
         })
-        acc[b] = None  # release
+        acc[b] = None
     return levels
 
 
@@ -172,12 +122,7 @@ def model_levels(spec, blocks, score_pool):
 
 
 def baseline_levels(spec, kind, label_dir, clim_path, blocks, score_pool):
-    """Levels for a free baseline scored on the same chips as the models.
-
-    `kind` is "last_year" (previous year's burn mask) or "climatology" (the
-    prebuilt mean-burn-frequency raster). Both come from full-basin mosaics read
-    through a window matching each chip's bounds.
-    """
+    """Per-block metrics for 'last_year' or 'climatology', windowed onto the model chips."""
     import rasterio as rio
 
     handles = {}
@@ -233,9 +178,7 @@ def _style_for(name):
 
 
 def _append_random(series):
-    """Append the no-skill series from any real series' per-block prevalence."""
     base = series[0]["levels"]
-    # No-skill floor: PR-AUC = block prevalence, ROC-AUC = 0.5, kappa = 0.
     series.append({"name": RANDOM[0],
                    "levels": [{"pr_auc": lvl["prevalence"], "roc_auc": 0.5,
                                "kappa": 0.0}
@@ -282,7 +225,7 @@ def plot(series, blocks, out_png):
 
 
 def build_climatology(label_dir, years, out_path):
-    """Pixel-wise burn frequency over `years` (mean of label > 0), cached as a tif."""
+    """Pixel-wise burn frequency over `years`, cached as a tif."""
     import rasterio as rio
     if os.path.exists(out_path):
         return out_path
@@ -331,11 +274,11 @@ def main():
                     help="the fold's train years (climatology)")
     ap.add_argument("--blocks", default=None)
     ap.add_argument("--score_pool", choices=["mean", "max"], default="mean",
-                    help="block pooling of every series' score (PR-AUC/ROC-AUC/kappa)")
+                    help="block pooling of every series' score")
     ap.add_argument("--from_csv", default=None,
-                    help="restyle from an existing CSV instead of recomputing")
+                    help="restyle from a cached CSV")
     ap.add_argument("--out_png", default=None,
-                    help="default out/figures/fig_pyramid_<fold>.png (csv alongside)")
+                    help="default out/figures/fig_pyramid_<fold>.png")
     args = ap.parse_args()
     suffix = "" if args.score_pool == "mean" else f"_{args.score_pool}pool"
     out_png = args.out_png or f"out/figures/fig_pyramid_{args.fold}{suffix}.png"
@@ -369,7 +312,7 @@ def main():
         series.append({"name": name, "levels": levels})
         rows += [{"model": name, **lvl} for lvl in levels]
 
-    ref = inventory(MODELS[0][1])  # score baselines on the same chips
+    ref = inventory(MODELS[0][1])
     for name, kind, *_ in BASELINES:
         print(f"[pyramid_fig] baseline {name}", flush=True)
         levels = baseline_levels(ref, kind, args.label_dir, clim, blocks, args.score_pool)

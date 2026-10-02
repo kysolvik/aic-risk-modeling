@@ -1,23 +1,8 @@
-"""Publication figure (Fig 6): PR-AUC by forested vs non-forested land cover.
+"""Fig 6: PR-AUC in forested vs non-forested pixels, with each stratum's prevalence as the no-skill floor.
 
-Grouped bars, one pair per predictor (forest / non-forest PR-AUC), on the
-identical pixel population. v3p version (9/30): the five v3p CV architectures on
-their fwdpair_2022 eval years (2022 + 2023, same fold and names as Fig 3) plus the
-two free baselines (burn frequency over the fold's train years, last-year burn). Each stratum's no-skill floor -- its fire
-prevalence -- is drawn as a dotted line; the gap above it is the skill, because
-raw PR-AUC scales with prevalence and prevalence differs between strata.
-
-Every predictor is scored on one canonical chip set with shared labels + forest
-fraction. Metrics are cached to a CSV; pass `--from_csv` to restyle without
-recomputing.
-
-    .venv/bin/python scripts/figures/make_forest_figure.py
-    .venv/bin/python scripts/figures/make_forest_figure.py \
-        --from_csv out/figures/fig_forest_split_fwdpair_2022.csv
-
-Forest chips must exist first, on the v3 grid (export_forest_chips.py with the
-v3 profile template) under <forest_dir>/<year>/.
-"""
+Every predictor is scored on one canonical chip set (fwdpair_2022 eval years); needs forest chips
+from export_forest_chips.py under <forest_dir>/<year>/.
+Usage: make_forest_figure.py [--from_csv CSV]"""
 
 import argparse
 import os
@@ -28,11 +13,9 @@ from aic_risk_modeling.eval.chips import chip_pairs, read_window
 from aic_risk_modeling.eval.metrics import binary_metrics
 from style import INK_SECONDARY, SURFACE, save_figure, style_axes
 
-FOREST_COLOR = "#1baf7a"      # forest stratum (green)
-NONFOREST_COLOR = "#eb6834"   # non-forest stratum (orange)
+FOREST_COLOR = "#1baf7a"
+NONFOREST_COLOR = "#eb6834"
 
-# Predictors in display order: the five CV archs (as in Fig 3), then the two grey
-# baselines. Chips are read from <preds_root>/<arch>/<fold>/<year>/chips/.
 MODELS = [
     ("Factored", "factored_v3p_union4_monthlyattn_wide_yeargain"),
     ("U-Net",    "unet_v3p_union4"),
@@ -54,22 +37,15 @@ def _bounds_match(a, b, tol=1e-6):
 
 
 def _chip_key(path):
-    """The '<x>-<y>.tif' id shared by the out_/mask_/forest_ chips of one tile."""
     return os.path.basename(path).split("_", 1)[1]
 
 
 def _inventory(spec):
-    """[(out_path, year)] for an explicit [(chips_dir, year), ...] spec."""
     return [(o, str(year)) for chips_dir, year in spec for o, _ in chip_pairs(chips_dir)]
 
 
 def canonical_chips(spec, forest_dir):
-    """Ordered chip list from the reference model: key, year, mask + forest path.
-
-    Every model is scored on this one identical, sorted pixel population; the
-    labels and forest fraction are read once from here rather than re-read per
-    model (they are byte-identical across models).
-    """
+    """Sorted chip list (key, year, mask, forest path) from the reference model; all predictors use it."""
     chips = []
     for out_path, year in _inventory(spec):
         fpath = os.path.join(forest_dir, year,
@@ -87,11 +63,7 @@ def canonical_chips(spec, forest_dir):
 
 
 def load_shared(chips):
-    """(labels, forest_frac) flat over the canonical chips; records per-chip bounds.
-
-    Labels and forest are identical across models, so they are read exactly once.
-    The bounds captured here drive the baseline windowed reads.
-    """
+    """(labels, forest_frac) flat over the canonical chips, read once; records chip bounds."""
     import rasterio as rio
     labels, forest = [], []
     for c in chips:
@@ -113,7 +85,6 @@ def load_shared(chips):
 
 
 def load_model_scores(spec, chips):
-    """Model scores flat, in the canonical chip order (joined by the <x>-<y> key)."""
     import rasterio as rio
     by_key = {(year, _chip_key(out_path)): out_path for out_path, year in _inventory(spec)}
     missing = [c["key"] for c in chips if c["key"] not in by_key]
@@ -129,12 +100,7 @@ def load_model_scores(spec, chips):
 
 
 def load_baseline_scores(chips, kind, label_dir, clim_path):
-    """Baseline score field flat, in canonical chip order (windowed mosaic reads).
-
-    `kind` is "last_year" (previous year's burn from label_<year-1>.tif) or
-    "climatology" (the prebuilt mean-burn-frequency raster), windowed to each
-    chip's bounds.
-    """
+    """'last_year' or 'climatology' baseline scores flat in canonical chip order."""
     import rasterio as rio
     handles = {}
 
@@ -269,8 +235,8 @@ def main():
     ap.add_argument("--fold", default="fwdpair_2022")
     ap.add_argument("--years", default="2022,2023", help="eval years of --fold")
     ap.add_argument("--threshold", type=float, default=0.5,
-                    help="forest-fraction cutoff defining the two strata")
-    ap.add_argument("--from_csv", default=None, help="restyle from an existing CSV")
+                    help="forest-fraction cutoff")
+    ap.add_argument("--from_csv", default=None, help="restyle from a cached CSV")
     ap.add_argument("--out_png", default="out/figures/fig_forest_split_fwdpair_2022.png")
     ap.add_argument("--out_csv", default="out/figures/fig_forest_split_fwdpair_2022.csv")
     args = ap.parse_args()
@@ -282,7 +248,7 @@ def main():
 
     years = [int(y) for y in args.years.split(",")]
 
-    def spec(arch):  # explicit [(chips_dir, year)]: the fold dir also holds test years
+    def spec(arch):
         return [(os.path.join(args.preds_root, arch, args.fold, str(y), "chips"), y)
                 for y in years]
 

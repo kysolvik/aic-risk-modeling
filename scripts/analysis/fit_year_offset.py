@@ -1,10 +1,6 @@
-"""Fit the frozen global year offset gamma(t) and write it as JSON (see eval/year_offset.py).
+"""Fit the frozen global year offset gamma(t) (eval/year_offset.py) and write it as JSON.
 
-Usage:
-    .venv/bin/python scripts/analysis/fit_year_offset.py --check
-    .venv/bin/python scripts/analysis/fit_year_offset.py \
-        --fit_years 2013-2022 --out out/gamma_v1.json
-"""
+Usage: fit_year_offset.py --check  |  fit_year_offset.py --fit_years 2013-2022 --out gamma.json"""
 
 import argparse
 import json
@@ -44,15 +40,13 @@ def main():
     p.add_argument("--fit_years", default="2013-2022", help="inclusive range, e.g. 2013-2022")
     p.add_argument("--out", default=None, help="write gamma JSON here")
     p.add_argument("--panel_kind", default="chip", choices=["chip", "target"],
-                   help="chip = fullgrid chip panel (default, gamma_v1 recipe); target = "
-                        "long targets-only panel from build_target_panel.py (2001+)")
+                   help="chip = fullgrid chip panel; target = targets-only panel")
     p.add_argument("--center_years", default=None,
-                   help="inclusive range to mean-center offsets over (default = fit_years); "
-                        "for a long fit, pass the network's training years")
+                   help="range to mean-center over (default fit_years)")
     p.add_argument("--weighting", default="equal", choices=["equal", "burn"],
-                   help="chip weighting of the year effect (burn needs --panel_kind target)")
+                   help="chip weighting of the year effect")
     p.add_argument("--emit_through", type=int, default=None,
-                   help="target panel only: also emit predict-only years up to this one")
+                   help="target panel: emit predict-only years up to this")
     a = p.parse_args()
 
     if a.check:
@@ -66,7 +60,7 @@ def main():
     if a.panel_kind == "target":
         panel = a.panel if a.panel != PANEL else TARGET_PANEL
         d = load_target_panel(panel, target=a.target, space=a.space, emit_through=a.emit_through)
-        val = d[d.year <= hi]                 # validate on the fit window only
+        val = d[d.year <= hi]
     else:
         if a.emit_through is not None:
             sys.exit("--emit_through needs --panel_kind target")
@@ -101,10 +95,7 @@ def main():
                       "removed_level": level},
         "per_year_offset": offsets,
         "validation": {
-            # Forward-chained is the operational protocol, but it scores only the
-            # last 8 years and those have a wider spread of true year effects
-            # (sd 0.338 vs 0.215 before 2018), which flatters the correlation.
-            # Quote r_year WITH the jackknife range and the all-years LOYO figure.
+            # Forward-chained scores only the last 8 (wider-spread) years; quote it with the jackknife range.
             "r_year_forward": fwd["r_year"],
             "r_year_forward_jackknife": {"min": jack[0], "max": jack[1],
                                          "most_influential_year": jack[2]},
@@ -116,7 +107,7 @@ def main():
             "actual_amplitude": fwd["actual_amplitude"],
         },
     }
-    if a.panel_kind == "target":             # chip-mode JSON stays byte-identical
+    if a.panel_kind == "target":
         doc["version"] = "gamma_long_v1" if a.weighting == "equal" else "gamma_long_burn_v1"
         doc["fit"].update(panel_kind="target", weighting=a.weighting, panel=os.path.relpath(panel), prev_burn="bd_count",
                           protocol="in-sample fit, forward-chained validation on fit_years only")

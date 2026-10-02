@@ -1,41 +1,11 @@
 #!/usr/bin/env python
-"""Generate the temporal-CV protocol jobs for one architecture.
+"""Generate one architecture's temporal-CV protocol: configs, gammas, manifest and launch scripts.
 
-PROTOCOL (decided 2026-09-15):
-
-  folds    fwdpair_<t>: train 2013..t-1, early-stop AND validate on {t, t+1}, t=2018..2022.
-           Same model on both years -> the t->t+1 amplitude is a leak-free measurement.
-  final    final_all: train 2013-2023, no val, fixed 25 epochs, keep the last epoch
-           (checkpoint_metric 'last'); test 2024+2025 -- WRITE-ONCE. Deviation
-           2026-09-29 from the pre-registered train 2013-22 / early-stop 2023.
-  seedrep  fwdpair_2020 at seed 55: noise floor for the ablations.
-  ablateA  fwdpair_2018 / fwdpair_2020 + {2023 placebo, 2024 high, 2025 low}.
-  ablateB  final minus {2017,2020} highs / {2013,2018} lows / {2016,2022} mids (placebo).
-  posthoc  lead1_2023: train 2013-2022, early-stop AND validate on 2023 only (the fold
-           recipe, single year so 2024 never enters). Lead-1 2023 point for the Fig 5
-           expected-vs-actual series; added 2026-10-01 after the final was scored, so
-           it never feeds selection or the 2024/25 test.
-
-2024/2025 never enter a fold. `final`/`seedrep` are gated on out/cv/selection_frozen.json,
-`ablateA`/`ablateB`/`posthoc` on out/cv/final_scored.json (and on being the selected
-architecture).
-`--allow_early_final` (ALLOW_EARLY_FINAL=1 for run_protocol_train.sh) opens the final
-TRAINING gate before selection (deviation 2026-09-29); predicting/scoring stay gated.
-Stats and gamma depend only on the training years, so they are shared across
-architectures. Ablation arms reuse their base's stats (normalization held fixed) and
-refit gamma.
-
-Writes, per --arch: configs/cv/<arch>/<fold>.json, out/cv/gamma/gamma_<name>.json,
-out/cv/protocol.csv (all architectures, merged), and
-  out/cv/run_protocol_stats.sh   {folds|final|posthoc|all}
-  out/cv/run_protocol_train.sh   <arch> {folds|final|seedrep|ablateA|ablateB|posthoc}
-  out/cv/run_protocol_predict.sh <arch> {folds|final|seedrep|ablateA|ablateB|posthoc}
-NOTHING here launches Vertex; run_protocol_train.sh is handed to the user to launch.
-
-Usage:
-    .venv/bin/python scripts/cross_validation/cv_make_folds.py --arch unet_v3p_union4 --chips_per_year 2556
-    .venv/bin/python scripts/cross_validation/cv_make_folds.py --check_gate final --arch unet_v3p_union4
-"""
+Stages: folds fwdpair_<t> (train 2013..t-1, early-stop + eval {t, t+1}, t=2018..2022);
+final_all (train 2013-2023, no val, keep the last epoch; test 2024+2025 WRITE-ONCE);
+seedrep, ablateA/B and posthoc lead1_2023 (gated on out/cv/{selection_frozen,final_scored}.json).
+2024/2025 never enter a fold. Nothing here launches Vertex.
+Usage: cv_make_folds.py --arch ARCH [--chips_per_year 2556] | --check_gate STAGE --arch ARCH"""
 
 import argparse
 import copy
@@ -50,46 +20,33 @@ from aic_risk_modeling.eval import year_offset as fyo
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-# --- paths -----------------------------------------------------------------
 CONFIG_DIR = os.path.join(REPO, "configs", "cv")
 OUT_DIR = os.path.join(REPO, "out", "cv")
 GAMMA_DIR = os.path.join(OUT_DIR, "gamma")
 
 GS = "gs://aic-amazon"
-DATA_VERSION = "v3_patched"   # data bucket suffix (fullgrid_<DATA_VERSION>); set from --data_version in main()
+DATA_VERSION = "v3_patched"
 def data_dir_gs(y):   return f"{GS}/data/fullgrid_{DATA_VERSION}/allpreds_{y}/"
 def gamma_stem(c):
-    if GAMMA_LONG["tag"]:                            # long/weighted recipe: own namespace
+    if GAMMA_LONG["tag"]:
         return f"{DATA_VERSION}_{GAMMA_LONG['tag']}_{c}"
     return f"{DATA_VERSION}_{c}"
 def gamma_gs(c):      return f"{GS}/configs/cv/gamma_{gamma_stem(c)}.json"
 def stats_gs(c):      return f"{GS}/data/fullgrid_{DATA_VERSION}/stats_cv/{c}.json"
 
-ALL_YEARS = list(range(2013, 2026))          # 2013..2025 inclusive
+ALL_YEARS = list(range(2013, 2026))
 
-# Gamma recipe, set from the CLI in main(). The defaults are the v3p yeargain recipe:
-# LONG gamma fit on the targets-only panel (build_target_panel.py, 2002+), fit years =
-# fit_start .. 2012 (before any fold's data) PLUS the fold's own train years (so ablation
-# drops stay dropped), centred on the fold's train years, chip-weighted per `weighting`,
-# emitted through `emit_through`. `--gamma_panel_kind chip` fits on a chip panel
-# instead (the v3 mod14 archs). `tag` namespaces the file names.
+# Gamma recipe (set in main); defaults = the v3p yeargain long fit on the targets-only panel.
 GAMMA_KW = dict(target="bd", prev_burn="bd", space="logit")
 GAMMA_LONG = dict(kind="target", weighting="burn", fit_start=2002, emit_through=2026,
                   tag="bd_2002_burn")
 
 
-# --- gamma per fold --------------------------------------------------------
 def make_gamma(panel_df, canon, train_years):
-    """Fit gamma on `train_years`, emit offsets for all panel years, write JSON.
-
-    Reuses the vetted eval.year_offset functions. Honors its sign guard: if the
-    prev-burn coefficient comes out >= 0 (persistence, which lags every turn), fall
-    back to a SOI-only gamma and flag it.
-    """
+    """Fit gamma on train_years and write its JSON; falls back to SOI-only if b_prev >= 0."""
     long_mode = GAMMA_LONG["kind"] == "target"
     if long_mode:
-        # pre-network years only (< 2013, before any fold's data): an ablation that
-        # drops 2013 must not get it back through the long extension
+        # Pre-2013 years only, so an ablation that drops 2013 can't get it back.
         fit_years = list(range(GAMMA_LONG["fit_start"], min(ALL_YEARS))) + list(train_years)
         w = GAMMA_LONG["weighting"]
     else:
@@ -98,7 +55,7 @@ def make_gamma(panel_df, canon, train_years):
     if beta[2] < 0:
         terms, terms_name = fyo.BOTH, "soi+prev"
         b_soi, b_prev, guard_ok = float(beta[1]), float(beta[2]), True
-    else:                                             # sign guard fallback
+    else:
         beta, _ = fyo.fit_final(panel_df, fit_years, terms=fyo.SOI, weighting=w)
         terms, terms_name = fyo.SOI, "soi_only(fallback:b_prev>=0)"
         b_soi, b_prev, guard_ok = float(beta[1]), None, False
@@ -112,7 +69,7 @@ def make_gamma(panel_df, canon, train_years):
         "centering": {"removed_level": level, "center_years": list(train_years)},
         "per_year_offset": {str(y): v for y, v in offsets.items()},
     }
-    if long_mode:                                     # chip-panel docs stay byte-identical
+    if long_mode:
         doc["fit"].update(panel_kind="target", weighting=w, prev_burn="bd_count",
                           fit_start=GAMMA_LONG["fit_start"])
         doc["emit_years"] = sorted(int(y) for y in offsets)
@@ -123,45 +80,33 @@ def make_gamma(panel_df, canon, train_years):
             "sign_guard_ok": guard_ok, "terms": terms_name}
 
 
-# --- config per fold -------------------------------------------------------
 
 
-# --- helper-script generation ---------------------------------------------
 def _write_exec(path, text):
     with open(path, "w") as f:
         f.write(text)
     os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IRWXU)
 
 
-# ===========================================================================
-# PROTOCOL: forward t/t+1 folds, write-once 2024/25 final, post-hoc ablations
-# ===========================================================================
 PROTOCOL_CSV = os.path.join(OUT_DIR, "protocol.csv")
 SELECTION_FROZEN = os.path.join(OUT_DIR, "selection_frozen.json")
 FINAL_SCORED = os.path.join(OUT_DIR, "final_scored.json")
 
 FINAL_TEST_YEARS = (2024, 2025)      # write-once: never in any fold's train/val/eval
 FOLD_ORIGINS = tuple(range(2018, 2023))
-# Deviation 2026-09-29: the final trains on every pre-test year with no val set, for a
-# fixed 25 epochs, keeping the last (fold curves: best - last3 ~0.001-0.006 PR-AUC).
-# Renamed from `final` so its stats/gamma/model paths never collide with the
-# pre-registered 2013-22 recipe.
+# final_all: every pre-test year, no val set, keep the last epoch.
 FINAL_ID = "final_all"
 FINAL_TRAIN = tuple(range(2013, 2024))
 FINAL_VAL = ()
-PROBE_BASES = (2018, 2020)           # ablation A bases: a low->high and a high->low pair
-PROBE_YEARS = (2023, 2024, 2025)     # 2023 ~ climatology-average year = placebo
-DROP_SETS = ((2017, 2020), (2013, 2018), (2016, 2022))   # ablation B: highs, lows, mids
+PROBE_BASES = (2018, 2020)
+PROBE_YEARS = (2023, 2024, 2025)
+DROP_SETS = ((2017, 2020), (2013, 2018), (2016, 2022))
 SEEDREP_ORIGIN, SEEDREP_SEED = 2020, 55
-# Post-hoc (2026-10-01): one-year-ahead 2023 for Fig 5, same recipe as a fold.
 POSTHOC_ORIGIN = 2023
 DEFAULT_SEED = 54
-# Matched budget across architectures. Patience 8 (not the trainer default 4): the
-# two-year val sets include low-prevalence years, and patience 4 has already killed
-# a low-prevalence run mid-climb (v41).
+# Patience 8: two-year val sets include low-prevalence years that patience 4 cut off mid-climb.
 PROTOCOL_BUDGET = {"epochs": 25, "steps_per_epoch": 9065, "early_stopping_patience": 8,
                    "checkpoint_metric": "pr_auc"}
-# A job with no val years trains the full budget and keeps the last epoch.
 NO_VAL_BUDGET = {"checkpoint_metric": "last"}
 NO_VAL_DROP = ("early_stopping_patience", "val_data_dirs", "val_tfrecord_pattern", "val_cache_dir")
 STAGES = ("folds", "seedrep", "final", "ablateA", "ablateB", "posthoc")
@@ -177,7 +122,7 @@ def parse_years(s):
 
 
 def protocol_specs():
-    """Every protocol training job, bases always listed before the arms that use them."""
+    """Every protocol training job, bases listed before their arms."""
     specs = []
 
     def add(fold, stage, train, val, ev, seed=DEFAULT_SEED, base="", probe=""):
@@ -207,7 +152,7 @@ def protocol_specs():
 
 
 def protocol_violations(s):
-    """Leakage-guard violations for one spec (empty list = clean)."""
+    """Leakage-guard violations for one spec (empty = clean)."""
     tr, va, ev = set(s["train"]), set(s["val"]), set(s["eval"])
     fin = set(FINAL_TEST_YEARS)
     errs = []
@@ -255,10 +200,7 @@ def arm_diff_errors(s, base):
 
 
 def protocol_resources(specs):
-    """fold_id -> {stats_name, gamma_name}, named per fold and shared across architectures.
-
-    Ablation arms keep their base fold's stats (normalization held fixed) but refit gamma.
-    """
+    """fold_id -> {stats_name, gamma_name}; arms keep their base's stats but refit gamma."""
     res = {}
     for s in specs:
         fid = s["fold_id"]
@@ -282,8 +224,7 @@ def config_guard_errors(cfg):
         for n in spec.get("feature_names", []):
             if n.startswith("im_loss"):
                 errs.append(f"{g}:{n} is the static Hansen snapshot (future-loss leak)")
-    # Target-year bands (step 0) are labels, never inputs -- e.g. im_BurnDate_viirs_0,
-    # im_viirs_noaa20_0, im_aqua_0 all ship in the patched export.
+    # Target-year bands (step 0) are labels, never inputs.
     targets = {f"{n}_0" for n in (cfg.get("output_features", {}) or {}).get("feature_names", [])}
     for g, spec in feats.items():
         steps = spec.get("timesteps") or []
@@ -303,7 +244,7 @@ def config_guard_errors(cfg):
 
 
 def job_budget(budget, has_val):
-    """The budget keys one job's config must carry (no-val jobs keep the last epoch)."""
+    """Budget keys for one job's config (no-val jobs keep the last epoch)."""
     out = dict(budget or PROTOCOL_BUDGET)
     if not has_val:
         out.update(NO_VAL_BUDGET)
@@ -322,7 +263,7 @@ def make_protocol_config(base, spec, paths, stats_path, gamma_path, budget=None)
     if yo is not None:
         yo.pop("offsets", None)
         yo["coeffs_path"] = gamma_path
-    cfg.pop("early_stopping_metric", None)          # stop on the checkpoint metric
+    cfg.pop("early_stopping_metric", None)
     cfg.update(job_budget(budget, bool(spec["val"])))
     if not spec["val"]:
         for k in NO_VAL_DROP:
@@ -336,7 +277,6 @@ def make_protocol_config(base, spec, paths, stats_path, gamma_path, budget=None)
 
 
 def budget_overrides(base, budget=None):
-    """Keys the matched budget changes in this architecture's base config."""
     budget = budget or PROTOCOL_BUDGET
     out = {k: (base.get(k), v) for k, v in budget.items() if base.get(k) != v}
     if "early_stopping_metric" in base and base["early_stopping_metric"] != budget["checkpoint_metric"]:
@@ -346,12 +286,7 @@ def budget_overrides(base, budget=None):
 
 def gate_errors(stage, arch, frozen=SELECTION_FROZEN, scored=FINAL_SCORED,
                 allow_early_final=False):
-    """Why `stage` may not run yet for `arch` (empty list = allowed).
-
-    `allow_early_final` opens only the final TRAINING gate before selection
-    (deviation 2026-09-29). Only run_protocol_train.sh passes it; predicting and
-    scoring the final stay gated on selection_frozen.json.
-    """
+    """Why `stage` may not run yet for `arch` (empty = allowed); allow_early_final opens only final training."""
     gate = {"final": frozen, "seedrep": frozen, "ablateA": scored, "ablateB": scored,
             "posthoc": scored}.get(stage)
     if stage not in STAGES:
@@ -372,26 +307,14 @@ def gate_errors(stage, arch, frozen=SELECTION_FROZEN, scored=FINAL_SCORED,
 
 
 def fold_steps_per_epoch(train_years, chips_per_year, batch_size):
-    """Optimizer steps for one full pass over a fold, = ceil(total_chips / batch).
-
-    steps_per_epoch here only shapes the cosine LR schedule (warmup 1 epoch, decay
-    the rest); it does NOT cap the data -- each epoch is a full pass. So to keep the
-    schedule aligned with each fold's actual run length it must scale with the
-    fold's training size, not be a flat constant.
-    """
+    """ceil(total train chips / batch): shapes the LR schedule only, each epoch is a full pass."""
     return math.ceil(len(train_years) * chips_per_year / batch_size)
 
 
 def generate_protocol(arch, base, panel_df, budget=None, chips_per_year=None):
     """Configs + gammas for one architecture; returns its manifest rows.
 
-    `budget` overrides PROTOCOL_BUDGET. When `chips_per_year` is given, each fold's
-    steps_per_epoch is computed per fold (ceil(train_years * chips_per_year /
-    batch_size)) so the LR schedule matches that fold's real run length, overriding
-    any flat steps_per_epoch in the budget. A base config without a `year_offset`
-    decoder term (any non-gamma architecture) skips gamma fitting entirely, so no
-    panel is required for it.
-    """
+    chips_per_year sets steps_per_epoch per fold; non-gamma archs skip gamma fitting."""
     batch_size = int(base.get("batch_size", 1))
     errs = config_guard_errors(base)
     if errs:
@@ -408,7 +331,7 @@ def generate_protocol(arch, base, panel_df, budget=None, chips_per_year=None):
     if uses_gamma:
         if panel_df is None:
             raise SystemExit(f"[protocol] {arch} uses a year_offset but no panel was loaded")
-        for s in specs:                               # arch-independent; deterministic rewrite
+        for s in specs:
             g = res[s["fold_id"]]["gamma_name"]
             if g not in gamma_info:
                 gamma_info[g] = make_gamma(panel_df, g, s["train"])
@@ -466,7 +389,6 @@ def _gate_line(stage_var="$STAGE", arch_var="$ARCH", early_final=False):
 def gen_protocol_scripts(rows):
     head = ["#!/usr/bin/env bash", "set -euo pipefail", f'cd "{REPO}"']
 
-    # stats: architecture-independent, one per training set, skip what already exists
     lines = head[:1] + ["# Per-training-set normalization stats -> GCS (local CPU, reads GCS; no Vertex).",
                         "# Ablation arms reuse their base's stats, so only folds/final/posthoc need any.",
                         "# Usage: run_protocol_stats.sh {folds|final|posthoc|all}"] + head[1:] + \
@@ -486,7 +408,7 @@ def gen_protocol_scripts(rows):
         lines.append("fi")
     _write_exec(os.path.join(OUT_DIR, "run_protocol_stats.sh"), "\n".join(lines) + "\n")
 
-    # train: LAUNCHES VERTEX JOBS -- handed to the user
+    # train: launches Vertex jobs; handed to the user
     lines = head[:1] + ["# Launch protocol training on Vertex. LAUNCHES VERTEX JOBS.",
                         "# Usage: run_protocol_train.sh <arch> {folds|final|seedrep|ablateA|ablateB|posthoc}",
                         "# ALLOW_EARLY_FINAL=1 trains the final before selection is frozen (deviation 2026-09-29)."] + head[1:] + \
@@ -510,7 +432,6 @@ def gen_protocol_scripts(rows):
             lines.append("fi")
     _write_exec(os.path.join(OUT_DIR, "run_protocol_train.sh"), "\n".join(lines) + "\n")
 
-    # predict: every eval year of every job, skipping years already predicted
     lines = head[:1] + ["# Predict each protocol job's eval years with its own checkpoint + stats.",
                         "# Usage: run_protocol_predict.sh <arch> {folds|final|seedrep|ablateA|ablateB|posthoc}"] + head[1:] + \
             ['ARCH="$1"; STAGE="$2"', _gate_line(), ""]
@@ -533,46 +454,38 @@ def gen_protocol_scripts(rows):
     _write_exec(os.path.join(OUT_DIR, "run_protocol_predict.sh"), "\n".join(lines) + "\n")
 
 
-# --- main ------------------------------------------------------------------
 def main():
     global DATA_VERSION
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--arch", required=True,
-                    help="architecture tag; paths nest under it")
+                    help="architecture tag")
     ap.add_argument("--base_config", default=None,
-                    help="base training config for --arch (default configs/<arch>.json)")
+                    help="base config (default configs/<arch>.json)")
     ap.add_argument("--data_version", default=DATA_VERSION,
-                    help="data bucket suffix: fullgrid_<data_version> for data + stats_cv")
+                    help="data bucket suffix (fullgrid_<data_version>)")
     ap.add_argument("--chips_per_year", type=int, default=None,
-                    help="examples per training year; sets each fold's steps_per_epoch = "
-                         "ceil(n_train_years * chips_per_year / batch_size) so the LR "
-                         "schedule matches that fold's real run length")
+                    help="sets per-fold steps_per_epoch")
     ap.add_argument("--check_gate", choices=STAGES, default=None,
-                    help="exit non-zero unless STAGE may run for --arch; generates nothing")
+                    help="exit non-zero unless STAGE may run; generates nothing")
     ap.add_argument("--allow_early_final", action="store_true",
-                    help="with --check_gate final: open the final TRAINING gate before "
-                         "selection_frozen.json exists (deviation 2026-09-29)")
+                    help="open the final training gate before selection")
     ap.add_argument("--panel", default=os.path.join(REPO, "out", "target_panel", "panel.parquet"),
-                    help="panel for gamma fitting (default the targets-only panel; pass "
-                         "out/chip_panel_v3/panel.parquet with --gamma_panel_kind chip)")
+                    help="gamma panel (default the targets-only panel)")
     ap.add_argument("--gamma_target", default=GAMMA_KW["target"], choices=sorted(fyo.TARGETS),
-                    help="gamma year-level target (union3 = bd+snpp+mod14 on a chip panel)")
+                    help="gamma year-level target")
     ap.add_argument("--gamma_prev", default=GAMMA_KW["prev_burn"], choices=sorted(fyo.PREV_BANDS),
-                    help="chip panel: gamma prev-year-burn predictor (union3 = the 3 sensors)")
+                    help="chip panel: prev-year-burn predictor")
     ap.add_argument("--gamma_panel_kind", default=GAMMA_LONG["kind"], choices=["chip", "target"],
-                    help="target = long targets-only panel (prev-burn is the MCD64 count, "
-                         "--gamma_prev is ignored); chip = a chip panel")
+                    help="target = targets-only panel, chip = chip panel")
     ap.add_argument("--gamma_weighting", default=GAMMA_LONG["weighting"], choices=["equal", "burn"],
-                    help="chip weighting of the year effect (burn needs --gamma_panel_kind target)")
+                    help="chip weighting of the year effect")
     ap.add_argument("--gamma_fit_start", type=int, default=GAMMA_LONG["fit_start"],
-                    help="target panel: first gamma fit year (earlier than any train year)")
+                    help="target panel: first gamma fit year")
     ap.add_argument("--gamma_emit_through", type=int, default=GAMMA_LONG["emit_through"],
-                    help="target panel: emit offsets through this (predict-only) year")
+                    help="target panel: last emitted (predict-only) year")
     args = ap.parse_args()
 
-    # Fold the recipe choice into GAMMA_KW / GAMMA_LONG so both the panel load and the
-    # recipe recorded in each gamma JSON (make_gamma) reflect it.
     GAMMA_KW["target"], GAMMA_KW["prev_burn"] = args.gamma_target, args.gamma_prev
     if args.gamma_weighting != "equal" and args.gamma_panel_kind != "target":
         ap.error("--gamma_weighting burn needs --gamma_panel_kind target")
@@ -627,7 +540,7 @@ def main():
                 print(f"    {r['fold_id']:<14} {r['n_train_years']}yr -> {r['steps_per_epoch']}")
     over = budget_overrides(base, budget)
     if args.chips_per_year:
-        over.pop("steps_per_epoch", None)   # superseded by the per-fold values above
+        over.pop("steps_per_epoch", None)
     if over:
         print("  matched budget overrides: " +
               ", ".join(f"{k} {a!r}->{b!r}" for k, (a, b) in over.items()))

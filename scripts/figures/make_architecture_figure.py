@@ -1,29 +1,8 @@
-"""Figure 2: model inputs + factored architecture (A) and the train/evaluate timeline (B).
+"""Fig 2: inputs + factored architecture (A) and the CV / final / forecast timeline (B).
 
-  A  Inputs -> encoders -> one full-resolution pixel feature stack -> the four additive
-     log-odds terms of the factored model -> sum -> sigmoid -> Platt -> burn probability:
-
-         logit = m + s + c + gamma(t) * (1 + g_res(location))
-
-     Per-chip / per-year scalars enter the head directly: climate indices as context
-     for m, the year as the gamma lookup, location as the year-term gain g_res. Each
-     input box carries dots for the Fig 7 driver groups whose features it holds
-     (from the year-split Shapley spec, so gamma's SOI / prev-burn parts show up too).
-  B  One row per training job in out/cv/protocol.csv for the selected arch: the five
-     forward-pair CV folds (train 2013..t-1, evaluate {t, t+1}) and final_all (train
-     2013-2023, write-once test 2024-25), plus the 2026 forecast.
-
-Every number in the figure is read at runtime -- the arch config (bands, timesteps,
-encoder sizes, kernel / lattice), the gamma JSON (coefficients, fit years), the Platt
-npz and the protocol CSV -- and printed as a summary table before drawing. Box
-positions and wording live in the dicts below; `check_layout()` reports any text
-outside its box, overlapping text, or an arrow through text (must print OK).
-
-    .venv/bin/python scripts/figures/make_architecture_figure.py
-
-House style copied per script (see make_risk_landscape_figure.py); PNG @ 300 dpi +
-PDF in out/figures/. No title or baked caption.
-"""
+Every number is read at runtime from the arch config, gamma JSON, Platt npz and protocol CSV;
+check_layout() must print OK.
+Usage: make_architecture_figure.py [--timeline_only]"""
 
 import argparse
 import csv
@@ -52,12 +31,12 @@ CONFIG = f"configs/cv/{ARCH}/final_all.json"
 GAMMA = "out/cv/gamma/gamma_v3_patched_bd_2002_burn_final_all.json"
 PROTOCOL = "out/cv/protocol.csv"
 DRIVER_SPEC = "configs/attribution_drivers_v3p_yeargain_yearsplit.json"
-PIXEL_M = 463.312716528           # v3 grid (MODIS sinusoidal 463 m)
+PIXEL_M = 463.312716528
 FORECAST_YEARS = [2026]           # predict-only, never scored (not in protocol.csv)
 
 # Panel A canvas: 1 unit = 0.1 in, so text sizes in points map predictably.
 W_UNITS, H_UNITS = 135.0, 73.0
-Y_MIN = 8.6                  # panel A shows y in [Y_MIN, H_UNITS]
+Y_MIN = 8.6
 COLS = {"inputs": (1, 34), "encoders": (39, 63), "stack": (67, 71),
         "terms": (77, 103), "output": (107, 134)}
 HEADER_Y = 70.0
@@ -86,17 +65,14 @@ OUTPUT_ROWS = {
     "prob": (19.0, 24.5),
     "target": (9.2, 16.8),
 }
-GRES_Y = 17.3                # dashed location -> g_res route, under the stack
-SIGMA_XY = (109.0, 39.3)     # the summation node
+GRES_Y = 17.3
+SIGMA_XY = (109.0, 39.3)
 SIGMA_R = 1.9
 
 TITLE_PT, BODY_PT, HEADER_PT = 8.6, 7.2, 10.0
-PAD_X, PAD_TOP = 1.0, 0.9    # text inset inside boxes (units)
+PAD_X, PAD_TOP = 1.0, 0.9
 
 
-# --------------------------------------------------------------------------- #
-# Facts: every number the figure shows, read from the run artefacts
-# --------------------------------------------------------------------------- #
 def load_facts():
     cfg = json.load(open(CONFIG))
     gam = json.load(open(GAMMA))
@@ -129,14 +105,12 @@ def load_facts():
     weather = f["groups"]["im_monthly_coarse"]["kw"]
     f["weather_grid"] = int(weather["grid"])
     f["weather_km"] = chip_px / int(weather["grid"]) * PIXEL_M / 1000
-    # Fig 7 driver groups per input group (+ the head scalars via year_terms)
     drivers = {}
     for name, refs in spec["drivers"].items():
         for group, _ in refs:
             drivers.setdefault(group, set()).add(name)
     drivers["gamma"] = set(spec.get("year_terms", {}))
     f["drivers"] = drivers
-    # protocol rows for this arch: folds + final
     rows = []
     with open(PROTOCOL) as fh:
         for r in csv.DictReader(fh):
@@ -167,9 +141,6 @@ def print_facts(f):
         print(f"  drivers[{g}] = {sorted(d)}")
 
 
-# --------------------------------------------------------------------------- #
-# Box text (formatted from the facts)
-# --------------------------------------------------------------------------- #
 def num(x, fmt=".2f"):
     """Format with a true minus sign (U+2212), not a hyphen."""
     return format(x, fmt).replace("-", "−")
@@ -245,9 +216,6 @@ def box_text(f):
     }
 
 
-# --------------------------------------------------------------------------- #
-# Drawing helpers
-# --------------------------------------------------------------------------- #
 def draw_box(ax, key, x0, y0, x1, y1, title, body, fill, registry, texts,
              title_color=INK_PRIMARY, center=False, bold=True, lw=0.9):
     from matplotlib.patches import FancyBboxPatch
@@ -287,7 +255,7 @@ def driver_dots(ax, x1, y1, groups, texts_key, dots):
     """Small dots (Fig 7 driver-group colours) in a box's top-right corner."""
     present = [(label, col) for band, label, col in DRIVER_GROUPS
                if band.replace("shapley_", "") in groups]
-    for i, (_, col) in enumerate(present):     # legend order, left to right
+    for i, (_, col) in enumerate(present):
         cx = x1 - 1.3 - (len(present) - 1 - i) * 1.25
         ax.scatter([cx], [y1 - 1.35], s=16, color=col, edgecolor="white", linewidth=0.5,
                    zorder=5)
@@ -295,8 +263,7 @@ def driver_dots(ax, x1, y1, groups, texts_key, dots):
 
 
 def check_layout(fig, ax, texts, boxes, paths, pad_px=3):
-    """Text must sit inside its own box (inset pad_px), touch no other box, overlap
-    no other text, and no arrow may pass through text."""
+    """Text inside its own box, touching no other box or text, and no arrow through text."""
     from matplotlib.transforms import Bbox
     fig.canvas.draw()
     r = fig.canvas.get_renderer()
@@ -335,9 +302,6 @@ def check_layout(fig, ax, texts, boxes, paths, pad_px=3):
     return bad
 
 
-# --------------------------------------------------------------------------- #
-# Panels
-# --------------------------------------------------------------------------- #
 def panel_a(fig, ax, f):
     T = box_text(f)
     boxes, texts, paths, dots = {}, [], [], []
@@ -516,7 +480,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out_png", default="out/figures/fig_architecture.png")
     ap.add_argument("--timeline_only", action="store_true",
-                    help="write only panel B, enlarged, to out/figures/fig_timeline.{png,pdf}")
+                    help="write only an enlarged panel B")
     a = ap.parse_args()
 
     f = load_facts()

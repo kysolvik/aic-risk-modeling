@@ -1,40 +1,7 @@
-"""Write per-driver risk-attribution rasters for a trained binary model.
+"""Write per-chip driver-attribution GeoTIFFs: attr_<x>-<y>.tif (OAT) or shap_<x>-<y>.tif (--shapley).
 
-For every chip in a prediction data dir, runs the driver attribution from
-`aic_risk_modeling.eval.attribution` (see its docstring for method, baselines,
-and caveats) and writes one multi-band GeoTIFF per chip next to the usual
-prediction naming. Default mode is one-at-a-time (OAT) occlusion, written as
-`attr_{x}-{y}.tif`; pass --shapley for Shapley-value attribution, written as
-`shap_{x}-{y}.tif` (same band layout, so the two compare band-for-band).
-
-Bands (descriptions are set, so QGIS shows them):
-    1                risk -- deflated (calibrated-scale) burn probability
-    2 .. N+1         delta_<driver> (OAT) / shapley_<driver> (--shapley) --
-                     contribution of each driver, spec order; positive = raises
-                     risk vs grid-average conditions
-    N+2              residual_interactions -- (risk - band N+3) - sum(bands);
-                     ~0 for --shapley (efficiency), the interaction mismatch for
-                     OAT
-    N+3              risk_all_drivers_baseline
-
-NOTE: bands are DEFLATED probabilities, while predict.py's out_*.tif hold the raw
-(inflated) model output.
-
-Cost: OAT is N+2 model runs per batch (9 with the 7 default drivers) vs 1
-for predict.py; measured ~20 s/chip on CPU at batch_size 4 (v11, 2026-07-15).
---shapley is 2^N forwards (exact; 128 for the 7 default drivers, ~14x OAT) or
-~N*--shapley_samples (Monte-Carlo). Use --drivers with fewer groups (e.g.
-configs/attribution_drivers_simple.json, 4 groups -> 16 exact forwards),
---shapley_samples, --batch_size, or --max_chips to manage runtime; sharding by
-tfrecord across processes also works. Prefer GPU for full-grid --shapley runs.
-
-Example (CPU, needs GCS read access):
-    python scripts/predict/attribute.py \
-        --config_path configs/mtsvit_test_v11.json \
-        --checkpoint out/mtsvit_test_v11.pt \
-        --data_dir gs://aic-amazon/data/fullgrid/allpreds_2024 \
-        --output_dir out/attr_v11_2024_smoke --edge_crop 8 --max_chips 8
-"""
+Bands: risk, one per driver, residual_interactions, risk_all_drivers_baseline (deflated probabilities).
+Usage: attribute.py --config_path C --checkpoint M --data_dir D --output_dir O [--shapley]"""
 
 import argparse
 import os
@@ -54,34 +21,27 @@ def parse_args():
     core.add_common_args(parser, DEFAULT_PROFILE_TEMPLATE)
     parser.add_argument(
         '--drivers', type=str, default=None,
-        help='driver-spec JSON (see configs/attribution_drivers_default.json);'
-             ' default = built-in DEFAULT_DRIVERS')
+        help='driver-spec JSON; default built-in DEFAULT_DRIVERS')
     parser.add_argument(
         '--pos_weight', type=float, default=None,
-        help='deflation weight; default = config pos_weight (9.0 if unset)')
+        help='deflation weight; default config pos_weight')
     parser.add_argument(
         '--write_mask', action='store_true',
-        help='also write mask_{x}-{y}.tif ground-truth rasters')
+        help='also write mask_{x}-{y}.tif')
     parser.add_argument(
         '--shapley', action='store_true',
-        help='compute Shapley-value attribution (shap_{x}-{y}.tif) instead of '
-             'OAT occlusion; exact over driver groups (2^N forwards) unless '
-             '--shapley_samples is given')
+        help='Shapley attribution instead of OAT occlusion')
     parser.add_argument(
         '--shapley_samples', type=int, default=None,
-        help='estimate Shapley values from this many sampled permutations '
-             '(~N*samples forwards) instead of exact enumeration; needs '
-             '--shapley')
+        help='Monte-Carlo permutations instead of exact Shapley')
     parser.add_argument(
         '--shapley_seed', type=int, default=0,
-        help='RNG seed for --shapley_samples permutation sampling')
+        help='seed for --shapley_samples')
     return parser.parse_args()
 
 
 def check_stats_coverage(stats_path, normalize_list):
-    """Warn about normalized features missing from the stats file: the
-    pipeline silently leaves those raw, which would make the 0.0 grid-average
-    baseline (and training itself) wrong."""
+    """Warn about normalized features missing from the stats file (they would stay raw)."""
     if stats_path.endswith('.json'):
         stats = data_norm.load_stats_json(stats_path)
     else:
@@ -98,15 +58,11 @@ def main():
     args = parse_args()
     if args.shapley_samples is not None and not args.shapley:
         raise SystemExit('--shapley_samples requires --shapley')
-    # load_config handles gs:// via tf.io.gfile; plain open() does not.
     config = trainer.load_config(args.config_path)
     pos_weight = (args.pos_weight if args.pos_weight is not None
                   else config.get('pos_weight', 9.0))
 
-    # Resolve drivers against the real input groups BEFORE injecting the
-    # md_sidecar passthrough group, so it can never be named as a driver.
-    # load_config handles gs:// via tf.io.gfile; plain open() does not. The spec
-    # lives on GCS because configs/ is not copied into the prediction image.
+    # Resolve drivers before adding md_sidecar so it can never be named as a driver.
     spec_json = None
     if args.drivers:
         spec_json = trainer.load_config(args.drivers)
@@ -130,8 +86,6 @@ def main():
     names = []
     start = time.time()
     # No autocast even on GPU: deltas can be ~1e-3 and must stay float32.
-    # Rasters are written per batch rather than accumulated (10 float32
-    # bands per chip adds up over a full grid).
     out_prefix = 'shap' if args.shapley else 'attr'
     for inputs, labels in tqdm(trainer._torch_batches(ds, device),
                                   desc='Attributing', unit='batch'):

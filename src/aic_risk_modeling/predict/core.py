@@ -8,10 +8,9 @@ from rasterio.transform import Affine
 from aic_risk_modeling import train
 
 TFRECORD_PATTERN = '*.tfrecord.gz'
-CENTERED = True  # md_x / md_y are the centre of each tile
+CENTERED = True
 
-# Passthrough feature group injected into the config at runtime so the raw
-# (un-normalized) coordinates ride along in the model inputs dict.
+# Passthrough group that carries the raw coordinates through to the model inputs.
 MD_SIDECAR_GROUP = {
     'feature_names': ['md_x_raw', 'md_y_raw'],
     'transforms': {},
@@ -32,54 +31,37 @@ def add_common_args(parser, default_profile_template):
     parser.add_argument('--edge_crop', type=int, default=0)
     parser.add_argument(
         '--stats_path', default=None,
-        help='normalization stats (.json or .pbtxt), local or gs://; default is '
-             "config['stats_path'], else <data_dir>/stats.pbtxt (legacy)")
+        help="normalization stats; default config['stats_path']")
     parser.add_argument(
         '--profile_template', default=default_profile_template,
-        help='GeoTIFF supplying the CRS and pixel size for the output chips')
+        help='GeoTIFF giving the output CRS and pixel size')
     parser.add_argument('--tfrecord_pattern', default=TFRECORD_PATTERN)
     parser.add_argument('--batch_size', type=int, default=4)
-    parser.add_argument('--max_chips', type=int, default=None,
-                        help='stop after this many chips')
+    parser.add_argument('--max_chips', type=int, default=None)
     parser.add_argument(
         '--seed', type=int, default=None,
-        help='seed the tfrecord listing/interleave order; without it chip order '
-             'varies run to run, which matters only for --max_chips and A/B runs')
+        help='seed the chip order (matters for --max_chips)')
 
 
 def resolve_stats_path(explicit, config, data_dir):
-    """Pick the normalization stats file.
+    """--stats_path > config['stats_path'] > <data_dir>/stats.pbtxt.
 
-    Precedence: --stats_path > config['stats_path'] > <data_dir>/stats.pbtxt.
-
-    Prediction must normalize with the same statistics the model trained on.
-    The per-data_dir fallback re-centers every prediction year independently,
-    which erases the year-to-year offset the model learned; it is kept only so
-    older invocations that relied on it keep working. Note the GCS allpreds_*
-    directories carry no stats.pbtxt at all, so the fallback cannot serve them.
-    """
+    Use the training stats: per-data_dir stats re-center each year and erase the year offset."""
     if explicit:
         return explicit
     if config.get('stats_path'):
         return config['stats_path']
-    # rstrip: 'gs://b/d//stats.pbtxt' is a different object from 'gs://b/d/stats.pbtxt'
     return data_dir.rstrip('/') + '/stats.pbtxt'
 
 
 def add_md_sidecar(config):
-    """Inject the md_sidecar passthrough group so a training config can be reused
-    for prediction without maintaining a separate `_pred.json`."""
+    """Add the md_sidecar passthrough group so a training config works for prediction."""
     config['input_features']['md_sidecar'] = dict(MD_SIDECAR_GROUP)
     return config
 
 
 def set_raw_x_y(features):
-    """Stash the raw coords before normalization so they survive into the model
-    inputs (via the md_sidecar group) for georeferencing the output tiles.
-
-    Copies rather than pops so the normalized md_x/md_y remain available to the
-    md_single input group.
-    """
+    """Copy raw md_x/md_y before normalization so they reach the outputs for georeferencing."""
     features['md_x_raw'] = features['md_x']
     features['md_y_raw'] = features['md_y']
     return features
@@ -100,7 +82,6 @@ def build_dataset(config, data_dir, stats_path, tfrecord_pattern, batch_size, se
 
 
 def load_for_inference(checkpoint):
-    """(eval-mode model on the best device, device)."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     return train.trainer.load_model(checkpoint).to(device), device
 

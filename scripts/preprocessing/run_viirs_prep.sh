@@ -1,6 +1,7 @@
-# Set to MODIS tile grid
-echo $1 # input shp
-echo $2 # output dir
+# Rasterize VIIRS NOAA-20 hotspots onto the 463 m MODIS sinusoidal grid (SNPP: viirs_snpp_{year}.tif).
+# Usage: run_viirs_prep.sh <input shp> <output dir>
+echo $1
+echo $2
 python preprocess_fire_detections.py \
     $1 \
     $2 \
@@ -8,5 +9,4 @@ python preprocess_fire_detections.py \
     --resolution 463.312716527778 \
     --output-template "viirs_noaa20_{year}.tif" \
     --extent -8886337.903002782 -2335096.091300001 -4701697.447323891 1167548.0456500005 # rounded to nearest modis pixel
-#    --output-template "viirs_snpp_{year}.tif" \ # for snpp
 

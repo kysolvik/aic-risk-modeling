@@ -1,42 +1,8 @@
-"""Publication figure (Fig 4): one year's fire risk, three panels (default) or a 2x2 frame.
+"""Fig 4: one year's calibrated fire risk as 3 panels (map, per-chip scatter, example chips) or a 2x2.
 
-`--layout 3panel` (default): A risk map | B per-chip scatter on top, C the three
-example chips (columns) x [Predicted risk, Actual burn] (rows) below.
-`--layout 2x2`: the four panels described below (adds the per-tile error map).
-
-v3p version: defaults to the yeargain final_all model (trained 2013-2023) on the
-2024 write-once test year, with the frozen Platt calibrator fit on the CV
-fold-years 2018-23 (the one Fig 5 uses) applied to the raw output, and the
-2013-2023 (final_all train years) burn-frequency climatology. `--calibrator ''`
-falls back to the old deflate / --level-factor path (deflated expected / actual on
-years OTHER than --year; e.g. 0.717 = fwdpair_2022 pooled over 2022-23), which then
-needs an explicit --level-factor. Maps are drawn in the grid's native MODIS
-sinusoidal CRS, without lon/lat axes.
-
-
-  A (top-left)     Basin map of 2024 fire risk (factored_v1 output), RAISG outline,
-                   with the three example chips boxed.
-  B (top-right)    Per-tile normalized prediction error across the basin: signed
-                   (expected - actual) / (expected + actual) on a diverging scale
-                   (over-predicted warm, under-predicted cool), same three example
-                   chips boxed. Tiles below the activity floor are drawn neutral.
-  C (bottom-left)  Per-chip expected-vs-actual burned pixels for factored_v1 (the
-                   cloud behind the year-total headline), the three example chips
-                   highlighted.
-  D (bottom-right) Zoomed crops for the three example chips (rows: under- / well- /
-                   over-predicted), each row showing predicted risk and the 2024
-                   actual-burn footprint side by side.
-
-Everything is computed on ONE calibrated scale -- expected burned pixels per chip.
-
-    .venv/bin/python scripts/figures/make_risk_figure_2024.py
-
-Original v2 inputs (factored_v1 2024, one 7296x6272 EPSG:4326 grid):
-  out/baselines/factored_v1/2024_out.tif        risk mosaic (raw probability)
-  out/baselines/factored_v1/2024/{out_,mask_}*  1,813 per-chip tiles (prob + label)
-  out/label_mosaics/{label_2023,climatology_2013_2022}.tif
-  ../data/Limites_RAISG_2025/Lim_Raisg.shp      basin outline
-"""
+Defaults: yeargain final_all on 2024 with the frozen Platt calibrator; everything is on one
+scale, expected burned pixels per chip.
+Usage: make_risk_figure_2024.py [--layout 3panel|2x2] [--from_csv CSV]"""
 
 import argparse
 import os
@@ -53,21 +19,15 @@ from style import (CALIBRATOR, INK_PRIMARY, INK_SECONDARY, LABEL_DIR, RISK_CMAP,
 POINT = "#2a78d6"
 ONE_TO_ONE = "#8a8880"
 
-# Okabe-Ito colourblind-safe trio, reused for each chip across A, B and C.
 CHIP_COLORS = {"under": "#0072b2", "right": "#009e73", "over": "#d55e00"}
 CHIP_LABELS = {"under": "Under-predicted", "right": "Well-predicted",
                "over": "Over-predicted"}
-CHIP_ORDER = ["under", "right", "over"]  # top-to-bottom in panels B and C
-BURN_CMAP = ["#f3ede2", "#7f0000"]  # unburned cream, burned dark red (YlOrRd top)
-# Diverging per-tile error map (panel B): under-predicted = blue, on-target = white,
-# over-predicted = vermillion -- same over/under semantics as CHIP_COLORS.
-ERROR_CMAP = ["#0072b2", "#f7f7f7", "#d55e00"]  # under (blue) -> white -> over (vermillion)
-ERROR_NEUTRAL = "#dedcd6"  # tiles below the activity floor (no reliable error signal)
+CHIP_ORDER = ["under", "right", "over"]
+BURN_CMAP = ["#f3ede2", "#7f0000"]
+ERROR_CMAP = ["#0072b2", "#f7f7f7", "#d55e00"]
+ERROR_NEUTRAL = "#dedcd6"
 
 
-# --------------------------------------------------------------------------- #
-# Per-chip table (single pass over the 1,813 tiles)
-# --------------------------------------------------------------------------- #
 def per_chip_table(chip_dir, clim_path, prev_label_path, pos_weight, level=1.0, cal=None):
     """One row per chip: id, geographic bounds, actual + 3 expected burned-pixel counts."""
     import rasterio as rio
@@ -102,17 +62,12 @@ def per_chip_table(chip_dir, clim_path, prev_label_path, pos_weight, level=1.0, 
 
 
 def _window_sum(src, bounds, chip_shape, binarize):
-    """Sum a full-basin raster over one chip's window."""
     v = read_window(src, bounds, chip_shape).astype(np.float64)
     return float((v > 0).sum() if binarize else v.sum())
 
 
 def add_interior_flag(df):
-    """Flag chips whose 8 grid neighbours all exist (i.e. not on the ragged basin edge).
-
-    Chips tile a regular grid with step = chip width, in whatever CRS the bounds are
-    in (0.64 deg on the v2 grid, ~59.3 km on the v3 sinusoidal grid).
-    """
+    """Flag chips whose 8 grid neighbours all exist (not on the basin edge)."""
     step = float(np.median(df["right"] - df["left"]))
     ix = np.rint(df["lon"] / step).astype(int)
     iy = np.rint(df["lat"] / step).astype(int)
@@ -124,18 +79,14 @@ def add_interior_flag(df):
 
 
 def display_cap(df):
-    """99.5th-percentile of expected+actual across predictors = the scatter axis top."""
+    """Scatter axis top: 99.5th percentile of expected+actual."""
     vals = np.concatenate([df["exp_factored"].values, df["exp_lastyear"].values,
                            df["exp_clim"].values, df["actual"].values])
     return float(np.percentile(vals, 99.5))
 
 
 def select_chips(df, min_actual_pct, cap):
-    """Under- / well- / over-predicted chips: real fire, interior, and on the scatter scale.
-
-    On-scale (actual & expected <= the 99.5-pct axis cap) keeps every example visible in
-    panel B; interior avoids chips clipped by the basin boundary.
-    """
+    """Pick under- / well- / over-predicted example chips: real fire, interior, on-scale."""
     cutoff = np.percentile(df["actual"], min_actual_pct)
     pool = df[(df["actual"] >= cutoff) & df["interior"]
               & (df["actual"] <= cap) & (df["exp_factored"] <= cap)].copy()
@@ -152,11 +103,8 @@ def select_chips(df, min_actual_pct, cap):
     return picks
 
 
-# --------------------------------------------------------------------------- #
-# Raster reads for the maps
-# --------------------------------------------------------------------------- #
 def read_basin_map(map_path, shp_path, target_width, pos_weight, level=1.0, cal=None):
-    """Decimated, deflated risk map masked to the RAISG basin. Returns (arr, extent, vmax)."""
+    """Decimated calibrated risk map masked to the basin -> (arr, extent, vmax)."""
     import rasterio as rio
     from rasterio.enums import Resampling
     from rasterio.transform import from_bounds as tr_from_bounds
@@ -170,7 +118,7 @@ def read_basin_map(map_path, shp_path, target_width, pos_weight, level=1.0, cal=
     arr = to_prob(np.clip(q, 0.0, 1.0), pos_weight, level, cal)
 
     tr = tr_from_bounds(b.left, b.bottom, b.right, b.top, w, h)
-    inside, gdf = basin_mask(shp_path, crs, tr, (h, w))  # draw in the raster's own CRS
+    inside, gdf = basin_mask(shp_path, crs, tr, (h, w))
     arr = np.where(inside, arr, np.nan)
 
     vmax = float(np.nanpercentile(arr, 98))
@@ -179,7 +127,7 @@ def read_basin_map(map_path, shp_path, target_width, pos_weight, level=1.0, cal=
 
 
 def read_crop(out_path, mask_path, pos_weight, level=1.0, cal=None):
-    """Full-res deflated risk crop + actual-burn mask for one chip. Returns (prob, burn, extent)."""
+    """Full-res calibrated risk crop + burn mask for one chip -> (prob, burn, extent)."""
     import rasterio as rio
     with rio.open(out_path) as s:
         q = np.clip(s.read(1).astype(np.float64), 0.0, 1.0)
@@ -191,14 +139,7 @@ def read_crop(out_path, mask_path, pos_weight, level=1.0, cal=None):
 
 
 def draw_error_map(ax, df, gdf, cmap, norm, picks):
-    """Per-tile normalized-error choropleth on the RAISG basin outline.
-
-    Each 0.64-degree tile is a filled rectangle coloured by its signed error
-    ``df['err_value']`` (positive = over-predicted). Tiles below the activity
-    floor (``df['err_active']`` False) are drawn neutral -- their error is not
-    meaningful when almost nothing burned or was predicted. Returns a ScalarMappable
-    for the colorbar.
-    """
+    """Per-tile signed-error choropleth (positive = over-predicted; inactive tiles neutral)."""
     from matplotlib.cm import ScalarMappable
     from matplotlib.patches import Rectangle
 
@@ -218,8 +159,7 @@ def draw_error_map(ax, df, gdf, cmap, norm, picks):
         ax.add_patch(Rectangle(
             (r["left"], r["bottom"]), r["right"] - r["left"], r["top"] - r["bottom"],
             fill=False, edgecolor=c, linewidth=2.2, zorder=5))
-        # Same U/R/O circle markers as panel A, so the example chips stay locatable
-        # even where the box edge blends into a like-coloured error patch.
+        # U/R/O markers keep the chips locatable where the box blends into the map.
         ax.annotate(
             key[0].upper(), xy=(r["right"], r["top"]), xytext=(3, 3),
             textcoords="offset points", color="white", fontsize=11, fontweight="bold",
@@ -235,9 +175,6 @@ def draw_error_map(ax, df, gdf, cmap, norm, picks):
     return sm
 
 
-# --------------------------------------------------------------------------- #
-# Figure
-# --------------------------------------------------------------------------- #
 def build_figure(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weight, out_png,
                  error_mode="raw", level=1.0, cal=None):
     import matplotlib
@@ -250,16 +187,12 @@ def build_figure(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weight, out
 
     fig = plt.figure(figsize=(13.6, 12.6), facecolor=SURFACE)
 
-    # One outer frame split into a clean 2x2 by a full-width horizontal divider (YM)
-    # and a full-height vertical divider (XM): A risk map | B error map on top,
-    # C scatter | D chip grid below. All axes are placed by hand to line up to it.
-    BX0, BX1 = 0.050, 0.968        # frame left / right
-    BY0, BY1 = 0.035, 0.965        # frame bottom / top
-    XM = 0.508                     # vertical divider (columns): A|B and C|D
-    YM = 0.500                     # horizontal divider (rows): A,B above | C,D below
+    BX0, BX1 = 0.050, 0.968
+    BY0, BY1 = 0.035, 0.965
+    XM = 0.508
+    YM = 0.500
     LW = 1.7
 
-    # Diverging error colormap + symmetric norm from the active tiles only.
     err_cmap = LinearSegmentedColormap.from_list("err", ERROR_CMAP)
     active = df["err_active"].to_numpy().astype(bool)
     ev = df["err_value"].to_numpy()
@@ -267,8 +200,6 @@ def build_figure(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weight, out
     vlim = max(vlim, 1.0 if error_mode == "raw" else 0.1)
     err_norm = Normalize(vmin=-vlim, vmax=vlim)
 
-    # Map cells: the map spans the cell width (no lon/lat axes on the sinusoidal
-    # grid) with a horizontal colorbar underneath.
     def map_rect(x0, x1):
         return [x0 + 0.018, YM + 0.092, (x1 - x0) - 0.036, (BY1 - YM) - 0.092 - 0.034]
 
@@ -295,7 +226,7 @@ def build_figure(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weight, out
     ax_map.set_xticks([])
     ax_map.set_yticks([])
     ax_map.set_aspect("equal")
-    ax_map.set_anchor("S")  # sit the aspect-shrunk map just above its colorbar
+    ax_map.set_anchor("S")
     minx, miny, maxx, maxy = gdf.total_bounds
     ax_map.set_xlim(minx, maxx)
     ax_map.set_ylim(miny, maxy)
@@ -304,7 +235,6 @@ def build_figure(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weight, out
     cb.set_label("Predicted burned area (%)", fontsize=10,
                  color=INK_SECONDARY)
     cb.ax.tick_params(labelsize=9, colors=INK_SECONDARY)
-    # data stay probabilities; ticks in percent (0.5 -> "50"), matching the forecast maps
     cb.formatter = FuncFormatter(lambda v, _: f"{v * 100:.0f}")
     cb.update_ticks()
 
@@ -348,9 +278,9 @@ def build_figure(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weight, out
 
     # ---- Panel D: chips as rows (under/well/over) x [Predicted, Actual] -----
     burn_cmap = ListedColormap(BURN_CMAP)
-    d_left = XM + 0.126         # room for the per-chip row labels
+    d_left = XM + 0.126
     d_right = BX1 - 0.016
-    d_top = YM - 0.040          # room for the letter + column headers
+    d_top = YM - 0.040
     d_bottom = BY0 + 0.016
     col_slot = (d_right - d_left) / 2.0
     row_slot = (d_top - d_bottom) / 3.0
@@ -375,19 +305,17 @@ def build_figure(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weight, out
             a.set_yticks([])
             if drow == 0:
                 a.set_title(col_names[dcol], fontsize=11.5, color=INK_SECONDARY, pad=6)
-        # Per-chip row label to the left, vertically centred on the row.
         ry = d_top - (drow + 0.5) * row_slot
         fig.text(d_left - 0.012, ry,
                  f"{CHIP_LABELS[key]}\nExpected {r['exp_factored']:.0f}\n"
                  f"Actual {r['actual']:.0f}",
                  fontsize=10.5, color=c, fontweight="bold", ha="right", va="center")
 
-    # ---- outer frame + the cross divider -----------------------------------
     fig.add_artist(Rectangle((BX0, BY0), BX1 - BX0, BY1 - BY0,
                              transform=fig.transFigure, fill=False,
                              edgecolor="black", linewidth=LW, zorder=20))
-    for xy in ([[BX0, BX1], [YM, YM]],       # horizontal divider (full width)
-               [[XM, XM], [BY0, BY1]]):       # vertical divider (full height)
+    for xy in ([[BX0, BX1], [YM, YM]],
+               [[XM, XM], [BY0, BY1]]):
         ln = Line2D(xy[0], xy[1], color="black", linewidth=LW, zorder=20)
         ln.set_transform(fig.transFigure)
         fig.add_artist(ln)
@@ -404,8 +332,7 @@ def build_figure(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weight, out
 
 def build_figure_3panel(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weight,
                         out_png, level=1.0, cal=None):
-    """Three-panel layout (the original 9/10 design): A risk map | B scatter on top,
-    C = the three example chips as columns x [Predicted, Actual] rows below. No error map."""
+    """Three-panel layout: A map | B scatter on top, C example chips below."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -416,17 +343,13 @@ def build_figure_3panel(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weig
 
     fig = plt.figure(figsize=(13.6, 15.0), facecolor=SURFACE)
 
-    # One outer frame divided into three connected panels: A (map) and B (scatter)
-    # share the top row, split by a vertical divider at XB; C (chips) is the whole
-    # bottom, split from the top by a horizontal divider at YB.
-    BX0, BX1 = 0.050, 0.968        # frame left / right
-    BY0, BY1 = 0.035, 0.965        # frame bottom / top
-    XB = 0.560                     # vertical divider (A | B), top row only
-    YB = 0.595                     # horizontal divider (A,B above | C below)
+    BX0, BX1 = 0.050, 0.968
+    BY0, BY1 = 0.035, 0.965
+    XB = 0.560
+    YB = 0.595
     LW = 1.7
 
     # ---- Panel A: basin map + vertical colorbar (top-left) -----------------
-    # No lon/lat axes on the sinusoidal grid, so the map fills the cell up to the colorbar.
     ax_map = fig.add_axes([BX0 + 0.022, YB + 0.022, (XB - 0.105) - (BX0 + 0.022),
                            BY1 - (YB + 0.022) - 0.030])
     ax_map.set_facecolor("#f2f1ee")
@@ -455,7 +378,6 @@ def build_figure_3panel(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weig
     cb = fig.colorbar(im, cax=cax, extend="max")
     cb.set_label("Predicted burned area (%)", fontsize=10, color=INK_SECONDARY)
     cb.ax.tick_params(labelsize=9, colors=INK_SECONDARY)
-    # data stay probabilities; ticks in percent (0.5 -> "50"), matching the forecast maps
     cb.formatter = FuncFormatter(lambda v, _: f"{v * 100:.0f}")
     cb.update_ticks()
 
@@ -516,12 +438,11 @@ def build_figure_3panel(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weig
             axes_col[0].set_ylabel("Predicted risk", fontsize=11.5, color=INK_SECONDARY)
             axes_col[1].set_ylabel("Actual burn", fontsize=11.5, color=INK_SECONDARY)
 
-    # ---- outer frame + the two internal dividers ---------------------------
     fig.add_artist(Rectangle((BX0, BY0), BX1 - BX0, BY1 - BY0,
                              transform=fig.transFigure, fill=False,
                              edgecolor="black", linewidth=LW, zorder=20))
-    for xy in ([[BX0, BX1], [YB, YB]],       # horizontal divider (full width)
-               [[XB, XB], [YB, BY1]]):        # vertical divider (top row only)
+    for xy in ([[BX0, BX1], [YB, YB]],
+               [[XB, XB], [YB, BY1]]):
         ln = Line2D(xy[0], xy[1], color="black", linewidth=LW, zorder=20)
         ln.set_transform(fig.transFigure)
         fig.add_artist(ln)
@@ -540,7 +461,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pred-root", default="out/cv/preds/"
                     "factored_v3p_union4_monthlyattn_wide_yeargain/final_all",
-                    help="fold dir; chips + map default to <pred-root>/<year>/...")
+                    help="fold dir with <year>/ chips and map")
     ap.add_argument("--year", type=int, default=2024)
     ap.add_argument("--chip-dir", default=None, help="default <pred-root>/<year>/chips")
     ap.add_argument("--map", default=None, help="default <pred-root>/<year>/preds_out.tif")
@@ -548,43 +469,28 @@ def main():
                     default=f"{LABEL_DIR}/climatology_2013_2023.tif")
     ap.add_argument("--label-dir", default=LABEL_DIR)
     ap.add_argument("--level-factor", type=float, default=None,
-                    help="with --calibrator '': divide the deflated output by this "
-                         "(deflated expected / actual on years other than --year; "
-                         "0.717 = fwdpair_2022 on 2022-23, 0.774 = on 2022 alone)")
+                    help="with --calibrator '': deflated expected / actual level")
     ap.add_argument("--calibrator", default=CALIBRATOR,
                     metavar="NPZ",
-                    help="frozen Platt calibrator (calibrated_year_totals.py "
-                         "--save-calibrator); replaces deflate + --level-factor. "
-                         "Pass '' to use --level-factor instead")
+                    help="frozen Platt calibrator; '' = --level-factor")
     ap.add_argument("--shp", default=SHP)
     ap.add_argument("--pos-weight", type=float, default=10.0)
     ap.add_argument("--min-actual-pct", type=float, default=75.0,
-                    help="only chips at/above this actual-burn percentile are eligible")
+                    help="min actual-burn percentile for example chips")
     ap.add_argument("--map-vmax", type=float, default=None,
-                    help="colour-scale max (probability) for the basin map and chip "
-                         "risk panels; default = this year's 98th percentile. Pass the "
-                         "same value for every year in a set (manuscript: 0.5)")
+                    help="risk colour max; default 98th percentile")
     ap.add_argument("--map-width", type=int, default=1600,
-                    help="decimated width for the panel-A map read")
+                    help="decimated width of the panel-A map")
     ap.add_argument("--out_csv", default=None,
                     help="default out/figures/fig_tiles_<year>_per_chip.csv")
     ap.add_argument("--out_png", default=None, help="default out/figures/fig_tiles_<year>.png")
     ap.add_argument("--from_csv", default=None,
-                    help="load the per-chip table from this CSV to skip the slow "
-                         "recompute (chip paths are rebuilt from --chip-dir); use "
-                         "when iterating on the figure layout only")
-    ap.add_argument("--layout", choices=["3panel", "2x2"], default="3panel",
-                    help="3panel = A map | B scatter over C chip columns (no error "
-                         "map); 2x2 = A map | B error map over C scatter | D chips")
+                    help="reuse a saved per-chip table (layout iteration)")
+    ap.add_argument("--layout", choices=["3panel", "2x2"], default="3panel")
     ap.add_argument("--error-mode", choices=["raw", "normalized"], default="normalized",
-                    help="panel B tile colour: 'raw' = signed over/under burned "
-                         "pixels (expected - actual); 'normalized' = that residual "
-                         "divided by (expected + actual), bounded [-1, 1]")
+                    help="error: expected - actual, or / (expected + actual)")
     ap.add_argument("--resid-activity-min", type=float, default=75.0,
-                    help="panel B: tiles whose expected+actual burned pixels fall "
-                         "below this carry no reliable error signal and are drawn "
-                         "neutral instead of coloured. Normalized error is unstable "
-                         "at low counts, so this floor matters most in that mode")
+                    help="panel B: expected+actual below this is drawn neutral")
     args = ap.parse_args()
     args.chip_dir = args.chip_dir or os.path.join(args.pred_root, str(args.year), "chips")
     args.map = args.map or os.path.join(args.pred_root, str(args.year), "preds_out.tif")
@@ -616,11 +522,6 @@ def main():
         print(f"[figure] wrote {args.out_csv} ({len(df)} chips, "
               f"{int(df['interior'].sum())} interior)")
 
-    # Per-tile signed error for panel B, positive = over-predicted. Two modes:
-    #   raw         expected - actual, in burned pixels (unbounded)
-    #   normalized  (expected - actual) / (expected + actual), bounded [-1, 1]
-    # Tiles below the activity floor carry no reliable signal and are flagged for
-    # neutral fill.
     resid = (df["exp_factored"] - df["actual"]).to_numpy()
     denom = (df["exp_factored"] + df["actual"]).to_numpy()
     if args.error_mode == "raw":
@@ -640,7 +541,7 @@ def main():
     print("[figure] reading basin map...", flush=True)
     map_arr, extent, vmax, gdf = read_basin_map(
         args.map, args.shp, args.map_width, args.pos_weight, args.level_factor, cal)
-    if args.map_vmax is not None:       # fixed scale so years compare (default: 98th pct)
+    if args.map_vmax is not None:
         vmax = args.map_vmax
     print(f"[figure] map + chip colour max={vmax:.3f}", flush=True)
 

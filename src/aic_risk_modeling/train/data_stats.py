@@ -1,17 +1,6 @@
-"""Compute per-feature normalization statistics for TFRecord datasets.
+"""Pooled per-feature normalization stats (exact moments + subsampled median) as JSON.
 
-Replacement for TFDV-generated `stats.pbtxt`: streams the TFRecords once and
-accumulates exact count/mean/stddev/min/max per numeric feature (using the
-Chan et al. parallel variance merge, so results are exact and pooled across
-all data dirs), plus a median estimated from a uniform random subsample.
-Results are written as JSON, which `data_norm.create_normalizer` accepts
-directly in place of a stats.pbtxt path.
-
-Usage:
-    python -m aic_risk_modeling.train.data_stats \
-        --data_dirs gs://bucket/data/allpreds_2019/ gs://bucket/data/allpreds_2020/ \
-        --output gs://bucket/data/stats_train.json
-"""
+Usage: python -m aic_risk_modeling.train.data_stats --data_dirs DIR [DIR ...] --output stats.json"""
 
 import argparse
 import datetime
@@ -26,12 +15,7 @@ DEFAULT_RESERVOIR_SIZE = 10_000
 
 
 class FeatureAccumulator:
-    """Streaming accumulator: exact moments plus a uniform subsample.
-
-    The subsample is a bottom-k sketch (keep the k values with the smallest
-    random keys), which is equivalent to uniform sampling without replacement
-    over everything seen so far; the median is computed from it.
-    """
+    """Streaming exact count/mean/M2/min/max plus a bottom-k uniform subsample for the median."""
 
     def __init__(self, reservoir_size=DEFAULT_RESERVOIR_SIZE, seed=54):
         self.reservoir_size = reservoir_size
@@ -50,7 +34,6 @@ class FeatureAccumulator:
         if v.size == 0:
             return
 
-        # Chan et al. parallel combine of (count, mean, M2)
         n_b = v.size
         mean_b = v.mean()
         m2_b = v.var() * n_b
@@ -85,19 +68,7 @@ class FeatureAccumulator:
 
 def compute_stats(data_dirs, tfrecord_pattern="*.tfrecord.gz", batch_size=32,
                   reservoir_size=DEFAULT_RESERVOIR_SIZE, max_batches_per_dir=None):
-    """Stream all TFRecords and return pooled stats for every numeric feature.
-
-    Args:
-        data_dirs: list of dirs (local or gs://), each with TFRecords + schema.pbtxt
-        tfrecord_pattern: file glob within each dir
-        batch_size: examples per read batch
-        reservoir_size: subsample size per feature used for the median
-        max_batches_per_dir: cap batches per dir (for quick approximate runs)
-
-    Returns:
-        {'features': {name: {count, mean, stddev, min, max, median}},
-         'metadata': {...}}
-    """
+    """Stream TFRecords from data_dirs -> {'features': {name: stats}, 'metadata': {...}}."""
     accumulators = {}
     n_examples = 0
     for data_dir in data_dirs:
@@ -131,7 +102,6 @@ def compute_stats(data_dirs, tfrecord_pattern="*.tfrecord.gz", batch_size=32,
 
 
 def write_stats(stats, output_path):
-    """Write stats dict as JSON (local or gs://)."""
     with tf.io.gfile.GFile(output_path, 'w') as f:
         json.dump(stats, f, indent=2)
     print(f"Wrote stats for {len(stats['features'])} features to {output_path}")

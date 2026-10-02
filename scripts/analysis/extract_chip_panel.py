@@ -1,35 +1,8 @@
-"""Reduce the fullgrid_v2 TFRecords to a chip-year panel of burned area + drivers.
+"""Reduce fullgrid TFRecords to a chip-year panel of burn counts + chip-aggregated drivers.
 
-One row per (md_id, year): the aggregate burned-pixel count for each label, plus
-chip-level spatial aggregates of every year-varying driver. This is the input to
-the burned-area ceiling test, which asks whether aggregate burn is predictable at
-all once we stop trying to place fire in exact pixels.
-
-Why this is cheap despite ~115 GB of source data: only the ~140 bands we actually
-reduce are put in the feature_spec, so the 64 AlphaEarth embedding bands and the
-unused monthlies are never materialized. Each 128x128 band collapses to one to
-three floats, so a 17 MB record becomes ~200 numbers.
-
-Bands deliberately excluded because they are measurably dead or frozen in
-fullgrid_v2 (verified against the per-year TFDV stats):
-  im_gov_type            100% zeros
-  im_chirps_cwd_-1..-6   97.9-99.2% zeros (annual CHIRPS took max() of a <=0
-                         quantity; the monthly band is fine and is used instead)
-  im_alert/_alertdate    bit-identical across years -- geebeam_ali_inputs.py
-                         pulls the GLAD alert image with no year filter, so it
-                         is one snapshot replicated into every year's export
-
-Nodata handled explicitly: im_fire_type carries a -2147483648 sentinel that
-nothing else in the repo masks (it makes the band's basin mean -1.85e6 and its
-year-over-year ratio exactly 1.000). im_Elevation and im_accessibility carry
--32767 / -9999.
-
-Run directly:
-    .venv/bin/python scripts/extract_chip_panel.py \
-        --data_dirs gs://aic-amazon/data/fullgrid_v2/allpreds_20{18,19,20,21,22,23,24}/ \
-        --output_dir out/chip_panel/ --workers 8
-    .venv/bin/python scripts/extract_chip_panel.py --output_dir out/chip_panel/ --combine
-"""
+Only the reduced bands are parsed. Dead/frozen bands (im_gov_type, annual CHIRPS CWD, GLAD
+alerts) are excluded; nodata sentinels (im_fire_type, elevation, accessibility) are masked.
+Usage: extract_chip_panel.py --data_dirs DIR ... --output_dir out/chip_panel/ [--combine]"""
 
 import argparse
 import io
@@ -49,10 +22,7 @@ from aic_risk_modeling.train import data_loader
 
 PATCH_PIXELS = 128 * 128
 
-# _-12 = Jan(Y-1) ... _-1 = Dec(Y-1). All three monthly preps in
-# geebeam_ali_inputs.py are called as prep_*_monthly(TARGET_YEAR-1, TARGET_YEAR-1),
-# so every driver predates the target year -- which is correct for a forecast
-# issued in January of year Y.
+# _-12 = Jan(Y-1) ... _-1 = Dec(Y-1): every driver predates the target year.
 MONTHLY_TIMESTEPS = [str(-i) for i in range(12, 0, -1)]
 ANNUAL_TIMESTEPS = [str(-i) for i in range(6, 0, -1)]
 
@@ -77,8 +47,6 @@ STATIC_BANDS = [
     "im_Population_Density", "im_Nighttime_Lights", "im_loss", "im_lossyear",
 ]
 
-# Bands that also get within-chip spread, since a basin-scale drought signal can
-# show up as heterogeneity rather than a shift in the mean.
 SPREAD_BANDS = [
     "im_chirps_cwd_monthly",
     "im_cwd_monthly",
@@ -86,21 +54,15 @@ SPREAD_BANDS = [
     "im_total_precipitation_sum_monthly",
 ]
 
-# Sentinel values that are finite, so np.isfinite() filtering does not catch them.
 NODATA = {
     "im_Elevation": -32767.0,
     "im_accessibility": -9999.0,
 }
-FIRE_TYPE_SENTINEL = -1e9  # im_fire_type nodata is -2147483648
+FIRE_TYPE_SENTINEL = -1e9
 
 CLIM_INDICES = ["md_amo", "md_mei", "md_oni", "md_soi", "md_tna"]
-# The climate-index vectors are 12*N chronological months ending at Dec(Y-1):
-# fullgrid_v2 exported N=6 (length 72), fullgrid_v3 exports N=10 (length 120).
-# The months we want are anchored to the END of the array, not to a fixed index,
-# so slices are counted back from the tail: y1 = the last 12 months (Jan..Dec Y-1),
-# y1ond = the last 3 (Oct..Dec Y-1, closest to a January issue date), y2 = the 12
-# before that (Y-2). Hard-coding length-72 offsets silently reads the wrong year on
-# a length-120 export (it grabbed OND of Y-5), which zeroes out the SOI term.
+# Climate vectors are 12*N months ending Dec(Y-1) (N=6 in v2, 10 in v3); slice from the tail,
+# since fixed length-72 offsets read the wrong year on a v3 export.
 CLIM_SLICES_FROM_END = {"y1": (12, 0), "y1ond": (3, 0), "y2": (24, 12)}
 
 
@@ -119,7 +81,6 @@ def timestepped(bands, timesteps):
 
 
 def wanted_features():
-    """Every feature name the panel needs, in one flat list."""
     return (
         timestepped(MONTHLY_BANDS, MONTHLY_TIMESTEPS)
         + timestepped(ANNUAL_BANDS, ANNUAL_TIMESTEPS)
@@ -131,14 +92,7 @@ def wanted_features():
 
 
 def build_feature_spec(data_dir, allow_missing=False):
-    """Restrict the schema's feature_spec to the bands we reduce.
-
-    The 2013-2017 and 2025 exports live in a different bucket and carry a
-    slightly different band set (no AlphaEarth, no `im_viirs_snpp_-6..-2`, and
-    for 2013-2017 no `im_fire_type`). With allow_missing those years still join
-    the panel, with the absent columns emitted as NaN rather than silently
-    dropped, so the gap stays visible downstream.
-    """
+    """Schema feature_spec restricted to the reduced bands; allow_missing emits absent ones as NaN."""
     schema = data_loader.load_schema_from_gcs(data_dir)
     full = data_loader.schema_to_feature_spec(schema)
     want = wanted_features()
@@ -155,11 +109,7 @@ def _compression(path):
     return "GZIP" if path.endswith(".gz") else ""
 
 
-# Path helpers. tf.io.gfile speaks gs:// and local paths with one API, so the
-# same code runs on a laptop and in a container whose only durable storage is a
-# bucket. os.path.exists/makedirs silently do the wrong thing on gs:// -- they
-# report False and create a literal "gs:" directory -- which would break
-# resumability by re-extracting every shard on every run.
+# tf.io.gfile for gs:// and local alike (os.path.exists/makedirs misbehave on gs://).
 def _write_parquet(df, out_path):
     parent = out_path.rsplit("/", 1)[0]
     tf.io.gfile.makedirs(parent)
@@ -180,7 +130,6 @@ def _read_parquet(path):
 
 
 def _join(*parts):
-    """os.path.join mangles gs:// on some platforms; join on / explicitly."""
     return "/".join(p.strip("/") if i else p.rstrip("/")
                     for i, p in enumerate(parts))
 
@@ -193,7 +142,6 @@ def _list_shards(directory, pattern="*.tfrecord.gz"):
 
 
 def year_of(data_dir):
-    """2023 from '.../allpreds_2023/'."""
     m = re.search(r"(\d{4})", os.path.basename(data_dir.rstrip("/")))
     if not m:
         raise ValueError(f"no 4-digit year in directory name {data_dir!r}")
@@ -201,13 +149,7 @@ def year_of(data_dir):
 
 
 def _clean(arr, nodata=None):
-    """Finite pixels with any sentinel removed. Returns (values, n_bad).
-
-    Non-finite values and the finite nodata sentinels are both dropped here. A
-    plain .mean() would propagate a single NaN to the whole chip-year driver and
-    HistGradientBoostingRegressor consumes NaN natively, so the band would
-    quietly degrade into a missingness indicator without ever raising.
-    """
+    """(finite non-sentinel values, n_bad); a single NaN would otherwise poison the chip mean."""
     bad = ~np.isfinite(arr)
     if nodata is not None:
         bad = bad | (arr == nodata)
@@ -219,14 +161,12 @@ def _mean_or_nan(values):
 
 
 def reduce_record(rec):
-    """Collapse one parsed chip to a flat dict of scalars."""
     row = {}
 
     for name in SCALAR_MD:
         row[name] = (rec[name].reshape(-1)[0] if name in rec else np.nan)
 
-    # Targets. im_fire_type must have its sentinel removed before anything else;
-    # unmasked it swamps a ~2% signal and pins every year's mean to -1.85e6.
+        # The im_fire_type sentinel must go first; unmasked it pins the mean to -1.85e6.
     ft = rec.get("im_fire_type")
     if ft is None:
         sentinel = None
@@ -240,19 +180,13 @@ def reduce_record(rec):
                       if "im_BurnDate_0" in rec else np.nan)
     row["burn_snpp"] = (int((rec["im_viirs_snpp_0"] > 0).sum())
                         if "im_viirs_snpp_0" in rec else np.nan)
-    # MODIS active fire (MOD14). Present in every v3 year (2013-2022), unlike
-    # im_viirs_snpp (merged archive >2017) and im_fire_type (2018+), so it is the
-    # one fire-detection label with full temporal coverage.
     row["burn_mod14"] = (int((rec["im_mod14_0"] > 0).sum())
                          if "im_mod14_0" in rec else np.nan)
     row["n_pixels"] = PATCH_PIXELS
-    # Valid area must be constant per chip across years; if it is not, a
-    # year-varying nodata footprint would manufacture a year effect.
+        # Valid area must be constant per chip; a year-varying footprint fakes a year effect.
     row["n_valid_ft"] = (np.nan if sentinel is None
                          else PATCH_PIXELS - row["n_sentinel"])
 
-    # Fire type composition, for the type-weighting question. Types 3/4 are the
-    # deforestation/degradation classes.
     valid_ft = None if sentinel is None else ft[~sentinel]
     for cls in (1, 2, 3, 4):
         row[f"burn_ft_c{cls}"] = (np.nan if valid_ft is None
@@ -313,7 +247,7 @@ def reduce_record(rec):
 
 
 def extract_shard(job, source=None):
-    """Reduce one shard to a parquet of chip rows. Returns a stat dict."""
+    """Reduce one shard to a parquet of chip rows; returns a stat dict."""
     shard, year, out_path, spec = job
     t0 = time.time()
     ds = tf.data.TFRecordDataset([shard], compression_type=_compression(shard))
@@ -325,9 +259,6 @@ def extract_shard(job, source=None):
     for rec in ds.as_numpy_iterator():
         row = reduce_record(rec)
         row["year"] = year
-        # Which export produced this row. 2013-2017/2025 come from a different
-        # bucket and a later version of the geebeam script, so any driver step
-        # change at that boundary must stay traceable.
         row["export_source"] = source or os.path.dirname(shard.rstrip("/"))
         rows.append(row)
 
@@ -345,7 +276,6 @@ _SPEC = {}
 
 
 def _init_worker(spec_dirs, allow_missing=False):
-    """Build each dir's restricted spec once per worker."""
     for data_dir in spec_dirs:
         _SPEC[data_dir] = build_feature_spec(data_dir, allow_missing=allow_missing)
 
@@ -356,17 +286,9 @@ def _extract_shard_worker(job):
 
 
 def validate_panel(df):
-    """Checks whose failure would invalidate everything downstream.
-
-    The panel key assumption is that md_id names the same patch of ground in
-    every year. If it does not, the chip effect and the year effect get mixed
-    and no amount of careful modelling downstream recovers.
-    """
+    """Panel-key checks: md_id is the same ground, coordinates and valid footprint in every year."""
     problems = []
 
-    # The chip grid grew between exports (fullgrid_v2 = 1813 chips, fullgrid_v3 =
-    # 2556), so the expected id set is derived from the data rather than hard-coded:
-    # md_id must be exactly the contiguous block 0..N-1, identical in every year.
     all_ids = set(df["md_id"].dropna().astype(int))
     n_chips = len(all_ids)
     expected = set(range(n_chips))
@@ -385,7 +307,6 @@ def validate_panel(df):
         if len(bad_year) and not (bad_year.astype(int) == year).all():
             problems.append(f"{year}: md_year disagrees with the directory year")
 
-    # Same chip, same coordinates, every year.
     for axis in ("md_x", "md_y"):
         spread = df.groupby("md_id")[axis].agg(lambda s: s.max() - s.min())
         if (spread > 1e-5).any():
@@ -393,8 +314,7 @@ def validate_panel(df):
                 f"{axis} moves across years for "
                 f"{int((spread > 1e-5).sum())} chips -- md_id is not a stable key")
 
-    # A year-varying valid footprint would manufacture a year effect out of
-    # nothing, which is exactly the signal this study is trying to measure.
+    # A year-varying valid footprint would manufacture a year effect.
     if "n_valid_ft" in df.columns:
         valid = df.dropna(subset=["n_valid_ft"])
         if len(valid):
@@ -410,7 +330,6 @@ def validate_panel(df):
 
 
 def combine(output_dir):
-    """Concatenate every per-shard parquet into one panel."""
     parts = sorted(tf.io.gfile.glob(_join(output_dir, "*", "*.parquet")))
     if not parts:
         raise ValueError(f"no per-shard parquet files under {output_dir}")
@@ -421,11 +340,6 @@ def combine(output_dir):
     if dup:
         raise ValueError(f"{dup} duplicate (year, md_id) rows -- shards overlap?")
 
-    # Guard against combining per-shard parquets written by an OLDER extractor.
-    # Every shard extracted by the current reduce_record emits these columns (as
-    # NaN where the band is absent, e.g. mod14 in fullgrid_v2), so a missing one
-    # means some parquets are stale -- concatenating them would silently drop the
-    # column (and stale same-shaped columns like md_soi_y1ond keep wrong values).
     stale = [c for c in ("burn_bd", "burn_snpp", "burn_mod14", "burn_ft")
              if c not in df.columns]
     if stale:
@@ -453,8 +367,7 @@ def combine(output_dir):
     print(f"years: {sorted(df['year'].unique().tolist())}")
     print(f"chips per year: {df.groupby('year').size().to_dict()}")
 
-    # The check that catches a broken extraction: these must match the per-year
-    # TFDV means (im_BurnDate_0 was 0.017346 in 2023 and 0.034581 in 2024).
+    # Sanity check against per-year TFDV means (im_BurnDate_0: 0.017346 in 2023, 0.034581 in 2024).
     print("\nbasin-mean burned fraction by year (compare to TFDV stats):")
     print(f"  {'year':<6}{'burn_bd':>12}{'burn_snpp':>12}{'burn_mod14':>12}"
           f"{'burn_ft':>12}{'sentinel px':>14}")
@@ -477,14 +390,13 @@ def main():
     parser.add_argument("--tfrecord_pattern", default="*.tfrecord.gz")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max_shards", type=int, default=None,
-                        help="per dir; for smoke tests")
+                        help="per dir")
     parser.add_argument("--allow_missing", action="store_true",
-                        help="emit absent bands as NaN instead of erroring "
-                             "(needed for the 2013-2017 and 2025 exports)")
+                        help="emit absent bands as NaN (2013-2017, 2025 exports)")
     parser.add_argument("--overwrite", action="store_true",
-                        help="re-extract shards whose parquet already exists")
+                        help="re-extract existing shards")
     parser.add_argument("--combine", action="store_true",
-                        help="only concatenate existing per-shard parquets")
+                        help="only concatenate existing shard parquets")
     args = parser.parse_args()
 
     if args.combine:
