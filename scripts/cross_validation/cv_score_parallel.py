@@ -83,7 +83,7 @@ def main():
     ap.add_argument("--protocol", choices=["folds"], default="folds")
     ap.add_argument("--label_dir", default=cc.LABEL_DIR)
     ap.add_argument("--merge", action="store_true")
-    ap.add_argument("--ref_arch", default="factored_v1")
+    ap.add_argument("--ref_arch", default="factored_v3p_union4_monthlyattn_wide_yeargain")
     args = ap.parse_args()
     if args.merge:
         merge(args.arch, args.protocol, args.ref_arch)

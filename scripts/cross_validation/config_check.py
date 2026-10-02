@@ -14,8 +14,8 @@ here (see tests/test_union_label.py); val_cache is train-time only
 (tests/test_val_cache.py).
 
 Usage:
-    .venv/bin/python scripts/cross_validation/config_check.py            # the v3 mod14 baselines
-    .venv/bin/python scripts/cross_validation/config_check.py configs/factored_v3_mod14.json ...
+    .venv/bin/python scripts/cross_validation/config_check.py            # the non-gamma v3p archs
+    .venv/bin/python scripts/cross_validation/config_check.py configs/unet_v3p_union4.json ...
 """
 import json
 import os
@@ -29,7 +29,9 @@ import torch  # noqa: E402
 from aic_risk_modeling.train import trainer  # noqa: E402
 
 B = 2
-DEFAULT_CONFIGS = ["configs/mlp_v3_mod14.json", "configs/vit_test_v3_mod14.json"]
+# The factored arch is left out: its gamma coeffs_path is on GCS.
+DEFAULT_CONFIGS = ["configs/lstm_v3p_union4.json", "configs/mlp_v3p_union4_flat.json",
+                   "configs/unet_v3p_union4.json", "configs/vit_test_v3p_union4.json"]
 
 
 def synth_shape(spec):
