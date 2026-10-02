@@ -10,7 +10,7 @@ measurements on this dataset rather than by architecture fashion:
 
   * Patch tokens cannot represent the target. Of patches containing any fire,
     74.3% are mixed at 2x2, 94.2% at 4x4, 99.1% at 8x8. So every image pathway
-    here stays at full resolution or is pooled only where the DATA is genuinely
+    here stays at full resolution or is pooled only where the DATA is
     coarse -- never patch-tokenized as a compression device.
   * Real within-chip spatial structure is gone by ~18 km and zero by 36 km
     (label autocorrelation with the chip mean removed: 0.580 at 0.56 km, 0.126 at
@@ -70,22 +70,16 @@ class PixelTemporalEncoder(nn.Module):
     """
 
     def __init__(self, input_shape, input_name=None, dim=32, depth=2, num_heads=4,
-                 mlp_ratio=2, dropout=0.1, pool="mean"):
+                 mlp_ratio=2, dropout=0.1):
         super().__init__()
         if len(input_shape) != 4:
             raise ValueError(f"expected (T, H, W, C) input_shape, got {input_shape}")
         steps, _, _, channels = input_shape
-        if pool not in ("mean", "cls", "last"):
-            raise ValueError(f"unknown pool {pool!r}")
         self.input_name = input_name
         self.out_channels = dim
-        self.pool = pool
         self.proj = nn.Linear(channels, dim)
         self.temporal_pos = nn.Parameter(torch.zeros(steps, dim))
         nn.init.trunc_normal_(self.temporal_pos, std=0.02)
-        self.cls = nn.Parameter(torch.zeros(1, 1, dim)) if pool == "cls" else None
-        if self.cls is not None:
-            nn.init.trunc_normal_(self.cls, std=0.02)
         self.layers = nn.ModuleList(
             [TransformerLayer(dim, num_heads, mlp_ratio, dropout) for _ in range(depth)])
         self.norm = nn.LayerNorm(dim)
@@ -96,17 +90,9 @@ class PixelTemporalEncoder(nn.Module):
         # sequence, so attention is purely temporal.
         x = x.permute(0, 2, 3, 1, 4).reshape(batch * height * width, steps, -1)
         x = self.proj(x) + self.temporal_pos
-        if self.cls is not None:
-            x = torch.cat([self.cls.expand(x.shape[0], -1, -1), x], dim=1)
         for layer in self.layers:
             x = layer(x)
-        x = self.norm(x)
-        if self.pool == "cls":
-            x = x[:, 0]
-        elif self.pool == "last":
-            x = x[:, -1]
-        else:
-            x = x.mean(dim=1)
+        x = self.norm(x).mean(dim=1)
         return x.reshape(batch, height, width, self.out_channels)
 
 
@@ -114,10 +100,9 @@ class CoarseTemporalEncoder(nn.Module):
     """Temporal transformer on a pooled grid: (B, T, H, W, C) -> (B, H, W, D).
 
     For inputs whose NATIVE resolution is already coarse -- CHIRPS, ERA5/AgERA5
-    CWD, VPD, temperature, evaporation, precipitation are all >=4 km against a
-    556 m pixel -- average-pooling to `grid` before the temporal encoder discards
-    nothing real and cuts cost by (H*W)/(grid^2). This is principled downsampling,
-    unlike patch tokenization of genuinely fine-grained bands.
+    CWD, VPD, temperature, evaporation, precipitation are all >=4km --
+    average-pooling to `grid` before the temporal encoder discards
+    nothing real and cuts cost by (H*W)/(grid^2).
     """
 
     def __init__(self, input_shape, input_name=None, grid=16, dim=32, depth=2,
@@ -447,16 +432,12 @@ class FactoredFireModel(nn.Module):
     (the band's native resolution).
     """
 
-    def __init__(self, branch_models, num_classes=1, pixel_groups=None,
+    def __init__(self, branch_models, pixel_groups=None,
                  context_groups=None, year_group=None, local_kernel=9, coarse_grid=4,
                  susceptibility_hidden=(128, 64), susceptibility_dropout=0.0,
                  local_hidden=64, local_dilation=1, coarse_hidden=64, year_offset=None,
                  year_gain_group=None, year_gain=None):
         super().__init__()
-        if num_classes != 1:
-            raise ValueError(
-                "FactoredFireModel is additive in log-odds and is binary-only; "
-                f"got num_classes={num_classes}. Use decoder_fusion for multiclass.")
         pixel_groups = list(pixel_groups or [])
         context_groups = list(context_groups or [])
 
@@ -474,7 +455,6 @@ class FactoredFireModel(nn.Module):
         if missing:
             raise ValueError(f"decoder_config names group(s) with no branch model: {missing}")
 
-        self.num_classes = num_classes
         self.pixel_branches = nn.ModuleList([named[n] for n in pixel_groups])
         self.context_branches = nn.ModuleList([named[n] for n in context_groups])
         self.year_group = year_group
@@ -488,7 +468,7 @@ class FactoredFireModel(nn.Module):
             if shape is None:
                 raise ValueError(
                     f"context branch {b.input_name!r} must expose input_shape "
-                    "(use model_type 'identity' or 'projection')")
+                    "(use model_type 'identity')")
             context_dim += int(math.prod(shape))
 
         self.susceptibility = PixelSusceptibility(
@@ -554,17 +534,3 @@ class FactoredFireModel(nn.Module):
         # Head runs in float32 even under autocast, matching the other decoders.
         with torch.autocast(device_type=logits.device.type, enabled=False):
             return torch.sigmoid(logits.float()).squeeze(1)
-
-
-# ---------------------------------------------------------------------- factories
-
-def get_pixel_temporal(input_shape, input_name=None, **kwargs):
-    return PixelTemporalEncoder(input_shape, input_name=input_name, **kwargs)
-
-
-def get_coarse_temporal(input_shape, input_name=None, **kwargs):
-    return CoarseTemporalEncoder(input_shape, input_name=input_name, **kwargs)
-
-
-def decoder_factored(branch_models, num_classes=1, **kwargs):
-    return FactoredFireModel(branch_models, num_classes=num_classes, **kwargs)
