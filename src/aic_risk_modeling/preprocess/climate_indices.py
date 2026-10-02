@@ -30,7 +30,7 @@ def download_clim_indices(
         raise ValueError(f'{index_name} not found. Current options are {list(clim_registry.keys())}')
 
     if index_name == 'amo':
-        df = pd.read_csv(download_url, skiprows=1, sep='\s+')
+        df = pd.read_csv(download_url, skiprows=1, sep=r'\s+')
         df['Date'] = df['Year'].astype(str) + '-' + df['month'].astype(str) + '-01'
         df = df.drop(columns=['Year','month'])[['Date','SSTA']]
     else:
