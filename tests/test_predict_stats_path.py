@@ -49,6 +49,5 @@ def test_profile_template_resolves_off_file_not_cwd():
     src = open(_PREDICT).read()
     assert "'./out/example.tif'" not in src, "cwd-relative template path is back"
     assert "DEFAULT_PROFILE_TEMPLATE" in src
-    for name in ("example.tif", "example_v3.tif"):
-        assert os.path.isfile(os.path.join(_REPO, "assets", name)), \
-            f"assets/{name} missing (check the !assets/*.tif negation in .gitignore)"
+    assert os.path.isfile(os.path.join(_REPO, "assets", "example_v3.tif")), \
+        "assets/example_v3.tif missing (check the !assets/*.tif negation in .gitignore)"

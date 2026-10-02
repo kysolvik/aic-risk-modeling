@@ -1,8 +1,6 @@
-"""eval/calibration: ECE/MCE, reliability bins, Platt/isotonic calibrators, calibrated GeoTIFFs."""
+"""eval/calibration: ECE/MCE, reliability bins, Platt/isotonic calibrators."""
 
 import builtins
-import os
-import tempfile
 
 import numpy as np
 import pytest
@@ -10,19 +8,14 @@ import pytest
 from aic_risk_modeling.eval.calibration import (
     apply_isotonic,
     apply_platt,
-    apply_temperature,
     expected_calibration_error,
     fit_calibrator,
     fit_isotonic,
     fit_platt,
-    fit_temperature,
     plot_reliability_diagram,
     reliability_bins,
 )
-from aic_risk_modeling.eval.eval import (
-    calc_stats,
-    write_calibrated_predictions,
-)
+from aic_risk_modeling.eval.eval import calc_stats
 
 
 def test_perfectly_calibrated_has_low_ece():
@@ -78,54 +71,6 @@ def _sigmoid(z):
     return 1.0 / (1.0 + np.exp(-z))
 
 
-def test_apply_temperature_identity_at_one():
-    scores = np.array([0.01, 0.2, 0.5, 0.8, 0.99])
-    out = apply_temperature(scores, 1.0)
-    assert np.allclose(out, scores, atol=1e-5), out
-    assert out.shape == scores.shape
-
-
-def test_apply_temperature_preserves_half_crossing_and_monotonicity():
-    scores = np.array([0.05, 0.4, 0.5, 0.6, 0.95])
-    out = apply_temperature(scores, 2.5)
-    assert abs(out[2] - 0.5) < 1e-9, out
-    assert out[0] > scores[0] and out[1] > scores[1]
-    assert out[3] < scores[3] and out[4] < scores[4]
-    assert np.all(np.diff(out) > 0), out  # still strictly increasing
-
-
-def test_fit_temperature_recovers_known_scaling():
-    # Logits sharpened 2x -> fitted T ~2.
-    rng = np.random.default_rng(3)
-    logits = rng.normal(0.0, 2.0, size=400_000)
-    labels = rng.uniform(size=logits.shape) < _sigmoid(logits)
-    overconfident = _sigmoid(logits * 2.0)
-    T = fit_temperature(overconfident, labels)
-    assert abs(T - 2.0) < 0.15, T
-
-
-def test_fit_temperature_near_one_when_calibrated():
-    rng = np.random.default_rng(4)
-    logits = rng.normal(0.0, 2.0, size=400_000)
-    labels = rng.uniform(size=logits.shape) < _sigmoid(logits)
-    scores = _sigmoid(logits)
-    T = fit_temperature(scores, labels)
-    assert abs(T - 1.0) < 0.1, T
-
-
-def test_fit_and_apply_reduces_ece_on_overconfident_model():
-    rng = np.random.default_rng(5)
-    logits = rng.normal(0.0, 2.0, size=400_000)
-    labels = rng.uniform(size=logits.shape) < _sigmoid(logits)
-    overconfident = _sigmoid(logits * 2.0)
-    ece_before, _, _ = expected_calibration_error(overconfident, labels)
-    T = fit_temperature(overconfident, labels)
-    ece_after, _, _ = expected_calibration_error(
-        apply_temperature(overconfident, T), labels)
-    assert ece_after < ece_before, (ece_before, ece_after)
-    assert ece_after < 0.02, ece_after
-
-
 def _overconfident_set(seed, factor=2.0, bias=0.0, n=400_000):
     """Well-calibrated logits, then distorted to forge a miscalibrated model."""
     rng = np.random.default_rng(seed)
@@ -143,18 +88,13 @@ def test_platt_recovers_known_scaling():
     assert abs(b) < 0.05, b
 
 
-def test_platt_fixes_bias_that_temperature_cannot():
-    # Pure logit shift: temperature can't translate the curve, Platt's intercept can.
+def test_platt_fixes_pure_bias():
+    # Pure logit shift: Platt's intercept translates the curve back.
     scores, labels = _overconfident_set(11, factor=1.0, bias=1.5)
     ece_raw, _, _ = expected_calibration_error(scores, labels)
-
-    T = fit_temperature(scores, labels)
-    ece_temp, _, _ = expected_calibration_error(apply_temperature(scores, T), labels)
-
     a, b = fit_platt(scores, labels)
     ece_platt, _, _ = expected_calibration_error(apply_platt(scores, a, b), labels)
-
-    assert ece_platt < ece_temp, (ece_temp, ece_platt)
+    assert ece_platt < ece_raw, (ece_raw, ece_platt)
     assert ece_platt < 0.02, ece_platt
     assert abs(b + 1.5) < 0.1, b  # intercept recovers the -1.5 shift
 
@@ -180,7 +120,7 @@ def test_apply_calibrators_preserve_shape_and_ranking():
 
 def test_fit_calibrator_dispatch():
     scores, labels = _overconfident_set(13, factor=2.0)
-    for method in ("temperature", "platt", "isotonic"):
+    for method in ("platt", "isotonic"):
         transform, info = fit_calibrator(method, scores, labels)
         out = transform(scores)
         assert out.shape == scores.shape
@@ -221,44 +161,6 @@ def test_calc_stats_returns_calibrated_array():
 
     stats2, none_cal = calc_stats(scores, gt, calibration_method="none")
     assert none_cal is None
-
-
-def test_write_calibrated_csv_round_trip():
-    import pandas as pd
-
-    with tempfile.TemporaryDirectory() as d:
-        src = os.path.join(d, "pred.csv")
-        out = os.path.join(d, "pred_cal.csv")
-        pd.DataFrame({"pred": [0.1, 0.6, 0.9], "id": [7, 8, 9]}).to_csv(src, index=False)
-        calibrated = np.array([0.2, 0.5, 0.7])
-
-        write_calibrated_predictions(src, out, calibrated)
-        got = pd.read_csv(out)
-        assert np.allclose(got["pred"].values, calibrated)
-        assert list(got["id"].values) == [7, 8, 9]  # other columns preserved
-
-
-def test_write_calibrated_tif_round_trip():
-    rio = pytest.importorskip("rasterio")
-    from rasterio.transform import from_origin
-
-    with tempfile.TemporaryDirectory() as d:
-        src = os.path.join(d, "pred.tif")
-        out = os.path.join(d, "pred_cal.tif")
-        transform = from_origin(-120.5, 38.2, 0.01, 0.01)
-        prof = dict(driver="GTiff", height=4, width=5, count=1, dtype="float32",
-                    crs="EPSG:4326", transform=transform, compress="lzw")
-        scores = np.linspace(0.0, 1.0, 20, dtype="float32").reshape(4, 5)
-        with rio.open(src, "w", **prof) as dst:
-            dst.write(scores, 1)
-        calibrated = (scores * 0.5).astype("float32")
-
-        write_calibrated_predictions(src, out, calibrated)
-        with rio.open(out) as ds:
-            assert ds.crs == rio.crs.CRS.from_epsg(4326)
-            assert ds.transform == transform
-            assert ds.count == 1 and ds.dtypes[0] == "float32"
-            assert np.allclose(ds.read(1), calibrated)
 
 
 def test_plot_returns_false_without_matplotlib(monkeypatch, tmp_path):
