@@ -57,16 +57,8 @@ FORCE="${FORCE:-0}"
 YEARS="${YEARS:-}"                      # override eval years (see header)
 GS="gs://aic-amazon"
 PROTOCOL="out/cv/protocol.csv"
-# Output CRS + pixel size. md_x/md_y are in the export's CRS: v2 = WGS84 degrees
-# (0.005deg), v3 = MODIS sinusoidal metres (463.3m). The v2 template on v3 data
-# writes 0.005 m pixels at metre coordinates -> a mosaic ~1e5x too large.
-# example_v3.tif is north-up (negative y res), so run with INVERT_YRES=0: chips
-# are written as-is, no row flip. (example.tif has positive y res and needs
-# INVERT_YRES=1.)
-case "$DATA_VERSION" in
-    v3|v3_*) PROFILE_TEMPLATE=/app/assets/example_v3.tif ;;  # v3_patched = same grid
-    *)  PROFILE_TEMPLATE=/app/assets/example.tif ;;
-esac
+# Output CRS + pixel size: md_x/md_y are MODIS sinusoidal metres (463.3m), north-up.
+PROFILE_TEMPLATE=/app/assets/example_v3.tif
 
 # Pin the job to the immutable tag, then confirm it took.
 IMG=$REGION-docker.pkg.dev/$PROJECT/aic-containers/aic-predict:$TAG
@@ -115,7 +107,7 @@ DATA_DIR=${data_dir},\
 STATS_PATH=${stats_gs},\
 OUTPUT_URI=${out_gs},\
 PROFILE_TEMPLATE=${PROFILE_TEMPLATE},\
-UPLOAD_TILES=1,EDGE_CROP=0,INVERT_YRES=0,MOSAIC=1,BATCH_SIZE=4,OMP_NUM_THREADS=8
+UPLOAD_TILES=1,EDGE_CROP=0,MOSAIC=1,BATCH_SIZE=4,OMP_NUM_THREADS=8
     n_sub=$((n_sub + 1))
 done
 
