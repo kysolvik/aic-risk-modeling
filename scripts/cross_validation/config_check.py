@@ -21,12 +21,11 @@ import json
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-sys.path.insert(0, os.path.join(REPO, "src"))
+import torch
 
-import torch  # noqa: E402
-from aic_risk_modeling.train import trainer  # noqa: E402
+from aic_risk_modeling.train import trainer
+
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 B = 2
 # The factored arch is left out: its gamma coeffs_path is on GCS.

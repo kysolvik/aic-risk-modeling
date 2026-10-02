@@ -16,23 +16,18 @@ in low-risk intact forest land use and fire history carry large opposite-signed
 values that cancel, and climate mixes long-term spatial climate with the year's
 anomaly. Shapley values are on the deflated scale; A is calibrated.
 
-    .venv/bin/python scripts/analysis/make_shapley_maps.py              # 2023-2025
-    .venv/bin/python scripts/analysis/make_shapley_maps.py --years 2024
+    .venv/bin/python scripts/figures/make_shapley_maps.py              # 2023-2025
+    .venv/bin/python scripts/figures/make_shapley_maps.py --years 2024
 """
 
 import argparse
 import os
-import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from scatter_expected_actual import GRID, INK_PRIMARY, INK_SECONDARY, SURFACE  # noqa: E402
-from make_shapley_figure import (  # noqa: E402
-    ATTR_ROOT, BLOCK, CACHE, CALIBRATOR, GROUPS, OUTSIDE, SHP, compute)
-
-RISK_CMAP = "YlOrRd"
-DIFF_CMAP = ["#0072b2", "#f7f7f7", "#d55e00"]   # lowers risk -> none -> raises risk
+from make_shapley_figure import ATTR_ROOT, BLOCK, CACHE, GROUPS, compute
+from style import (CALIBRATOR, DIFF_CMAP, GRID, INK_PRIMARY, INK_SECONDARY, OUTSIDE,
+                   RISK_CMAP, SHP, SURFACE, save_figure)
 
 
 def load_cache(years, shp):
@@ -100,11 +95,8 @@ def plot_year(data, gdf, year, risk_vmax, shap_vmax, out_png):
     colorbar(ims[0], fig.add_subplot(gs[1, 0]), "Calibrated Burn Probability (%)", "max")
     colorbar(ims[1], fig.add_subplot(gs[4, 1]), "Shapley Value (Percentage Points)", "both")
 
-    os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
-    fig.savefig(out_png, dpi=300, facecolor=SURFACE, bbox_inches="tight")
-    fig.savefig(os.path.splitext(out_png)[0] + ".pdf", facecolor=SURFACE, bbox_inches="tight")
+    save_figure(fig, out_png, "shapley_maps", tight=True)
     plt.close(fig)
-    print(f"[shapley_maps] wrote {out_png} (+ .pdf)")
 
 
 def main():

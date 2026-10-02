@@ -44,13 +44,10 @@ import sys
 import numpy as np
 import pandas as pd
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-sys.path.insert(0, os.path.join(REPO, "src"))
-sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(REPO, "scripts", "analysis"))  # decompose_scale
+from aic_risk_modeling.eval.calibration import deflate
+from aic_risk_modeling.eval.metrics import decompose, pr_auc
 
-from decompose_scale import decompose, _pr_auc   # noqa: E402
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 OUT_DIR = os.path.join(REPO, "out", "cv")
 
@@ -69,11 +66,6 @@ TURN_MIN = math.log(1.25)             # |log A(t+1)/A(t)| below this = flat pair
 REPORT_STAGES = {"folds": ("folds",), "final": ("final",),
                  "ablate": ("folds", "seedrep", "final", "ablateA", "ablateB")}
 EPS = 1e-7
-
-
-def deflate(q, pos_weight):
-    """Invert the weighted-BCE optimum q = w*p/(w*p+1-p) back to p (compare_year_totals)."""
-    return q / (pos_weight - (pos_weight - 1.0) * q)
 
 
 def swap_gamma(q, g_from, g_to):
@@ -281,8 +273,8 @@ def reference_scores(labels, bounds, train, year, clim):
         r = get(CLIM_KERNEL_PIXELWISE)
         e_chip = r.reshape(n, -1).sum(axis=1).astype(np.float64)
         e = float(e_chip.sum())
-        out[f"{name}_pr_auc"] = _pr_auc(lab, r.reshape(-1))
-        out[f"{name}_pr_auc_9x9"] = _pr_auc(lab, get(CLIM_KERNEL_9X9).reshape(-1))
+        out[f"{name}_pr_auc"] = pr_auc(lab, r.reshape(-1))
+        out[f"{name}_pr_auc_9x9"] = pr_auc(lab, get(CLIM_KERNEL_9X9).reshape(-1))
         out[f"{name}_E"] = e
         out[f"{name}_logbias"] = math.log(e / a) if e > 0 and a > 0 else float("nan")
         out[f"{name}_brier"] = float(((r - labels) ** 2).mean())

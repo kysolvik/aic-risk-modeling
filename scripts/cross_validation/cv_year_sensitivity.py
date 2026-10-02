@@ -49,11 +49,9 @@ import sys
 import numpy as np
 import pandas as pd
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-sys.path.insert(0, HERE)
+import cv_make_folds as mk
 
-import cv_make_folds as mk  # noqa: E402
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 OUT_DIR = os.path.join(REPO, "out", "cv")
 SCORES = os.path.join(OUT_DIR, "protocol_scores.csv")

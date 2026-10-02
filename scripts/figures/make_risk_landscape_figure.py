@@ -12,24 +12,17 @@ Each class is drawn as a shaded zone with a few representative systems plotted a
 labelled points. Zone extents and example systems live in the ZONES / POINTS dicts
 at the top so they can be renamed / repositioned without touching the plot code.
 
-    .venv/bin/python scripts/analysis/make_risk_landscape_figure.py
+    .venv/bin/python scripts/figures/make_risk_landscape_figure.py
 
 House style is copied from make_risk_figure_2024.py (no shared plotting module):
 manuscript figure -> PNG @ 300 dpi + companion PDF in out/figures/.
 """
 
 import argparse
-import os
 
 import numpy as np
 
-# --------------------------------------------------------------------------- #
-# House style (copied per-script; see make_risk_figure_2024.py)
-# --------------------------------------------------------------------------- #
-INK_PRIMARY = "#0b0b0b"    # titles / primary text
-INK_SECONDARY = "#52514e"  # axis labels, ticks, captions
-SURFACE = "#fcfcfb"        # near-white figure + axes background
-GRID = "#e4e3de"           # gridlines and left/bottom spines
+from style import GRID, INK_PRIMARY, INK_SECONDARY, SURFACE, save_figure
 
 # Okabe-Ito colourblind-safe trio, one per model class.
 C_SHORT = "#0072b2"   # blue
@@ -243,12 +236,8 @@ def plot(out_png):
     fig.tight_layout(rect=[0.005, 0.01, 0.995, 0.99])
     check_layout(fig, ax, texts, boxes)
 
-    os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
-    fig.savefig(out_png, dpi=300, facecolor=SURFACE)
-    fig.savefig(os.path.splitext(out_png)[0] + ".pdf", facecolor=SURFACE)
+    save_figure(fig, out_png, "risk_landscape")
     plt.close(fig)
-    print(f"[risk_landscape] wrote {out_png}")
-    print(f"[risk_landscape] wrote {os.path.splitext(out_png)[0] + '.pdf'}")
 
 
 def main():

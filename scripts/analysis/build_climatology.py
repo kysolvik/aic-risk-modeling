@@ -1,9 +1,8 @@
 """Build a per-pixel burn-frequency climatology from label mosaics.
 
 climatology(pixel) = mean over --years of (label_<year> > 0), a float32 raster on
-the label-mosaic grid. This is the free "climatology" baseline used by
-`compare_forest_split.py` / `pyramid_compare.py`: the long-run fire frequency at
-each pixel. Default years 2013-2022 exclude every evaluation year (2023/2024/2025)
+the label-mosaic grid. This is the free "climatology" baseline used by the
+figure scripts: the long-run fire frequency at each pixel. Default years 2013-2022 exclude every evaluation year (2023/2024/2025)
 so there is no leakage.
 
 The label mosaics are the full-basin `label_<year>.tif` (a copy of

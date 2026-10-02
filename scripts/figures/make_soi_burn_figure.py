@@ -14,8 +14,8 @@ Burned area = MCD64A1 burned pixels summed over the 2556 grid chips, from the
 targets-only panel (build_target_panel.py), times the 463.3 m pixel area. SOI is
 NOAA's monthly index via download_clim_indices.
 
-    .venv/bin/python scripts/analysis/make_soi_burn_figure.py
-    .venv/bin/python scripts/analysis/make_soi_burn_figure.py --from_csv out/figures/fig_soi_burn.csv
+    .venv/bin/python scripts/figures/make_soi_burn_figure.py
+    .venv/bin/python scripts/figures/make_soi_burn_figure.py --from_csv out/figures/fig_soi_burn.csv
 """
 
 import argparse
@@ -24,10 +24,8 @@ import os
 import numpy as np
 import pandas as pd
 
-INK_PRIMARY = "#0b0b0b"
-INK_SECONDARY = "#52514e"
-SURFACE = "#fcfcfb"
-GRID = "#e4e3de"
+from style import INK_PRIMARY, INK_SECONDARY, SURFACE, save_figure, style_axes
+
 LINE = "#52514e"
 HIGH = "#d55e00"       # top burned-area years
 LOW = "#0072b2"        # bottom burned-area years
@@ -61,13 +59,7 @@ def build_table(panel, first, last):
 
 
 def _style(ax, grid_axis="y"):
-    ax.set_facecolor(SURFACE)
-    ax.grid(True, axis=grid_axis, color=GRID, linewidth=0.8, zorder=0)
-    ax.set_axisbelow(True)
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
-    for s in ("left", "bottom"):
-        ax.spines[s].set_color(GRID)
+    style_axes(ax, grid_axis)
     ax.tick_params(colors=INK_SECONDARY, labelsize=9, length=0)
 
 
@@ -166,11 +158,8 @@ def plot(t, out_png):
     for ax, s in ((a1, "A"), (a2, "B"), (a3, "C")):
         _letter(ax, s)
     fig.align_ylabels([a1, a2])
-    os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
-    fig.savefig(out_png, dpi=300, facecolor=SURFACE, bbox_inches="tight")
-    fig.savefig(os.path.splitext(out_png)[0] + ".pdf", facecolor=SURFACE, bbox_inches="tight")
+    save_figure(fig, out_png, "soi_burn", tight=True)
     plt.close(fig)
-    print(f"[soi_burn] wrote {out_png} (+ .pdf)")
 
 
 def main():

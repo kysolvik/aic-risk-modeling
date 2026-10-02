@@ -26,7 +26,7 @@ out and the fold-years together calibrate the later test/forecast years.
 
 Out-of-basin pixels are stored as an exact 0 probability / 0 label, so they add
 nothing to either sum; totals are basin-restricted automatically, matching
-``compare_year_totals.py`` / ``scatter_expected_actual.py``.
+the figure scripts.
 
 Two input layouts (auto-detected per year, mosaic preferred):
   mosaic:  {root}/{year}_out.tif  + {root}/{year}_mask.tif      (whole basin)
@@ -48,7 +48,6 @@ import argparse
 import csv
 import glob
 import os
-import sys
 
 import numpy as np
 import rasterio as rio
@@ -56,7 +55,7 @@ import rasterio as rio
 # Reuse the eval module's calibrators directly -- same code the eval CLI's
 # --calibration-method flag uses, so a frozen fit here matches an eval run.
 from aic_risk_modeling.eval.calibration import (apply_platt, fit_calibrator, fit_isotonic,
-                                                fit_platt)
+                                                fit_platt, load_calibrator)
 
 
 def chip_key(path):
@@ -145,7 +144,7 @@ def save_calibrator(path, method, pixels, years, meta):
     """Save the frozen all-fit-years calibrator for the figure scripts.
 
     Refits on the same pooled pixels as ``fit_on``, so it is the frozen
-    calibrator itself; scatter_expected_actual.load_calibrator reads either kind.
+    calibrator itself; eval.calibration.load_calibrator reads either kind.
     platt: (a, b) for ``apply_platt``. isotonic: breakpoints for ``np.interp``,
     which clamps outside [x0, xN] exactly like the fitted ``out_of_bounds='clip'``.
     """
@@ -249,8 +248,6 @@ def main():
                           {'seed': args.seed, 'fit_max_pixels': args.fit_max_pixels,
                            'pred_root': np.array(args.pred_root)})
         if args.frozen_calibrator:
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            from scatter_expected_actual import load_calibrator  # same loader the figures use
             calibrators[None] = (load_calibrator(args.frozen_calibrator), list(args.fit_years))
             print(f"Non-LOYO eval years use the SAVED calibrator {args.frozen_calibrator} "
                   f"(the refit above is not applied to them)")

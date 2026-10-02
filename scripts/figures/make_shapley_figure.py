@@ -25,23 +25,21 @@ there is no additive calibrated version), plotted in percentage points.
 Year-level shifts (gamma, year gain) are not players: they sit in the baseline
 band, so this is within-year spatial attribution.
 
-    .venv/bin/python scripts/analysis/make_shapley_figure.py
-    .venv/bin/python scripts/analysis/make_shapley_figure.py --from_cache   # restyle only
+    .venv/bin/python scripts/figures/make_shapley_figure.py
+    .venv/bin/python scripts/figures/make_shapley_figure.py --from_cache   # restyle only
 """
 
 import argparse
 import os
-import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from scatter_expected_actual import (  # noqa: E402
-    GRID, INK_PRIMARY, INK_SECONDARY, SURFACE, load_calibrator)
+from aic_risk_modeling.eval.calibration import inflate, load_calibrator
+from aic_risk_modeling.eval.chips import basin_mask, block_nanmean
+from style import (CALIBRATOR, GRID, INK_PRIMARY, INK_SECONDARY, OUTSIDE, SHP, SURFACE,
+                   save_figure)
 
 ATTR_ROOT = "out/cv/attr/factored_v3p_union4_monthlyattn_wide_yeargain/final_all"
-CALIBRATOR = "out/cv/calibrator_platt_cv2018_2023.npz"
-SHP = "../data/Limites_RAISG_2025/Lim_Raisg.shp"
 CACHE = "out/figures/fig_shapley_drivers_cache.npz"
 POS_WEIGHT = 10.0
 BLOCK = 8          # ~3.7 km, as the forecast map
@@ -57,24 +55,8 @@ GROUPS = [
     ("shapley_terrain_water", "Terrain + Water", "#cc79a7"),
 ]
 LOW_RISK = "#d9d8d3"
-OUTSIDE = "#f2f1ee"
 CLASS_EDGES = [0.0, 0.01, 0.05, 0.20, 1.01]
 CLASS_LABELS = ["< 1%", "1–5%", "5–20%", "≥ 20%"]
-
-
-def inflate(p, w=POS_WEIGHT):
-    """Deflated probability -> raw weighted-BCE score (inverse of `deflate`)."""
-    return w * p / (w * p + 1.0 - p)
-
-
-def block_mean(arr, b):
-    """Mean over b x b blocks of a NaN-masked array (all-NaN blocks -> NaN)."""
-    h, w = (arr.shape[0] // b) * b, (arr.shape[1] // b) * b
-    v = arr[:h, :w].reshape(h // b, b, w // b, b)
-    n = np.isfinite(v).sum(axis=(1, 3))
-    s = np.nansum(v, axis=(1, 3))
-    with np.errstate(invalid="ignore", divide="ignore"):
-        return np.where(n > 0, s / n, np.nan)
 
 
 def year_summary(path, cal, inside):
@@ -84,34 +66,30 @@ def year_summary(path, cal, inside):
         desc = list(s.descriptions)
         idx = [desc.index(g[0]) + 1 for g in GROUPS]
         p = s.read(1).astype(np.float64)
-        risk = np.where(inside, cal(inflate(p)), np.nan)
+        risk = np.where(inside, cal(inflate(p, POS_WEIGHT)), np.nan)
         del p
         cls = np.digitize(risk, CLASS_EDGES) - 1          # NaN -> len(edges)-1, dropped
         valid = inside & (cls >= 0) & (cls < len(CLASS_LABELS))
         cls_share = np.bincount(cls[valid], minlength=len(CLASS_LABELS)) / valid.sum()
-        blocks = [block_mean(risk, BLOCK)]
+        blocks = [block_nanmean(risk, BLOCK)]
         cls_mean = np.zeros((len(GROUPS), len(CLASS_LABELS)))
         for gi, bi in enumerate(idx):
             v = s.read(bi).astype(np.float64)
             cls_mean[gi] = (np.bincount(cls[valid], weights=v[valid], minlength=len(CLASS_LABELS))
                             / np.bincount(cls[valid], minlength=len(CLASS_LABELS)))
-            blocks.append(block_mean(np.where(inside, v, np.nan), BLOCK))
+            blocks.append(block_nanmean(np.where(inside, v, np.nan), BLOCK))
             del v
     return np.stack(blocks).astype(np.float32), cls_mean, cls_share
 
 
 def compute(years, attr_root, calibrator, shp):
-    import geopandas as gpd
     import rasterio as rio
-    from rasterio.features import rasterize
 
     cal = load_calibrator(calibrator)
     first = os.path.join(attr_root, str(years[0]), "attr_shap.tif")
     with rio.open(first) as s:
         tr, crs, shape = s.transform, s.crs, s.shape
-    gdf = gpd.read_file(shp).to_crs(crs)
-    inside = rasterize(((g, 1) for g in gdf.geometry), out_shape=shape, transform=tr,
-                       fill=0, dtype="uint8") > 0
+    inside, gdf = basin_mask(shp, crs, tr, shape)
     out = {"years": np.array(years), "transform": np.array(tr)[:6]}
     for y in years:
         path = os.path.join(attr_root, str(y), "attr_shap.tif")
@@ -227,11 +205,8 @@ def plot(data, gdf, years, threshold, out_png):
                frameon=False, fontsize=9.5, labelcolor=INK_SECONDARY, handlelength=1.2,
                columnspacing=1.4)
 
-    os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
-    fig.savefig(out_png, dpi=300, facecolor=SURFACE, bbox_inches="tight")
-    fig.savefig(os.path.splitext(out_png)[0] + ".pdf", facecolor=SURFACE, bbox_inches="tight")
+    save_figure(fig, out_png, "shapley_fig", tight=True)
     plt.close(fig)
-    print(f"[shapley_fig] wrote {out_png} (+ .pdf)")
 
 
 def main():

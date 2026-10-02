@@ -43,11 +43,9 @@ import time
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+import tensorflow as tf
 
-import tensorflow as tf  # noqa: E402
-
-from aic_risk_modeling.train import data_loader  # noqa: E402
+from aic_risk_modeling.train import data_loader
 
 PATCH_PIXELS = 128 * 128
 

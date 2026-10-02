@@ -7,8 +7,7 @@
      blue = less.
 
 Model output is put on a burned-fraction scale in two steps:
-  1. `deflate` inverts the weighted-BCE inflation (pos_weight), as in
-     make_risk_figure_2024.py / scatter_expected_actual.py.
+  1. `deflate` inverts the weighted-BCE inflation (pos_weight).
   2. A single LEVEL factor, expected / actual burned pixels pooled over the
      model's own evaluation years (--level_chips; for a CV fold these are its
      val years, never the 2024-25 test years), divides the deflated output. The
@@ -22,34 +21,25 @@ one Fig 5 uses), applied to the raw output of the yeargain final_all model.
 Both panels are masked to the RAISG outline and drawn in the grid's own MODIS
 sinusoidal CRS (near-equatorial, so close to true shape).
 
-    .venv/bin/python scripts/analysis/make_forecast_figure.py
+    .venv/bin/python scripts/figures/make_forecast_figure.py
     for y in 2024 2025 2026; do       # comparable set: shared colour scales
-        .venv/bin/python scripts/analysis/make_forecast_figure.py --year $y --risk_vmax 50 --diff_vmax 15
+        .venv/bin/python scripts/figures/make_forecast_figure.py --year $y --risk_vmax 50 --diff_vmax 15
     done
-    .venv/bin/python scripts/analysis/make_forecast_figure.py --calibrator '' \
+    .venv/bin/python scripts/figures/make_forecast_figure.py --calibrator '' \
         --pred out/cv/preds/<arch>/fwdpair_2022/2026/preds_out.tif --level_factor 0.717
 """
 
 import argparse
-import glob
 import os
-import sys
-import warnings
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from scatter_expected_actual import (  # noqa: E402
-    GRID, INK_PRIMARY, INK_SECONDARY, SURFACE, deflate, load_calibrator)
-
-RISK_CMAP = "YlOrRd"
-DIFF_CMAP = ["#0072b2", "#f7f7f7", "#d55e00"]   # less fire -> normal -> more fire
-OUTSIDE = "#f2f1ee"
+from aic_risk_modeling.eval.calibration import deflate, load_calibrator, to_prob
+from aic_risk_modeling.eval.chips import basin_mask, block_nanmean, chip_pairs
+from style import (CALIBRATOR, DIFF_CMAP, GRID, INK_PRIMARY, INK_SECONDARY, LABEL_DIR,
+                   OUTSIDE, RISK_CMAP, SHP, SURFACE, save_figure)
 
 PRED_ROOT = "out/cv/preds/factored_v3p_union4_monthlyattn_wide_yeargain/final_all"
-CALIBRATOR = "out/cv/calibrator_platt_cv2018_2023.npz"
-LABEL_DIR = "out/label_mosaics_v3p_union4"
-SHP = "../data/Limites_RAISG_2025/Lim_Raisg.shp"
 BLOCK_MAP = 8      # ~3.7 km
 BLOCK_DIFF = 16    # ~7.4 km: smooths the k/13 steps of a 13-year pixel climatology
 
@@ -59,36 +49,22 @@ def level_factor(chip_dirs, pos_weight):
     import rasterio as rio
     e = a = 0.0
     for d in chip_dirs:
-        outs = glob.glob(os.path.join(d, "out_*.tif"))
-        if not outs:
-            raise FileNotFoundError(f"no chips in {d}")
-        for o in outs:
+        for o, mask in chip_pairs(d):
             with rio.open(o) as s:
                 e += deflate(np.clip(s.read(1).astype(np.float64), 0, 1), pos_weight).sum()
-            with rio.open(o.replace("out_", "mask_", 1)) as m:
+            with rio.open(mask) as m:
                 a += (m.read(1) > 0).sum()
     return e / a
 
 
-def block_mean(arr, b):
-    """Mean over b x b blocks, NaN-aware (a block is NaN only if all of it is)."""
-    h, w = (arr.shape[0] // b) * b, (arr.shape[1] // b) * b
-    v = arr[:h, :w].reshape(h // b, b, w // b, b)
-    with warnings.catch_warnings():                 # all-NaN blocks outside the basin
-        warnings.simplefilter("ignore", RuntimeWarning)
-        return np.nanmean(v, axis=(1, 3))
-
-
 def load(pred_path, label_dir, clim_years, shp, pos_weight, level, cal=None):
-    import geopandas as gpd
     import rasterio as rio
-    from rasterio.features import rasterize
 
     with rio.open(pred_path) as s:
         q = s.read(1).astype(np.float64)
         tr, crs, shape = s.transform, s.crs, s.shape
     q = np.clip(q, 0, 1)
-    pred = cal(q) if cal is not None else deflate(q, pos_weight) / level
+    pred = to_prob(q, pos_weight, level, cal)
     del q
     total = np.zeros(shape, np.float32)
     for y in clim_years:
@@ -97,9 +73,7 @@ def load(pred_path, label_dir, clim_years, shp, pos_weight, level, cal=None):
                 raise ValueError(f"label_{y}.tif is not on the prediction grid")
             total += s.read(1) > 0
     clim = total / len(clim_years)
-    gdf = gpd.read_file(shp).to_crs(crs)
-    inside = rasterize(((g, 1) for g in gdf.geometry), out_shape=shape, transform=tr,
-                       fill=0, dtype="uint8") > 0
+    inside, gdf = basin_mask(shp, crs, tr, shape)
     pred = np.where(inside, pred, np.nan)
     clim = np.where(inside, clim, np.nan)
     return pred, clim, tr, gdf
@@ -111,8 +85,8 @@ def plot(pred, clim, tr, gdf, out_png, year, clim_years, risk_vmax=None, diff_vm
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 
-    risk = block_mean(pred, BLOCK_MAP) * 100
-    diff = (block_mean(pred, BLOCK_DIFF) - block_mean(clim, BLOCK_DIFF)) * 100
+    risk = block_nanmean(pred, BLOCK_MAP) * 100
+    diff = (block_nanmean(pred, BLOCK_DIFF) - block_nanmean(clim, BLOCK_DIFF)) * 100
 
     def extent(arr, b):
         h, w = arr.shape
@@ -150,11 +124,8 @@ def plot(pred, clim, tr, gdf, out_png, year, clim_years, risk_vmax=None, diff_vm
         ax.text(0.0, 1.01, letter, transform=ax.transAxes, ha="left", va="bottom",
                 fontsize=13, fontweight="bold", color=INK_PRIMARY)
 
-    os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
-    fig.savefig(out_png, dpi=300, facecolor=SURFACE, bbox_inches="tight")
-    fig.savefig(os.path.splitext(out_png)[0] + ".pdf", facecolor=SURFACE, bbox_inches="tight")
+    save_figure(fig, out_png, "forecast_fig", tight=True)
     plt.close(fig)
-    print(f"[forecast_fig] wrote {out_png} (+ .pdf)")
 
 
 def main():

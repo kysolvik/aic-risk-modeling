@@ -19,12 +19,10 @@ table to 1e-9.
 import argparse
 import json
 import os
-import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import fit_year_offset as fyo  # noqa: E402
+from aic_risk_modeling.eval import year_offset as fyo
 
 PANEL = "out/target_panel/panel.parquet"
 

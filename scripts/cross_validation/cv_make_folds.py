@@ -46,11 +46,9 @@ import os
 import stat
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(REPO, "scripts", "analysis"))  # fit_year_offset
-import fit_year_offset as fyo  # noqa: E402
+from aic_risk_modeling.eval import year_offset as fyo
+
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 # --- paths -----------------------------------------------------------------
 CONFIG_DIR = os.path.join(REPO, "configs", "cv")
@@ -84,7 +82,7 @@ GAMMA_LONG = dict(kind="target", weighting="burn", fit_start=2002, emit_through=
 def make_gamma(panel_df, canon, train_years):
     """Fit gamma on `train_years`, emit offsets for all panel years, write JSON.
 
-    Reuses the vetted fit_year_offset functions. Honors its sign guard: if the
+    Reuses the vetted eval.year_offset functions. Honors its sign guard: if the
     prev-burn coefficient comes out >= 0 (persistence, which lags every turn), fall
     back to a SOI-only gamma and flag it.
     """
@@ -555,7 +553,7 @@ def main():
     ap.add_argument("--allow_early_final", action="store_true",
                     help="with --check_gate final: open the final TRAINING gate before "
                          "selection_frozen.json exists (deviation 2026-09-29)")
-    ap.add_argument("--panel", default=fyo.TARGET_PANEL,
+    ap.add_argument("--panel", default=os.path.join(REPO, "out", "target_panel", "panel.parquet"),
                     help="panel for gamma fitting (default the targets-only panel; pass "
                          "out/chip_panel_v3/panel.parquet with --gamma_panel_kind chip)")
     ap.add_argument("--gamma_target", default=GAMMA_KW["target"], choices=sorted(fyo.TARGETS),

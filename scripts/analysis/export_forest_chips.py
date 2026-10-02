@@ -14,7 +14,7 @@ lives only in the input TFRecords, not in the prediction chips.
 
 This script reads that band straight out of the input TFRecords and writes it
 through the *identical* georeferencing path as the predictions -- it imports and
-reuses `predict.write_batch` with the same center coords (`md_x`/`md_y`), profile
+reuses `predict.core.write_batch` with the same center coords (`md_x`/`md_y`), profile
 template and `--edge_crop` flag. So each written
 `forest_<x>-<y>.tif` registers pixel-for-pixel with the matching
 `out_<x>-<y>.tif` and shares the exact `<x>-<y>` filename, and evaluation can join
@@ -31,20 +31,14 @@ from and with the SAME flags:
 
 import argparse
 import os
-import sys
 
 import numpy as np
-import rasterio as rio
 
-_REPO_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir))
-sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
-sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts", "predict"))
+from aic_risk_modeling import train
+from aic_risk_modeling.predict.core import TFRECORD_PATTERN, load_profile, write_batch
 
-import aic_risk_modeling as arm  # noqa: E402
-from predict import write_batch, DEFAULT_PROFILE_TEMPLATE  # noqa: E402
-
-TFRECORD_PATTERN = "*.tfrecord.gz"
+DEFAULT_PROFILE_TEMPLATE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir, "assets", "example_v3.tif")
 
 
 def parse_args():
@@ -75,14 +69,12 @@ def main():
     # Raw (un-normalized) parse of every band; shuffle=False so we stream once.
     # We only touch the forest band and the raw center coords, but the merged
     # loader is what predict.py uses, so the chips line up by construction.
-    ds = arm.train.build_merged_dataset(
+    ds = train.build_merged_dataset(
         [args.data_dir], args.tfrecord_pattern, batch_size=args.batch_size,
         shuffle=False)
 
     os.makedirs(args.output_dir, exist_ok=True)
-    with rio.open(args.profile_template) as src:
-        profile = src.profile
-    profile.update(dtype=rio.float32, count=1, compress="lzw")
+    profile = load_profile(args.profile_template)
     base_transform = profile["transform"]
 
     n_chips = 0

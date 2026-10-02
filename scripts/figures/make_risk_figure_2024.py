@@ -27,11 +27,9 @@ sinusoidal CRS, without lon/lat axes.
                    over-predicted), each row showing predicted risk and the 2024
                    actual-burn footprint side by side.
 
-Everything is computed on ONE calibrated scale -- deflated expected burned pixels
-per chip -- reusing the per-predictor definitions in `scatter_expected_actual.py`:
-models are deflated for the weighted-BCE pos_weight (10).
+Everything is computed on ONE calibrated scale -- expected burned pixels per chip.
 
-    .venv/bin/python scripts/analysis/make_risk_figure_2024.py
+    .venv/bin/python scripts/figures/make_risk_figure_2024.py
 
 Original v2 inputs (factored_v1 2024, one 7296x6272 EPSG:4326 grid):
   out/baselines/factored_v1/2024_out.tif        risk mosaic (raw probability)
@@ -42,33 +40,24 @@ Original v2 inputs (factored_v1 2024, one 7296x6272 EPSG:4326 grid):
 
 import argparse
 import os
-import sys
 
 import numpy as np
 import pandas as pd
 
-# Sibling import: the script's own directory is sys.path[0] when run directly, so
-# the per-predictor math stays defined in exactly one place.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from scatter_expected_actual import (  # noqa: E402
-    GRID,
-    INK_PRIMARY,
-    INK_SECONDARY,
-    ONE_TO_ONE,
-    POINT,
-    SURFACE,
-    chip_pairs,
-    deflate,
-    load_calibrator,
-    fit_stats,
-)
+from aic_risk_modeling.eval.calibration import load_calibrator, to_prob
+from aic_risk_modeling.eval.chips import basin_mask, chip_pairs, read_window
+from aic_risk_modeling.eval.metrics import fit_stats
+from style import (CALIBRATOR, INK_PRIMARY, INK_SECONDARY, LABEL_DIR, RISK_CMAP, SHP,
+                   SURFACE, save_figure, style_axes)
+
+POINT = "#2a78d6"
+ONE_TO_ONE = "#8a8880"
 
 # Okabe-Ito colourblind-safe trio, reused for each chip across A, B and C.
 CHIP_COLORS = {"under": "#0072b2", "right": "#009e73", "over": "#d55e00"}
 CHIP_LABELS = {"under": "Under-predicted", "right": "Well-predicted",
                "over": "Over-predicted"}
 CHIP_ORDER = ["under", "right", "over"]  # top-to-bottom in panels B and C
-RISK_CMAP = "YlOrRd"
 BURN_CMAP = ["#f3ede2", "#7f0000"]  # unburned cream, burned dark red (YlOrRd top)
 # Diverging per-tile error map (panel B): under-predicted = blue, on-target = white,
 # over-predicted = vermillion -- same over/under semantics as CHIP_COLORS.
@@ -79,11 +68,6 @@ ERROR_NEUTRAL = "#dedcd6"  # tiles below the activity floor (no reliable error s
 # --------------------------------------------------------------------------- #
 # Per-chip table (single pass over the 1,813 tiles)
 # --------------------------------------------------------------------------- #
-def to_prob(q, pos_weight, level=1.0, cal=None):
-    """Model score -> burn probability: the frozen calibrator if given, else deflate / level."""
-    return cal(q) if cal is not None else deflate(q, pos_weight) / level
-
-
 def per_chip_table(chip_dir, clim_path, prev_label_path, pos_weight, level=1.0, cal=None):
     """One row per chip: id, geographic bounds, actual + 3 expected burned-pixel counts."""
     import rasterio as rio
@@ -118,12 +102,8 @@ def per_chip_table(chip_dir, clim_path, prev_label_path, pos_weight, level=1.0, 
 
 
 def _window_sum(src, bounds, chip_shape, binarize):
-    """Sum a full-basin raster over one chip's window (mirrors raster_series)."""
-    from rasterio.windows import from_bounds
-    win = from_bounds(*bounds, transform=src.transform).round_offsets().round_lengths()
-    v = src.read(1, window=win).astype(np.float64)
-    if v.shape != chip_shape:
-        raise ValueError(f"window {v.shape} != chip {chip_shape}")
+    """Sum a full-basin raster over one chip's window."""
+    v = read_window(src, bounds, chip_shape).astype(np.float64)
     return float((v > 0).sum() if binarize else v.sum())
 
 
@@ -177,10 +157,8 @@ def select_chips(df, min_actual_pct, cap):
 # --------------------------------------------------------------------------- #
 def read_basin_map(map_path, shp_path, target_width, pos_weight, level=1.0, cal=None):
     """Decimated, deflated risk map masked to the RAISG basin. Returns (arr, extent, vmax)."""
-    import geopandas as gpd
     import rasterio as rio
     from rasterio.enums import Resampling
-    from rasterio.features import rasterize
     from rasterio.transform import from_bounds as tr_from_bounds
 
     with rio.open(map_path) as s:
@@ -191,11 +169,9 @@ def read_basin_map(map_path, shp_path, target_width, pos_weight, level=1.0, cal=
         crs = s.crs
     arr = to_prob(np.clip(q, 0.0, 1.0), pos_weight, level, cal)
 
-    gdf = gpd.read_file(shp_path).to_crs(crs)  # draw in the raster's own CRS
     tr = tr_from_bounds(b.left, b.bottom, b.right, b.top, w, h)
-    basin = rasterize(((g, 1) for g in gdf.geometry), out_shape=(h, w),
-                      transform=tr, fill=0, dtype="uint8")
-    arr = np.where(basin > 0, arr, np.nan)
+    inside, gdf = basin_mask(shp_path, crs, tr, (h, w))  # draw in the raster's own CRS
+    arr = np.where(inside, arr, np.nan)
 
     vmax = float(np.nanpercentile(arr, 98))
     extent = [b.left, b.right, b.bottom, b.top]
@@ -350,13 +326,7 @@ def build_figure(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weight, out
     ax_c = fig.add_axes([BX0 + 0.064, BY0 + 0.058,
                          (XM - BX0) - 0.064 - 0.030,
                          (YM - BY0) - 0.058 - 0.034])
-    ax_c.set_facecolor(SURFACE)
-    ax_c.grid(True, color=GRID, linewidth=0.8, zorder=0)
-    ax_c.set_axisbelow(True)
-    for sp in ("top", "right"):
-        ax_c.spines[sp].set_visible(False)
-    for sp in ("left", "bottom"):
-        ax_c.spines[sp].set_color(GRID)
+    style_axes(ax_c)
     x, y = df["exp_factored"].values, df["actual"].values
     ax_c.plot([0, hi], [0, hi], "--", color=ONE_TO_ONE, linewidth=1.3, zorder=2)
     ax_c.scatter(x, y, s=9, color=POINT, alpha=0.22, linewidths=0, zorder=3)
@@ -428,11 +398,8 @@ def build_figure(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weight, out
                  bbox=dict(boxstyle="square,pad=0.15", facecolor="white",
                            edgecolor="none"))
 
-    os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
-    fig.savefig(out_png, dpi=300, facecolor=SURFACE)
-    fig.savefig(os.path.splitext(out_png)[0] + ".pdf", facecolor=SURFACE)
+    save_figure(fig, out_png, "figure")
     plt.close(fig)
-    print(f"[figure] wrote {out_png} (+ .pdf)")
 
 
 def build_figure_3panel(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weight,
@@ -496,13 +463,7 @@ def build_figure_3panel(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weig
     hi = cap * 1.05
     ax_b = fig.add_axes([XB + 0.072, YB + 0.052, BX1 - (XB + 0.072) - 0.012,
                          BY1 - (YB + 0.052) - 0.016])
-    ax_b.set_facecolor(SURFACE)
-    ax_b.grid(True, color=GRID, linewidth=0.8, zorder=0)
-    ax_b.set_axisbelow(True)
-    for sp in ("top", "right"):
-        ax_b.spines[sp].set_visible(False)
-    for sp in ("left", "bottom"):
-        ax_b.spines[sp].set_color(GRID)
+    style_axes(ax_b)
     x, y = df["exp_factored"].values, df["actual"].values
     ax_b.plot([0, hi], [0, hi], "--", color=ONE_TO_ONE, linewidth=1.3, zorder=2)
     ax_b.scatter(x, y, s=9, color=POINT, alpha=0.22, linewidths=0, zorder=3)
@@ -570,11 +531,8 @@ def build_figure_3panel(df, picks, cap, map_arr, map_extent, vmax, gdf, pos_weig
                  bbox=dict(boxstyle="square,pad=0.15", facecolor="white",
                            edgecolor="none"))
 
-    os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
-    fig.savefig(out_png, dpi=300, facecolor=SURFACE)
-    fig.savefig(os.path.splitext(out_png)[0] + ".pdf", facecolor=SURFACE)
+    save_figure(fig, out_png, "figure")
     plt.close(fig)
-    print(f"[figure] wrote {out_png} (+ .pdf)")
 
 
 def main():
@@ -587,18 +545,18 @@ def main():
     ap.add_argument("--chip-dir", default=None, help="default <pred-root>/<year>/chips")
     ap.add_argument("--map", default=None, help="default <pred-root>/<year>/preds_out.tif")
     ap.add_argument("--climatology",
-                    default="out/label_mosaics_v3p_union4/climatology_2013_2023.tif")
-    ap.add_argument("--label-dir", default="out/label_mosaics_v3p_union4")
+                    default=f"{LABEL_DIR}/climatology_2013_2023.tif")
+    ap.add_argument("--label-dir", default=LABEL_DIR)
     ap.add_argument("--level-factor", type=float, default=None,
                     help="with --calibrator '': divide the deflated output by this "
                          "(deflated expected / actual on years other than --year; "
                          "0.717 = fwdpair_2022 on 2022-23, 0.774 = on 2022 alone)")
-    ap.add_argument("--calibrator", default="out/cv/calibrator_platt_cv2018_2023.npz",
+    ap.add_argument("--calibrator", default=CALIBRATOR,
                     metavar="NPZ",
                     help="frozen Platt calibrator (calibrated_year_totals.py "
                          "--save-calibrator); replaces deflate + --level-factor. "
                          "Pass '' to use --level-factor instead")
-    ap.add_argument("--shp", default="../data/Limites_RAISG_2025/Lim_Raisg.shp")
+    ap.add_argument("--shp", default=SHP)
     ap.add_argument("--pos-weight", type=float, default=10.0)
     ap.add_argument("--min-actual-pct", type=float, default=75.0,
                     help="only chips at/above this actual-burn percentile are eligible")

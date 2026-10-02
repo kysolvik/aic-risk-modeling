@@ -5,10 +5,6 @@ expected, actual, expected_adj) and plots the calibrated expected burned
 pixels (``expected_adj``) against the actual burned pixels. Vertical splits
 mark the model's train / validation / test / forecast regions; predict-only
 years (no actual label) draw the expected point and a "?" only.
-
-House style (copied per-script; there is no shared plotting-utils module):
-INK/SURFACE/GRID inks + the Okabe-Ito colourblind-safe palette, matching
-``scatter_expected_actual.py`` / ``make_risk_figure_2024.py``.
 """
 
 import argparse
@@ -16,11 +12,8 @@ import argparse
 import matplotlib.pyplot as plt
 import pandas as pd
 
-# --- House style (see scatter_expected_actual.py; copied, not imported) ------
-INK_PRIMARY = "#0b0b0b"
-INK_SECONDARY = "#52514e"
-SURFACE = "#fcfcfb"
-GRID = "#e4e3de"
+from style import GRID, INK_PRIMARY, INK_SECONDARY, SURFACE
+
 # Okabe-Ito trio, aligned with CHIP_COLORS in make_risk_figure_2024.py
 EXPECTED = "#0072b2"   # blue
 ACTUAL = "#d55e00"     # vermillion

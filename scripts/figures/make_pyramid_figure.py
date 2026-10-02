@@ -15,31 +15,29 @@ default; `--score_pool max` pools every series (models and baselines) by the
 block MAX instead ("highest-risk pixel in the block"). A block is positive if
 any pixel in it burned. PR-AUC is a threshold-free ranking
 metric; Cohen's kappa is chance-corrected agreement, reported as the best value
-over a swept threshold (see `pyramid_compare._best_kappa` for why the threshold
+over a swept threshold (see `eval.metrics.best_kappa` for why the threshold
 is swept, not fixed). Read the curves ACROSS models at a fixed scale, not along
 the x axis -- block prevalence rises with block size, so PR-AUC rises with it.
 
-The per-block metrics are computed with `pyramid_compare.model_levels` /
-`baseline_levels` (reused, single source of truth) and cached to a CSV; pass
-`--from_csv` to restyle without the ~minutes-long recompute.
+The per-block metrics are cached to a CSV; pass `--from_csv` to restyle without
+the ~minutes-long recompute.
 
-    .venv/bin/python scripts/analysis/make_pyramid_figure.py
-    .venv/bin/python scripts/analysis/make_pyramid_figure.py --from_csv out/figures/fig_pyramid_fwdpair_2022.csv
+    .venv/bin/python scripts/figures/make_pyramid_figure.py
+    .venv/bin/python scripts/figures/make_pyramid_figure.py --from_csv out/figures/fig_pyramid_fwdpair_2022.csv
 """
 
 import argparse
+import csv
 import os
-import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pyramid_compare import (  # noqa: E402
-    DEFAULT_BLOCKS, GRID, INK_SECONDARY, SURFACE,
-    baseline_levels, model_levels, write_csv,
-)
+from aic_risk_modeling.eval.chips import chip_pairs, read_window
+from aic_risk_modeling.eval.metrics import best_f1, best_kappa, binary_metrics
+from style import INK_SECONDARY, SURFACE, save_figure, style_axes
 
-KM_PER_PIXEL = 0.463312716528  # v3 MODIS sinusoidal grid (pyramid_compare's is the v2 0.005 deg)
+DEFAULT_BLOCKS = [1, 2, 4, 8, 16, 32, 64, 128]
+KM_PER_PIXEL = 0.463312716528  # v3 MODIS sinusoidal grid
 
 # --------------------------------------------------------------------------- #
 # Series: (name, prediction dir, colour, linestyle, marker). Models first
@@ -70,6 +68,156 @@ DEFAULT_PREDS_ROOT = "out/cv/preds"
 # thresholds, still computed into the CSV) was a second panel until 9/30 --
 # add ("kappa", "Cohen's κ", (0.0, 0.9)) back to plot it.
 PANELS = [("pr_auc", "PR-AUC", (0.0, 1.0))]
+
+
+def _block_max_pool(arr, block):
+    """Non-overlapping ``block`` x ``block`` max-pool of a 2-D array.
+
+    When H/W are not multiples of ``block`` the array is zero-padded on the
+    bottom/right first. Zero padding is safe for both the fire-probability and
+    the 0/1 label fields because 0 is the minimum possible value, so a partial
+    edge block's max is effectively taken over its real pixels only.
+    """
+    block = int(block)
+    if block <= 1:
+        return np.asarray(arr)
+    arr = np.asarray(arr)
+    height, width = arr.shape
+    pad_h, pad_w = (-height) % block, (-width) % block
+    if pad_h or pad_w:
+        arr = np.pad(arr, ((0, pad_h), (0, pad_w)), constant_values=0)
+    padded_h, padded_w = arr.shape
+    return arr.reshape(padded_h // block, block,
+                       padded_w // block, block).max(axis=(1, 3))
+
+
+def _block_mean_pool(arr, block):
+    """Non-overlapping ``block`` x ``block`` MEAN-pool of a 2-D array.
+
+    Unlike `_block_max_pool`, partial edge blocks cannot be zero-padded without
+    biasing the mean downward, so this requires H and W to be exact multiples of
+    ``block``. Chips are 128x128 and the blocks are powers of two, so that holds
+    here; the check exists to fail loudly if a differently-shaped chip appears.
+    """
+    block = int(block)
+    if block <= 1:
+        return np.asarray(arr, dtype=np.float32)
+    arr = np.asarray(arr, dtype=np.float32)
+    height, width = arr.shape
+    if height % block or width % block:
+        raise ValueError(f"mean-pool needs H,W divisible by {block}; got {arr.shape}")
+    return arr.reshape(height // block, block,
+                       width // block, block).mean(axis=(1, 3))
+
+
+def _pool(arr, block, how):
+    return _block_max_pool(arr, block) if how == "max" else _block_mean_pool(arr, block)
+
+
+def _inventory(spec):
+    """[(out_path, mask_path, year)] for an explicit [(chips_dir, year), ...] spec."""
+    return [(o, m, str(year)) for chips_dir, year in spec for o, m in chip_pairs(chips_dir)]
+
+
+def _levels_from_chips(score_iter, blocks, score_pool):
+    """Per-block metrics from an iterator of (score_2d, label_2d) chip pairs."""
+    acc = {b: {"pa_s": [], "f1_s": [], "y": []} for b in blocks}
+    for score, label in score_iter:
+        lab_f = (np.asarray(label) > 0).astype(np.float32)
+        for b in blocks:
+            acc[b]["pa_s"].append(_pool(score, b, score_pool).ravel())
+            acc[b]["f1_s"].append(_pool(score, b, "max").ravel())
+            acc[b]["y"].append((_block_max_pool(lab_f, b) > 0).ravel())
+    levels = []
+    for b in blocks:
+        y = np.concatenate(acc[b]["y"])
+        pa_s = np.concatenate(acc[b]["pa_s"])
+        f1_s = np.concatenate(acc[b]["f1_s"])
+        prev = float(y.mean())
+        pa = binary_metrics(y, pa_s > 0.5, scores=pa_s)
+        try:
+            from sklearn.metrics import roc_auc_score
+            roc = float(roc_auc_score(y, pa_s)) if 0.0 < prev < 1.0 else float("nan")
+        except Exception:
+            roc = float("nan")
+        f1_val, f1_p, f1_r, f1_thr = best_f1(y, f1_s)
+        # Best-kappa on the SAME mean-pooled score PR-AUC/ROC-AUC use, so the
+        # figure keeps one score convention across panels; threshold swept for
+        # the same calibration reason as best-F1.
+        kappa_val, kappa_thr = best_kappa(y, pa_s)
+        levels.append({
+            "block": b, "n_blocks": int(y.size),
+            "prevalence": prev,
+            "pr_auc": float(pa["pr_auc"]),
+            "roc_auc": roc,
+            "kappa": kappa_val, "kappa_threshold": kappa_thr,
+            "lift": float(pa["pr_auc"]) / prev if prev > 0 else float("nan"),
+            "f1": f1_val, "precision": f1_p, "recall": f1_r,
+            "f1_threshold": f1_thr,
+        })
+        acc[b] = None  # release
+    return levels
+
+
+def model_levels(spec, blocks, score_pool):
+    import rasterio as rio
+
+    def gen():
+        for out_path, mask_path, _ in _inventory(spec):
+            with rio.open(out_path) as s:
+                score = s.read(1).astype(np.float32)
+            with rio.open(mask_path) as m:
+                yield score, m.read(1)
+    return _levels_from_chips(gen(), blocks, score_pool)
+
+
+def baseline_levels(spec, kind, label_dir, clim_path, blocks, score_pool):
+    """Levels for a free baseline scored on the same chips as the models.
+
+    `kind` is "last_year" (previous year's burn mask) or "climatology" (the
+    prebuilt mean-burn-frequency raster). Both come from full-basin mosaics read
+    through a window matching each chip's bounds.
+    """
+    import rasterio as rio
+
+    handles = {}
+
+    def _src(path):
+        if path not in handles:
+            handles[path] = rio.open(path)
+        return handles[path]
+
+    def gen():
+        for out_path, mask_path, year in _inventory(spec):
+            with rio.open(mask_path) as m:
+                label = m.read(1)
+                bounds = m.bounds
+            if kind == "climatology":
+                src = _src(clim_path)
+            else:
+                src = _src(os.path.join(label_dir, f"label_{int(year) - 1}.tif"))
+            score = read_window(src, bounds, label.shape).astype(np.float32)
+            if kind == "last_year":
+                score = (score > 0).astype(np.float32)
+            yield score, label
+    try:
+        return _levels_from_chips(gen(), blocks, score_pool)
+    finally:
+        for h in handles.values():
+            h.close()
+
+
+def write_csv(rows, path):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    cols = ["model", "block", "km", "n_blocks", "prevalence", "pr_auc", "roc_auc",
+            "kappa", "kappa_threshold", "lift", "f1", "precision", "recall",
+            "f1_threshold"]
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for r in rows:
+            w.writerow({c: r[c] for c in cols})
+    print(f"[pyramid] wrote {path}")
 
 
 def _style_for(name):
@@ -104,13 +252,7 @@ def plot(series, blocks, out_png):
     axes = axes[0]
     xs = np.arange(len(blocks))
     for ax, (metric, ylabel, ylim) in zip(axes, PANELS):
-        ax.set_facecolor(SURFACE)
-        ax.grid(True, color=GRID, linewidth=0.8, zorder=0)
-        ax.set_axisbelow(True)
-        for spine in ("top", "right"):
-            ax.spines[spine].set_visible(False)
-        for spine in ("left", "bottom"):
-            ax.spines[spine].set_color(GRID)
+        style_axes(ax)
         for s in series:
             col, ls, mk, is_model = _style_for(s["name"])
             is_random = s["name"] == RANDOM[0]
@@ -135,12 +277,8 @@ def plot(series, blocks, out_png):
                fontsize=9.5, labelcolor=INK_SECONDARY,
                bbox_to_anchor=(0.5, 0.0), columnspacing=1.6, handlelength=2.6)
     fig.tight_layout(rect=[0, 0.1, 1, 1.0])
-    os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
-    fig.savefig(out_png, dpi=300, facecolor=SURFACE)
-    fig.savefig(os.path.splitext(out_png)[0] + ".pdf", facecolor=SURFACE)
+    save_figure(fig, out_png, "pyramid_fig")
     plt.close(fig)
-    print(f"[pyramid_fig] wrote {out_png}")
-    print(f"[pyramid_fig] wrote {os.path.splitext(out_png)[0] + '.pdf'}")
 
 
 def build_climatology(label_dir, years, out_path):
@@ -165,7 +303,6 @@ def build_climatology(label_dir, years, out_path):
 
 
 def load_from_csv(path):
-    import csv
     by, order = {}, []
     for r in csv.DictReader(open(path)):
         name = r["model"]
@@ -228,16 +365,14 @@ def main():
     series, rows = [], []
     for name, arch, *_ in MODELS:
         print(f"[pyramid_fig] {name}: {arch}/{args.fold} {years}", flush=True)
-        levels = model_levels(inventory(arch), blocks, args.score_pool, "max",
-                              0.5, "best")
+        levels = model_levels(inventory(arch), blocks, args.score_pool)
         series.append({"name": name, "levels": levels})
         rows += [{"model": name, **lvl} for lvl in levels]
 
     ref = inventory(MODELS[0][1])  # score baselines on the same chips
     for name, kind, *_ in BASELINES:
         print(f"[pyramid_fig] baseline {name}", flush=True)
-        levels = baseline_levels(ref, kind, args.label_dir, clim,
-                                 blocks, args.score_pool, "max", 0.5, "best")
+        levels = baseline_levels(ref, kind, args.label_dir, clim, blocks, args.score_pool)
         series.append({"name": name, "levels": levels})
         rows += [{"model": name, **lvl} for lvl in levels]
 

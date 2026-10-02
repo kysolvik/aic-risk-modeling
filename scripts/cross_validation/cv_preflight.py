@@ -20,14 +20,11 @@ import sys
 
 import torch
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-sys.path.insert(0, os.path.join(REPO, "src"))
-sys.path.insert(0, HERE)
+import cv_make_folds as mk
+from aic_risk_modeling.train import trainer
+from aic_risk_modeling.train.factored import YearOffset
 
-from aic_risk_modeling.train.factored import YearOffset      # noqa: E402
-from aic_risk_modeling.train import trainer                  # noqa: E402
-import cv_make_folds as mk                                   # noqa: E402
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 PROTOCOL = os.path.join(REPO, "out", "cv", "protocol.csv")
 

@@ -18,14 +18,11 @@ import argparse
 import csv
 import glob
 import os
-import sys
 
 import pandas as pd
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-import cv_collect_results as cc  # noqa: E402
-import cv_make_folds as mk  # noqa: E402
+import cv_collect_results as cc
+import cv_make_folds as mk
 
 PARTS_DIR = os.path.join(cc.OUT_DIR, "score_parts")
 

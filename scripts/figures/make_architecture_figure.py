@@ -19,7 +19,7 @@ npz and the protocol CSV -- and printed as a summary table before drawing. Box
 positions and wording live in the dicts below; `check_layout()` reports any text
 outside its box, overlapping text, or an arrow through text (must print OK).
 
-    .venv/bin/python scripts/analysis/make_architecture_figure.py
+    .venv/bin/python scripts/figures/make_architecture_figure.py
 
 House style copied per script (see make_risk_landscape_figure.py); PNG @ 300 dpi +
 PDF in out/figures/. No title or baked caption.
@@ -29,20 +29,12 @@ import argparse
 import csv
 import json
 import os
-import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from make_shapley_figure import GROUPS as DRIVER_GROUPS  # noqa: E402
+from make_shapley_figure import GROUPS as DRIVER_GROUPS
+from style import CALIBRATOR, INK_PRIMARY, INK_SECONDARY, SURFACE, save_figure
 
-# --------------------------------------------------------------------------- #
-# House style (copied per-script)
-# --------------------------------------------------------------------------- #
-INK_PRIMARY = "#0b0b0b"
-INK_SECONDARY = "#52514e"
-SURFACE = "#fcfcfb"
-GRID = "#e4e3de"
 INPUT_FILL = "#ffffff"
 ENCODER_FILL = "#f2f1ee"
 TERM_FILL = "#f7f3ea"
@@ -58,7 +50,6 @@ C_FORECAST = "#52514e"
 ARCH = "factored_v3p_union4_monthlyattn_wide_yeargain"
 CONFIG = f"configs/cv/{ARCH}/final_all.json"
 GAMMA = "out/cv/gamma/gamma_v3_patched_bd_2002_burn_final_all.json"
-CALIBRATOR = "out/cv/calibrator_platt_cv2018_2023.npz"
 PROTOCOL = "out/cv/protocol.csv"
 DRIVER_SPEC = "configs/attribution_drivers_v3p_yeargain_yearsplit.json"
 PIXEL_M = 463.312716528           # v3 grid (MODIS sinusoidal 463 m)
@@ -539,10 +530,8 @@ def main():
         ax = fig.add_axes([0.13, 0.15, 0.85, 0.68])
         panel_b(fig, ax, f, pt=13, letter=False)
         out = os.path.join(os.path.dirname(a.out_png), "fig_timeline.png")
-        fig.savefig(out, dpi=300, facecolor=SURFACE)
-        fig.savefig(os.path.splitext(out)[0] + ".pdf", facecolor=SURFACE)
+        save_figure(fig, out, "arch_fig")
         plt.close(fig)
-        print(f"[arch_fig] wrote {out} (+ .pdf)")
         return
     fig_w = W_UNITS / 10
     a_h = (H_UNITS - Y_MIN) / 10
@@ -556,11 +545,8 @@ def main():
     panel_b(fig, ax_b, f)
     check_layout(fig, ax_a, texts, boxes, paths)
 
-    os.makedirs(os.path.dirname(os.path.abspath(a.out_png)), exist_ok=True)
-    fig.savefig(a.out_png, dpi=300, facecolor=SURFACE)
-    fig.savefig(os.path.splitext(a.out_png)[0] + ".pdf", facecolor=SURFACE)
+    save_figure(fig, a.out_png, "arch_fig")
     plt.close(fig)
-    print(f"[arch_fig] wrote {a.out_png} (+ .pdf)")
 
 
 if __name__ == "__main__":
