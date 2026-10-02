@@ -84,7 +84,7 @@ def main():
     # loader is what predict.py uses, so the chips line up by construction.
     ds = arm.train.build_merged_dataset(
         [args.data_dir], args.tfrecord_pattern, batch_size=args.batch_size,
-        cache=False, axis="examples", shuffle=False)
+        shuffle=False)
 
     os.makedirs(args.output_dir, exist_ok=True)
     with rio.open(args.profile_template) as src:

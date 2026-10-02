@@ -97,8 +97,7 @@ def check_build(canon="fwd_2021", test_year=2021):
     cfg["decoder_config"]["year_offset"]["coeffs_path"] = os.path.join(
         GAMMA_DIR, f"gamma_{canon}.json")
     branch_models = trainer.build_all_models(cfg["input_features"])
-    model = trainer.build_decoder(cfg["decoder"], branch_models,
-                                  cfg["decoder_config"], num_classes=cfg.get("num_classes") or 1)
+    model = trainer.build_decoder(cfg["decoder"], branch_models, cfg["decoder_config"])
     model.eval()
     assert isinstance(model.year, YearOffset), "year term not wired"
     off = float(model.year(torch.tensor([[float(test_year)]])).flatten()[0])
@@ -194,8 +193,7 @@ def check_protocol():
         if yo is not None:
             yo["coeffs_path"] = os.path.join(REPO, r["gamma_local"])
         branch_models = trainer.build_all_models(cfg["input_features"])
-        model = trainer.build_decoder(cfg["decoder"], branch_models, cfg["decoder_config"],
-                                      num_classes=cfg.get("num_classes") or 1)
+        model = trainer.build_decoder(cfg["decoder"], branch_models, cfg["decoder_config"])
         n_params = sum(p.numel() for p in model.parameters())
         msg = f"  built {arch} from {r['config_local']}: {n_params:,} params"
         if yo is not None:

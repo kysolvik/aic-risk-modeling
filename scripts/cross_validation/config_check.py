@@ -47,11 +47,9 @@ def synth_shape(spec):
 def check(config_path):
     cfg = json.load(open(config_path))
     name = os.path.basename(config_path)
-    print(f"\n=== {name}  decoder={cfg['decoder']}  num_classes={cfg.get('num_classes') or 1} ===")
+    print(f"\n=== {name}  decoder={cfg['decoder']} ===")
     branches = trainer.build_all_models(cfg["input_features"])
-    model = trainer.build_decoder(cfg["decoder"], branches,
-                                  cfg.get("decoder_config"),
-                                  num_classes=cfg.get("num_classes") or 1)
+    model = trainer.build_decoder(cfg["decoder"], branches, cfg.get("decoder_config"))
     inputs = {g: torch.randn(*synth_shape(spec))
               for g, spec in cfg["input_features"].items()}
     # A year_offset (gamma) arch looks md_year up in its table and refuses anything
