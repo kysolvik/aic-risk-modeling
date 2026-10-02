@@ -15,7 +15,7 @@ lives only in the input TFRecords, not in the prediction chips.
 This script reads that band straight out of the input TFRecords and writes it
 through the *identical* georeferencing path as the predictions -- it imports and
 reuses `predict.write_batch` with the same center coords (`md_x`/`md_y`), profile
-template and `--edge_crop`/`--invert_yres` flags. So each written
+template and `--edge_crop` flag. So each written
 `forest_<x>-<y>.tif` registers pixel-for-pixel with the matching
 `out_<x>-<y>.tif` and shares the exact `<x>-<y>` filename, and evaluation can join
 the two by filename.
@@ -62,13 +62,6 @@ def parse_args():
     ap.add_argument("--batch_size", type=int, default=4)
     ap.add_argument("--edge_crop", type=int, default=0,
                     help="MUST match the --edge_crop used to write the predictions")
-    # MUST match how the predictions were written so the forest chips register
-    # with the out_/mask_ chips. Default is no flip (entrypoint INVERT_YRES=0,
-    # north-up assets/example_v3.tif); fullgrid_v2 predictions were written with
-    # --invert_yres against the +0.005 yres assets/example.tif.
-    ap.add_argument("--invert_yres", action="store_true",
-                    help="flip rows + y res; use only for predictions written "
-                         "with --invert_yres (fullgrid_v2 + assets/example.tif)")
     ap.add_argument("--profile_template", default=DEFAULT_PROFILE_TEMPLATE,
                     help="GeoTIFF supplying the output CRS and pixel size")
     ap.add_argument("--max_chips", type=int, default=None,
@@ -105,7 +98,7 @@ def main():
         # a same-shaped placeholder it will never write.
         placeholder = np.zeros_like(forest)
         write_batch(forest, placeholder, xs, ys, base_transform, profile,
-                    args.output_dir, args.edge_crop, args.invert_yres,
+                    args.output_dir, args.edge_crop,
                     out_prefix="forest", write_mask=False)
         n_chips += forest.shape[0]
         if args.max_chips and n_chips >= args.max_chips:

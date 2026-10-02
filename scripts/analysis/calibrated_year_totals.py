@@ -4,8 +4,8 @@ Turns per-year prediction rasters into the CSV that
 ``scripts/analysis/plot_expected_actual.py`` draws, but replaces the ad-hoc
 constant bias factor (the old ``expected_adj = expected * 1.2``) with a *proper*
 post-hoc probability calibrator fit through the eval module
-(``aic_risk_modeling.eval.calibration.fit_calibrator``: platt / isotonic /
-temperature). Expected burned pixels for a year = sum of the calibrated
+(``aic_risk_modeling.eval.calibration.fit_calibrator``: platt / isotonic).
+Expected burned pixels for a year = sum of the calibrated
 per-pixel fire probabilities; actual = count of burned label pixels.
 
 THE ONE RULE THAT MAKES THIS HONEST: the calibrator is fit ONCE, on the
@@ -199,7 +199,7 @@ def main():
     ap.add_argument('--eval-years', nargs='+', type=int, required=True,
                     help='year(s) to compute expected/actual totals for')
     ap.add_argument('--method', default='platt',
-                    choices=('none', 'temperature', 'platt', 'isotonic'),
+                    choices=('none', 'platt', 'isotonic'),
                     help="eval-module calibrator to fit (default platt, chosen 9/30 "
                          "on CV 2018-23: ties isotonic, 2 params, extrapolates); "
                          "'none' just sums raw probabilities")
