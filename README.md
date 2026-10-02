@@ -135,6 +135,16 @@ Options:
 
 > Note: predictions and ground truth must use the same format — both CSV or both GeoTIFF.
 
+## Tests
+
+```bash
+uv sync --extra torch_cpu --group dev
+uv run pytest
+```
+
+CI (`.github/workflows/tests.yml`) runs the same on pushes to `main` and on pull requests.
+Tests that need local-only files (checkpoints in `out/`, the chip panel) are skipped.
+
 ## License
 
 MIT See [LICENSE](LICENSE).
