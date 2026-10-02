@@ -24,8 +24,7 @@ from google.cloud import storage
 from urllib.parse import urlparse
 
 from aic_risk_modeling.train import data_loader, models, losses, data_norm
-from aic_risk_modeling.train.metrics import (
-    SegmentationMetrics, MulticlassSegmentationMetrics)
+from aic_risk_modeling.train.metrics import SegmentationMetrics
 
 # TensorFlow is only used for data loading; keep it off the GPU.
 tf.config.set_visible_devices([], "GPU")
@@ -90,14 +89,12 @@ def load_config(
 def _gcs_join(base: str, name: str) -> str:
     return base.rstrip("/") + "/" + name
 
-def build_decoder(decoder_type, branch_models, decoder_config=None,
-                  num_classes=1):
+def build_decoder(decoder_type, branch_models, decoder_config=None):
     function_name = f"decoder_{decoder_type}"
     try:
         # Attempt to get the function dynamically
         model_fn = getattr(models, function_name)
-        model = model_fn(branch_models, num_classes=num_classes,
-                         **(decoder_config or {}))
+        model = model_fn(branch_models, **(decoder_config or {}))
         print(f"Successfully initialized {decoder_type} model.")
 
     except AttributeError:
@@ -191,8 +188,7 @@ def load_model(model_path, map_location='cpu'):
     config = checkpoint['config']
     model = build_decoder(config['decoder'],
                           build_all_models(config['input_features']),
-                          config.get('decoder_config'),
-                          num_classes=config.get('num_classes') or 1)
+                          config.get('decoder_config'))
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     return model
@@ -218,31 +214,10 @@ def _cache_dataset_to_disk(dataset, cache_dir):
 
 
 def _torch_batches(dataset, device):
-    """Yield (inputs, labels, sample_weight[, soft_target]) as torch tensors.
-
-    sample_weight is None when the dataset yields plain (inputs, labels)
-    2-tuples (i.e. no per-pixel weighting configured). A 4th element appears
-    only for a confidence-weighted soft-label dataset; `labels` is ALWAYS the
-    hard label, so callers that only score or write labels can ignore the tail
-    with `for inputs, labels, weights, *_ in ...`."""
-    for batch in dataset.as_numpy_iterator():
-        soft = None
-        if len(batch) == 4:
-            inputs, labels, weights, soft = batch
-            soft = torch.as_tensor(soft).float().to(device)
-            weights = torch.as_tensor(weights).float().to(device)
-        elif len(batch) == 3:
-            inputs, labels, weights = batch
-            weights = torch.as_tensor(weights).float().to(device)
-        else:
-            inputs, labels = batch
-            weights = None
+    """Yield (inputs, labels) batches as torch tensors on `device`."""
+    for inputs, labels in dataset.as_numpy_iterator():
         inputs = {k: torch.as_tensor(v).to(device) for k, v in inputs.items()}
-        labels = torch.as_tensor(labels).float().to(device)
-        if soft is None:
-            yield inputs, labels, weights
-        else:
-            yield inputs, labels, weights, soft
+        yield inputs, torch.as_tensor(labels).float().to(device)
 
 
 def _cosine_warmup_schedule(optimizer, warmup_steps, decay_steps):
@@ -269,15 +244,12 @@ def _run_epoch(model, dataset, loss_function, device, metrics,
     amp_dtype = torch.float16 if amp_enabled else torch.bfloat16
 
     with torch.set_grad_enabled(training):
-        for inputs, labels, weights, *soft in _torch_batches(dataset, device):
+        for inputs, labels in _torch_batches(dataset, device):
             with torch.autocast(device_type=device.type, dtype=amp_dtype,
                                 enabled=amp_enabled):
                 preds = model(inputs)
             # preds are float32 (the fusion head opts out of autocast).
-            # The loss trains against the soft target when one is supplied;
-            # `labels` stays the hard label so the metrics below -- and every
-            # PR-AUC comparison built on them -- keep their frozen definition.
-            loss = loss_function(soft[0] if soft else labels, preds, weights)
+            loss = loss_function(labels, preds)
 
             if training:
                 optimizer.zero_grad(set_to_none=True)
@@ -322,7 +294,7 @@ class _BestTracker:
         return False
 
 
-def _monitoring(config, num_classes):
+def _monitoring(config):
     """(has_val, checkpoint_metric, early_stopping_metric) for a config.
 
     'val_data_dirs' may be omitted only with checkpoint_metric 'last' (train a
@@ -330,8 +302,7 @@ def _monitoring(config, num_classes):
     validation set to watch.
     """
     has_val = bool(config.get('val_data_dirs'))
-    checkpoint_metric = config.get(
-        'checkpoint_metric', 'fire_iou' if num_classes > 1 else 'pr_auc')
+    checkpoint_metric = config.get('checkpoint_metric', 'pr_auc')
     early_stopping_metric = config.get('early_stopping_metric',
                                        checkpoint_metric)
     if not has_val:
@@ -349,34 +320,17 @@ def run(config):
     steps_per_epoch = config.get('steps_per_epoch', 5000)
     weight_decay = config.get('weight_decay', 0.01)
     patience = config.get('early_stopping_patience', 4)
-    # num_classes == 1 is binary segmentation; >1 is multi-class (the output
-    # feature is left as raw integer class labels, e.g. viirs_type 0-4).
-    num_classes = config.get('num_classes') or 1
-    # Positive-class weight for the binary weighted losses; also the default
-    # weight for fire pixels of types not explicitly listed in 'sample_weight'.
     pos_weight = config.get('pos_weight', 9.0)
-    # Aggregate burn-area term options, used by 'weighted_bce_area'.
-    area_weight = config.get('area_loss_weight', 1.0)
-    area_block_size = config.get('area_block_size')
     # Fail before any data loads if the config can't be monitored.
-    has_val, checkpoint_metric, early_stopping_metric = _monitoring(
-        config, num_classes)
+    has_val, checkpoint_metric, early_stopping_metric = _monitoring(config)
 
-    # Get loss function
-    loss_function = losses.get_loss(config['loss_function'],
-                                    num_classes=num_classes,
-                                    class_weights=config.get('class_weights'),
-                                    pos_weight=pos_weight,
-                                    area_weight=area_weight,
-                                    area_block_size=area_block_size)
+    loss_function = losses.get_loss(config['loss_function'], pos_weight=pos_weight)
 
     # Get datasets
     training_ds = data_loader.build_merged_dataset(
         data_dirs=config['data_dirs'],
         tfrecord_pattern=config['tfrecord_pattern'],
         shuffle=True,
-        rename_dict=config.get('rename_dict', None),
-        axis=config['merge_axis'],
         batch_size=config['batch_size'],
         seed=seed,
     )
@@ -384,8 +338,6 @@ def run(config):
         data_dirs=config['val_data_dirs'],
         tfrecord_pattern=config['tfrecord_pattern'],
         shuffle=False,
-        rename_dict=config.get('rename_dict', None),
-        axis=config['merge_axis'],
         batch_size=config['batch_size'],
         seed=seed,
     ) if has_val else None
@@ -402,30 +354,16 @@ def run(config):
     if has_val:
         validation_ds = validation_ds.map(norm_func, num_parallel_calls=tf.data.AUTOTUNE)
 
-    # Select bands. An optional 'sample_weight' config block adds a per-pixel
-    # loss weight map (e.g. up-weighting fire types 3/4) to train and val.
-    sample_weight_config = config.get('sample_weight')
-    # A confidence block may stratify on a band that is ALSO a normalized model
-    # input, in which case its bin edges have to be put on the normalized scale
-    # -- silently comparing forest fractions against z-scores would collapse
-    # every pixel into one stratum for a whole run.
-    sample_weight_config = data_loader.resolve_stratifier_normalization(
-        sample_weight_config, normalize_list, robust_features,
-        data_norm.load_stats(stats_path))
     training_ds = data_loader.select_bands_transform(
         training_ds,
         input_feature_config=config['input_features'],
         output_feature_config=config['output_features'],
-        sample_weight_config=sample_weight_config,
-        pos_weight=pos_weight,
     )
     if has_val:
         validation_ds = data_loader.select_bands_transform(
             validation_ds,
             input_feature_config=config['input_features'],
             output_feature_config=config['output_features'],
-            sample_weight_config=sample_weight_config,
-            pos_weight=pos_weight,
         )
     # Optional: replay validation from local disk after epoch 1 (config key
     # 'val_cache_dir'). Needs ~10 MB/example free on that disk, and must be the
@@ -439,8 +377,7 @@ def run(config):
 
     # Build decoder (note: can build an identity decoder, if desired)
     model = build_decoder(config['decoder'], all_models,
-                          config.get('decoder_config'),
-                          num_classes=num_classes)
+                          config.get('decoder_config'))
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
@@ -459,21 +396,9 @@ def run(config):
     # Mixed precision (mirrors the old keras mixed_float16 policy)
     scaler = torch.amp.GradScaler(enabled=device.type == 'cuda')
 
-    # Multi-class tracks a confusion matrix and by default checkpoints on
-    # foreground IoU; binary keeps the streaming ROC/PR-AUC metrics and by
-    # default checkpoints on PR AUC. Any validation results key (e.g. 'loss')
-    # can be configured instead.
-    if num_classes > 1:
-        train_metrics = MulticlassSegmentationMetrics(num_classes)
-        val_metrics = MulticlassSegmentationMetrics(num_classes)
-    else:
-        # The area_ratio metric deflates predictions by pos_weight, but only
-        # for losses that actually train toward the inflated optimum.
-        metric_pos_weight = (
-            pos_weight
-            if config['loss_function'] in losses.POS_WEIGHT_LOSSES else 1.0)
-        train_metrics = SegmentationMetrics(pos_weight=metric_pos_weight)
-        val_metrics = SegmentationMetrics(pos_weight=metric_pos_weight)
+    # The area_ratio metric deflates predictions by the loss's pos_weight.
+    train_metrics = SegmentationMetrics(pos_weight=pos_weight)
+    val_metrics = SegmentationMetrics(pos_weight=pos_weight)
 
     # Early stopping watches its own (configurable) metric, defaulting to the
     # checkpoint metric, so e.g. checkpointing on val loss while stopping on
