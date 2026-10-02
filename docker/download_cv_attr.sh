@@ -2,22 +2,13 @@
 # Download the per-chip Shapley rasters from run_cv_attribute.sh and mosaic each year locally.
 # Usage: [YEARS=..] [FOLDS=..] [OUT_TAG=..] download_cv_attr.sh <arch> <stage>
 # Years short of EXPECTED_CHIPS are not mosaicked (MOSAIC_PARTIAL=1 overrides). Safe to rerun.
-set -euo pipefail
-cd "/home/ksolvik/research/firesat/risk_modeling/aic-risk-modeling"
+source "$(dirname "$0")/_cv_common.sh"
 
-ARCH="${1:?usage: download_cv_attr.sh <arch> <stage>}"
-STAGE="${2:?usage: download_cv_attr.sh <arch> <stage>}"
 EXPECTED_CHIPS="${EXPECTED_CHIPS:-2556}"
-GS="gs://aic-amazon"
-PROTOCOL="out/cv/protocol.csv"
 OUT_TAG="${OUT_TAG:-}"
 export PATH="$PWD/.venv/bin:$PATH"
 
-mapfile -t ROWS < <(python3 docker/cv_protocol_rows.py "$ARCH" "$STAGE" "$PROTOCOL")
-if [ "${#ROWS[@]}" -eq 0 ]; then
-    echo "[download_cv_attr] no rows for arch=$ARCH stage=$STAGE in $PROTOCOL" >&2
-    exit 1
-fi
+load_rows download_cv_attr
 
 short=()
 for line in "${ROWS[@]}"; do

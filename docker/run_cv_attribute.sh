@@ -1,24 +1,14 @@
 #!/usr/bin/env bash
 # Submit exact-Shapley driver attribution for a CV-protocol checkpoint to the aic-attribute
 # Cloud Run job, split per year into parallel executions by tfrecord shard (~19 h/year unsplit).
-# Usage: [DATA_VERSION=v3_patched] [YEARS=..] [GROUP_IDS=..] [OUT_TAG=..] run_cv_attribute.sh <arch> <stage>
+# Usage: [DATA_VERSION=..] [YEARS=..] [GROUP_IDS=..] [OUT_TAG=..] run_cv_attribute.sh <arch> <stage>
 # Chips upload even on failure; fetch and mosaic with download_cv_attr.sh (same OUT_TAG).
-set -euo pipefail
-cd "/home/ksolvik/research/firesat/risk_modeling/aic-risk-modeling"
+source "$(dirname "$0")/_cv_common.sh"
 
-ARCH="${1:?usage: run_cv_attribute.sh <arch> <stage>}"
-STAGE="${2:?usage: run_cv_attribute.sh <arch> <stage>}"
-
-REGION="${REGION:-us-east1}"
-PROJECT="${PROJECT:-macedo-lab-general-9051}"
-DATA_VERSION="${DATA_VERSION:-v3_patched}"
 TAG="${TAG:-latest}"
 DRIVERS="${DRIVERS:-gs://aic-amazon/configs/attribution_drivers_v3p_yeargain.json}"
 GROUP_IDS="${GROUP_IDS:-}"
 OUT_TAG="${OUT_TAG:-}"
-GS="gs://aic-amazon"
-PROTOCOL="out/cv/protocol.csv"
-PROFILE_TEMPLATE=/app/assets/example_v3.tif
 
 # Last digit of the shard index, size-balanced per year (fullgrid_v3_patched).
 declare -A GROUPS_BY_YEAR=(
@@ -35,20 +25,8 @@ if gsutil cat "$DRIVERS" | grep -q '"year_terms"' && [ "$TAG" = "latest" ]; then
     exit 1
 fi
 
-IMG=$REGION-docker.pkg.dev/$PROJECT/aic-containers/aic-predict:$TAG
-gcloud run jobs update aic-attribute --region="$REGION" --project="$PROJECT" --image="$IMG"
-CURRENT=$(gcloud run jobs describe aic-attribute --region="$REGION" --project="$PROJECT" \
-            --format='value(spec.template.spec.template.spec.containers[0].image)')
-if [ "$CURRENT" != "$IMG" ]; then
-    echo "REFUSING: job image is '$CURRENT', expected '$IMG'." >&2
-    exit 1
-fi
-
-mapfile -t ROWS < <(python3 docker/cv_protocol_rows.py "$ARCH" "$STAGE" "$PROTOCOL")
-if [ "${#ROWS[@]}" -eq 0 ]; then
-    echo "[run_cv_attribute] no rows for arch=$ARCH stage=$STAGE in $PROTOCOL" >&2
-    exit 1
-fi
+pin_image aic-attribute "$TAG"
+load_rows run_cv_attribute
 
 # Validate every year's groups before submitting anything.
 for line in "${ROWS[@]}"; do

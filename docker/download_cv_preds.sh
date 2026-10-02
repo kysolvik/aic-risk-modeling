@@ -1,24 +1,14 @@
 #!/usr/bin/env bash
 # Download finished CV-protocol predictions (from run_cv_predict.sh) into the tree cv_collect_results.py scores.
-# Usage: [DATA_VERSION=..] [MOSAIC_DIR=..] [YEARS=..] [FOLDS=..] download_cv_preds.sh <arch> <stage>
+# Usage: [MOSAIC_DIR=..] [YEARS=..] [FOLDS=..] download_cv_preds.sh <arch> <stage>
 # A run is finished once preds_mask.tif exists; it is also copied to $MOSAIC_DIR/label_<year>.tif
 # (skipped under YEARS: predict-only masks are placeholders). Safe to rerun.
-set -euo pipefail
-cd "/home/ksolvik/research/firesat/risk_modeling/aic-risk-modeling"
+source "$(dirname "$0")/_cv_common.sh"
 
-ARCH="${1:?usage: download_cv_preds.sh <arch> <stage>}"
-STAGE="${2:?usage: download_cv_preds.sh <arch> <stage>}"
+# Must hold THIS target's labels (the climatology reference reads them).
+MOSAIC_DIR="${MOSAIC_DIR:-out/label_mosaics_v3p_union4}"
 
-DATA_VERSION="${DATA_VERSION:-v3}"
-GS="gs://aic-amazon"
-PROTOCOL="out/cv/protocol.csv"
-MOSAIC_DIR="${MOSAIC_DIR:-out/label_mosaics_${DATA_VERSION}}"
-
-mapfile -t ROWS < <(python3 docker/cv_protocol_rows.py "$ARCH" "$STAGE" "$PROTOCOL")
-if [ "${#ROWS[@]}" -eq 0 ]; then
-    echo "[download_cv_preds] no rows for arch=$ARCH stage=$STAGE in $PROTOCOL" >&2
-    exit 1
-fi
+load_rows download_cv_preds
 mkdir -p "$MOSAIC_DIR"
 
 pending=()
