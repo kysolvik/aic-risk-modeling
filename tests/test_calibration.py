@@ -15,7 +15,7 @@ from aic_risk_modeling.eval.calibration import (
     plot_reliability_diagram,
     reliability_bins,
 )
-from aic_risk_modeling.eval.eval import calc_stats
+from aic_risk_modeling.eval.metrics import calc_stats
 
 
 def test_perfectly_calibrated_has_low_ece():
