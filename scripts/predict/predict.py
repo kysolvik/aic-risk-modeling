@@ -61,10 +61,6 @@ def parse_args():
         default=0
     )
     parser.add_argument(
-        '--invert_yres',
-        action='store_true'
-    )
-    parser.add_argument(
         '--stats_path',
         type=str,
         default=None,
@@ -133,24 +129,17 @@ def set_raw_x_y(features):
 
 # dtype to uint8, and specify LZW compression.
 def write_batch(outs, masks, xs, ys, base_transform, profile, output_dir,
-                edge_crop, invert_yres=False, band_names=None, out_prefix='out', write_mask=True):
+                edge_crop, band_names=None, out_prefix='out', write_mask=True):
     for i in range(len(outs)):
         out =outs[i]
         mask =masks[i]
         x = xs[i]
         y = ys[i]
-        # Binary preds are (H, W); multiclass are (H, W, num_classes). Give both
-        # an explicit band axis so we write one raster band per class.
+        # Predictions are (H, W); attribution bands are (H, W, n_bands).
         if out.ndim == 2:
             out = out[:, :, np.newaxis]
-        if invert_yres:
-            transform = Affine(base_transform[0], base_transform[1], x,
-                                        base_transform[3], -1*base_transform[4], y)
-            out = np.flip(out, 0)
-            mask = np.flip(mask, 0)
-        else:
-            transform = Affine(base_transform[0], base_transform[1], x,
-                                        base_transform[3], base_transform[4], y)
+        transform = Affine(base_transform[0], base_transform[1], x,
+                           base_transform[3], base_transform[4], y)
         if CENTERED:
             transform = transform*rio.Affine.translation(int(-out.shape[0]/2), int(-out.shape[1]/2))
         if edge_crop > 0:
@@ -168,7 +157,6 @@ def write_batch(outs, masks, xs, ys, base_transform, profile, output_dir,
                 f'{output_dir}/mask_{x}-{y}.tif', 'w', **profile) as dst_dataset:
                     dst_dataset.write(mask.astype(rio.int8), 1)
 
-        # One band per class (softmax probabilities); single band for binary.
         profile.update(dtype=rio.float32, count=n_bands)
         with rio.open(
             f'{output_dir}/{out_prefix}_{x}-{y}.tif', 'w', **profile) as dst_dataset:
@@ -186,12 +174,9 @@ def main():
     # Add the md_sidecar passthrough group at runtime (carries md_x_raw/md_y_raw).
     config = add_md_sidecar(config)
 
-    # Merged dataset test, merging along features-axis
     ds = arm.train.build_merged_dataset([args.data_dir],
                                         args.tfrecord_pattern,
                                         batch_size=args.batch_size,
-                                        cache=False,
-                                        axis='examples',
                                         shuffle=False,
                                         seed=args.seed
                                         )
@@ -219,8 +204,7 @@ def main():
     amp_dtype = torch.float16 if amp_enabled else torch.bfloat16
 
     # Set the output profile up before the loop: rasters are written per batch
-    # rather than accumulated, so a full grid stays flat in memory (a 5-class
-    # model writes num_classes+1 bands per chip, which adds up).
+    # rather than accumulated, so a full grid stays flat in memory.
     os.makedirs(args.output_dir, exist_ok=True)
     with rio.open(args.profile_template) as src:
         profile = src.profile
@@ -232,18 +216,11 @@ def main():
 
     n_chips = 0
     with torch.no_grad():
-        for inputs, labels, weights, *_ in tqdm(arm.train.trainer._torch_batches(ds, device),
+        for inputs, labels in tqdm(arm.train.trainer._torch_batches(ds, device),
                                    desc='Predicting', unit='batch'):
             with torch.autocast(device_type=device.type, dtype=amp_dtype,
                                 enabled=amp_enabled):
                 preds = model(inputs)
-            # Multiclass preds are (B, H, W, C): prepend the argmax class as an
-            # extra band. Binary preds are (B, H, W) and must not match here
-            # (shape[-1] is W for them, so a bare `shape[-1] > 1` misfires and
-            # corrupts the rasters with an argmax-over-width column).
-            if preds.ndim == 4 and preds.shape[-1] > 1:
-                p = torch.argmax(preds, dim=-1, keepdim=True)
-                preds = torch.cat([p.float(), preds], dim=-1)
 
             # md_sidecar is stacked [batch, 1, 2] -> (md_x_raw, md_y_raw)
             md_sidecar = inputs['md_sidecar']
@@ -252,7 +229,7 @@ def main():
 
             write_batch(preds.float().cpu().numpy(), labels.cpu().numpy(),
                         md_x_raw, md_y_raw, base_transform, profile,
-                        args.output_dir, args.edge_crop, args.invert_yres)
+                        args.output_dir, args.edge_crop)
 
             n_chips += int(labels.shape[0])
             if args.max_chips and n_chips >= args.max_chips:
