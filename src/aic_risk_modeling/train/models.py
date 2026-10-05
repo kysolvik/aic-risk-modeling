@@ -16,7 +16,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-PATCH_SIZE = 128  # Spatial size that non-image branches are broadcast to
+PATCH_SIZE = 128  # Default spatial size that non-image branches are broadcast to
+                  # (override per branch with model_kwargs {"patch_size": N})
 
 
 # ---------------------------------------------------------------------------
@@ -216,9 +217,10 @@ class MLP(nn.Module):
 
 
 class MLPForFusion(nn.Module):
-    def __init__(self, input_shape, input_name=None):
+    def __init__(self, input_shape, input_name=None, patch_size=PATCH_SIZE):
         super().__init__()
         self.input_name = input_name
+        self.patch_size = patch_size
         self.net = nn.Sequential(
             nn.Linear(input_shape[-1], 64), nn.ReLU(), nn.Dropout(0.3),
             nn.Linear(64, 32), nn.ReLU(), nn.Dropout(0.3),
@@ -229,7 +231,7 @@ class MLPForFusion(nn.Module):
     def forward(self, x):
         x = self.net(x)
         x = x.reshape(x.shape[0], 1, 1, self.out_channels)
-        return x.expand(-1, PATCH_SIZE, PATCH_SIZE, -1)
+        return x.expand(-1, self.patch_size, self.patch_size, -1)
 
 
 class PixelMLP(nn.Module):
@@ -278,9 +280,10 @@ class CoordFourierForFusion(nn.Module):
     """
 
     def __init__(self, input_shape, input_name=None, num_freqs=16, sigma=1.0,
-                 out_channels=16):
+                 out_channels=16, patch_size=PATCH_SIZE):
         super().__init__()
         self.input_name = input_name
+        self.patch_size = patch_size
         in_features = input_shape[-1]
         # Fixed random projection (seeded by the trainer's torch.manual_seed) saved
         # with the model so encoding is identical across save/load.
@@ -300,7 +303,7 @@ class CoordFourierForFusion(nn.Module):
         feats = torch.cat([x, proj.sin(), proj.cos()], dim=-1)
         h = self.net(feats)
         h = h.reshape(h.shape[0], 1, 1, self.out_channels)
-        return h.expand(-1, PATCH_SIZE, PATCH_SIZE, -1)
+        return h.expand(-1, self.patch_size, self.patch_size, -1)
 
 
 class MultiScaleMLPHead(nn.Module):
@@ -406,9 +409,10 @@ class ConvLSTMBottleneck(nn.Module):
 
 
 class LSTMModel(nn.Module):
-    def __init__(self, input_shape, input_name=None):
+    def __init__(self, input_shape, input_name=None, patch_size=PATCH_SIZE):
         super().__init__()
         self.input_name = input_name
+        self.patch_size = patch_size
         self.lstm1 = nn.LSTM(input_shape[-1], 32, batch_first=True)
         self.lstm2 = nn.LSTM(32, 32, batch_first=True)
         self.dropout = nn.Dropout(0.2)
@@ -419,7 +423,7 @@ class LSTMModel(nn.Module):
         seq, _ = self.lstm2(self.dropout(seq))
         h = self.dropout(seq[:, -1])
         h = h.reshape(h.shape[0], 1, 1, self.out_channels)
-        return h.expand(-1, PATCH_SIZE, PATCH_SIZE, -1)
+        return h.expand(-1, self.patch_size, self.patch_size, -1)
 
 
 class PixelLSTM(nn.Module):
@@ -456,9 +460,10 @@ class PixelLSTM(nn.Module):
 
 class TransformerModel(nn.Module):
     def __init__(self, input_shape, input_name=None, embed_dim=32,
-                 num_heads=4, ff_dim=64, dropout=0.1):
+                 num_heads=4, ff_dim=64, dropout=0.1, patch_size=PATCH_SIZE):
         super().__init__()
         self.input_name = input_name
+        self.patch_size = patch_size
         seq_len, in_features = input_shape
         self.proj = nn.Linear(in_features, embed_dim)
         self.pos_embedding = nn.Embedding(seq_len, embed_dim)
@@ -488,7 +493,7 @@ class TransformerModel(nn.Module):
         h = self.dropout(x.mean(dim=1))
         h = F.relu(self.out_proj(h))
         h = h.reshape(h.shape[0], 1, 1, self.out_channels)
-        return h.expand(-1, PATCH_SIZE, PATCH_SIZE, -1)
+        return h.expand(-1, self.patch_size, self.patch_size, -1)
 
 
 class IdentityModel(nn.Module):
@@ -1483,12 +1488,12 @@ def get_mlp(input_shape, input_name=None):
     return MLP(input_shape, input_name)
 
 
-def get_mlp_for_fusion(input_shape, input_name=None):
-    return MLPForFusion(input_shape, input_name)
+def get_mlp_for_fusion(input_shape, input_name=None, patch_size=PATCH_SIZE):
+    return MLPForFusion(input_shape, input_name, patch_size=patch_size)
 
 
-def get_coord_fourier(input_shape, input_name=None):
-    return CoordFourierForFusion(input_shape, input_name)
+def get_coord_fourier(input_shape, input_name=None, patch_size=PATCH_SIZE):
+    return CoordFourierForFusion(input_shape, input_name, patch_size=patch_size)
 
 
 def get_pixel_mlp(input_shape, input_name=None, hidden=(128, 64), out_channels=32,
@@ -1520,12 +1525,12 @@ def get_convlstm_bottleneck(input_shape, input_name=None, for_fusion=True):
     return ConvLSTMBottleneck(input_shape, input_name, for_fusion=for_fusion)
 
 
-def get_lstm(input_shape, input_name=None):
-    return LSTMModel(input_shape, input_name)
+def get_lstm(input_shape, input_name=None, patch_size=PATCH_SIZE):
+    return LSTMModel(input_shape, input_name, patch_size=patch_size)
 
 
-def get_transformer(input_shape, input_name=None):
-    return TransformerModel(input_shape, input_name)
+def get_transformer(input_shape, input_name=None, patch_size=PATCH_SIZE):
+    return TransformerModel(input_shape, input_name, patch_size=patch_size)
 
 
 def get_identity(input_shape, input_name=None):
