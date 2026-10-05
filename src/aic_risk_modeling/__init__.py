@@ -1,30 +1,17 @@
-"""Top-level package for aic-risk-modeling.
+"""aic-risk-modeling: subpackages preprocess, train, eval, predict.
 
-Subpackages:
-- `preprocess` (preprocessing utilities)
-- `train` (training utilities and data loaders)
-- `eval` (evaluation utilities)
-
-Uses __getattr__ to do lazy submodule imports (according to PEP 562) to
-reduce imports of heavy optional dependencies (e.g., `tensorflow-data-validation`).
+Subpackages load lazily (PEP 562) so the bare import doesn't pull in torch/TF.
 """
 
-__all__ = ["train", "eval", "preprocess"]
+__all__ = ["train", "eval", "preprocess", "predict"]
 
-# Lazily import subpackages on attribute access (PEP 562)
 import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    # Help type checkers see these names without importing heavy deps at runtime
-    from . import train, eval, preprocess # type: ignore
+    from . import train, eval, preprocess, predict  # type: ignore
 
 def __getattr__(name: str):
-    """Lazily import subpackages when accessed as attributes.
-
-    Example: `aic_risk_modeling.train` will import `aic_risk_modeling.train` on
-    first access but `import aic_risk_modeling` will not import it.
-    """
     if name in __all__:
         module =importlib.import_module("." + name, __name__)
         globals()[name] = module
@@ -33,5 +20,4 @@ def __getattr__(name: str):
 
 
 def __dir__():
-    """Expose lazy subpackages in help()/dir()."""
     return sorted(list(globals().keys()) + __all__)

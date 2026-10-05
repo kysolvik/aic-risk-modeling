@@ -1,23 +1,8 @@
 #!/usr/bin/env bash
-# Container entrypoint: predict|attribute -> mosaic -> upload to GCS.
-#
-# Configured entirely by environment variables, because that is what
-# `gcloud compute instances create-with-container --container-env` passes.
-# Any extra arguments are forwarded verbatim to the script.
-#
-# MODE (predict) picks the script: `predict` -> predict.py, `attribute` ->
-# attribute.py (per-driver Shapley/OAT rasters). The two share every flag below;
-# attribute adds the DRIVERS/SHAPLEY/... vars, which are ignored in predict mode.
-#
-# Required: CONFIG_PATH CHECKPOINT DATA_DIR OUTPUT_URI
-# Optional: MODE (predict) STATS_PATH TFRECORD_PATTERN MAX_CHIPS BATCH_SIZE SEED
-#           EDGE_CROP (0) INVERT_YRES (0) MOSAIC (1) MOSAIC_NAME (preds)
-#           UPLOAD_TILES (0) SCRATCH_DIR (/scratch/chips)
-#           PROFILE_TEMPLATE (assets/example_v3.tif = fullgrid_v3 MODIS sinusoidal,
-#             north-up, pairs with INVERT_YRES=0. fullgrid_v2 needs
-#             PROFILE_TEMPLATE=/app/assets/example.tif + INVERT_YRES=1)
-# Attribute-only: DRIVERS (gs:// driver spec) SHAPLEY (0) SHAPLEY_SAMPLES
-#           POS_WEIGHT WRITE_MASK (0)
+# Container entrypoint: predict.py or attribute.py (MODE) -> mosaic.sh -> upload to OUTPUT_URI.
+# Configured by env vars. Required: CONFIG_PATH CHECKPOINT DATA_DIR OUTPUT_URI. Optional: MODE STATS_PATH
+# TFRECORD_PATTERN MAX_CHIPS BATCH_SIZE SEED EDGE_CROP MOSAIC MOSAIC_NAME UPLOAD_TILES SCRATCH_DIR
+# PROFILE_TEMPLATE; attribute only: DRIVERS SHAPLEY SHAPLEY_SAMPLES POS_WEIGHT WRITE_MASK.
 set -euo pipefail
 
 : "${CONFIG_PATH:?must be set}"
@@ -62,19 +47,15 @@ args=(--config_path "$CONFIG_PATH"
       --output_dir "$SCRATCH"
       --edge_crop "${EDGE_CROP:-0}")
 
-# Use `if` blocks, not `[ ... ] && ...`: under `set -e` a trailing false test
-# in a && chain is the script's exit status and would abort the run. Every flag
-# below is accepted by BOTH scripts.
+# `if` blocks, not `[ ] && ...`: under set -e a false test ending an && chain aborts the run.
 if [ -n "${STATS_PATH:-}" ];       then args+=(--stats_path "$STATS_PATH"); fi
 if [ -n "${TFRECORD_PATTERN:-}" ]; then args+=(--tfrecord_pattern "$TFRECORD_PATTERN"); fi
 if [ -n "${MAX_CHIPS:-}" ];        then args+=(--max_chips "$MAX_CHIPS"); fi
 if [ -n "${BATCH_SIZE:-}" ];       then args+=(--batch_size "$BATCH_SIZE"); fi
 if [ -n "${SEED:-}" ];             then args+=(--seed "$SEED"); fi
 if [ -n "${PROFILE_TEMPLATE:-}" ]; then args+=(--profile_template "$PROFILE_TEMPLATE"); fi
-if [ "${INVERT_YRES:-0}" = "1" ];  then args+=(--invert_yres); fi
 
-# Which per-chip prefixes the mosaic step should stitch. predict writes out/mask;
-# attribute writes a single shap_ (Shapley) or attr_ (OAT) raster.
+# predict writes out_/mask_ chips; attribute writes shap_ (Shapley) or attr_ (OAT).
 mosaic_prefixes="out mask"
 if [ "$MODE" = "attribute" ]; then
     if [ -n "${DRIVERS:-}" ];         then args+=(--drivers "$DRIVERS"); fi

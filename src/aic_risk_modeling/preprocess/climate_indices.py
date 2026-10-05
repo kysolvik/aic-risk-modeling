@@ -1,16 +1,13 @@
-"""Helpers to download non-spatial climate indices"""
+"""Download monthly climate indices (AMO, SOI, ONI, MEI, TNA) from NOAA."""
 
 import io
 import urllib.request
 
 import pandas as pd
 
-# NOAA's headers declare their missing value inconsistently.
-# So detecting missingness by magnitude rather than
-# trusting either the header or a single hard-coded constant.
+# NOAA headers declare the missing value inconsistently, so detect it by magnitude.
 NODATA_ABS = 60.0
 
-# Set max no data gap to fill with linear interpolation
 MAX_FILL_GAP = 2
 
 # CPC sources, more quickly update
@@ -68,7 +65,7 @@ def download_clim_indices(
         year_end: int,
         last_month: int = 12
     ) -> pd.DataFrame:
-    """Download non-spatial climate indices from NOAA.
+    """Monthly index values for Jan year_start .. Dec year_end, short gaps interpolated.
 
     Raises:
         ValueError: if the index name is unknown, if a requested month is absent
@@ -103,7 +100,7 @@ def download_clim_indices(
     elif index_name in SSTOI_INDICES:
         df = _parse_cpc_sstoi(_fetch_text(download_url), index_name)
     elif index_name == 'amo':
-        df = pd.read_csv(download_url, skiprows=1, sep='\s+')
+        df = pd.read_csv(download_url, skiprows=1, sep=r'\s+')
         df['Date'] = df['Year'].astype(str) + '-' + df['month'].astype(str) + '-01'
         df = df.drop(columns=['Year','month'])[['Date','SSTA']]
     else:
@@ -124,7 +121,6 @@ def download_clim_indices(
             f'ends at {df.index.max().date()}.')
     df = df.loc[wanted]
 
-    # Filter out nodata
     df['metric'] = df['metric'].where(df['metric'].abs() <= NODATA_ABS)
     missing = df.index[df['metric'].isna()]
     if len(missing):

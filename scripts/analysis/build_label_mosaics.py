@@ -1,40 +1,8 @@
-"""Full-basin label mosaics (label_<year>.tif) from the targets-only export.
+"""Full-basin label mosaics (label_<year>.tif) from the targets-only export, for CV references.
 
-cv_collect_results.py builds its references from `<label_dir>/label_<year>.tif`:
-climatology = pixel-wise burn frequency over a fold's TRAIN years (2013..t-1),
-persistence = the eval year's previous-year label. The predict runs only write
-label mosaics for eval years, so the train-only years (2013-2017) were missing;
-for v3 they came from throwaway predict runs (docker/run_mask_calcs.sh). The
-targets-only export (`scripts/preprocessing/geebeam_targets_only.py`: one record
-per chip, one band per product per year, same chips/md_x/md_y as fullgrid_v3)
-gives every year directly, without the model or Cloud Run.
-
-Target = the training label: gt0 on each product, combined with 'any' (the
-v3p union4 config's output_features). Default products are union4.
-
-Grid: cv_collect_results.Climatology requires every label mosaic to share one
-transform EXACTLY, so chips are placed onto the grid of a reference mosaic from a
-real predict run (--grid_from) rather than re-stitched. Re-running predict.py's
-write_batch + mosaic.sh locally is NOT equivalent: the container computes chip
-origins in float32 and its GDAL writes uint8, so a local stitch lands ~1 cm off
-(-8842323.014 vs -8842323.0) and fails the exact-transform check. Chips sit at
-whole-pixel offsets on that grid (max fractional offset 1e-3 px) and never
-overlap (checked on all 2556), so placement is unambiguous. Chip centre md_x/md_y
--> top-left corner = centre - 64 px, rows north-down (predict's INVERT_YRES=0).
-
-Verify with --check_dir against label mosaics from real v3p predict runs:
-pixel-exact agreement on the eval years (2018-2023) is what makes the train-only
-years (2013-2017) trustworthy.
-
-Usage:
-    .venv/bin/python scripts/analysis/build_label_mosaics.py \
-        --data_dir gs://woodwell-aic-fire-risk/data/targets_only \
-        --out_dir out/label_mosaics_v3p_union4 --years 2013-2023 \
-        --grid_from out/label_mosaics_v3/label_2018.tif
-    # verify against predict-run preds_mask.tif copied in as <dir>/label_<y>.tif
-    .venv/bin/python scripts/analysis/build_label_mosaics.py --verify_only \
-        --out_dir out/label_mosaics_v3p_union4 --check_dir /path/to/preds_masks
-"""
+Chips are placed on the grid of a real predict-run mosaic (--grid_from): the climatology needs
+identical transforms, and a local re-stitch lands ~1 cm off. Verify with --check_dir.
+Usage: build_label_mosaics.py --data_dir D --out_dir O --years 2013-2023 --grid_from label_2018.tif"""
 
 import argparse
 import json
@@ -71,7 +39,6 @@ def read_labels(data_dir, years, products):
         raise ValueError(f"targets-only export lacks {missing}")
     keys = sorted({bands[(p, y)] for y in years for p in products})
     spec = {k: tf.io.FixedLenFeature([CHIP * CHIP], tf.float32) for k in keys}
-    # md_x/md_y parsed as float32, exactly as the predict pipeline sees them
     spec.update(md_id=tf.io.FixedLenFeature([], tf.int64),
                 md_x=tf.io.FixedLenFeature([], tf.float32),
                 md_y=tf.io.FixedLenFeature([], tf.float32))
@@ -155,13 +122,13 @@ def main():
     p.add_argument("--data_dir", default="gs://woodwell-aic-fire-risk/data/targets_only")
     p.add_argument("--out_dir", required=True)
     p.add_argument("--years", default="2013-2023",
-                   help="e.g. 2013-2023 or 2013-2017,2023 (folds need 2013-2023)")
+                   help="e.g. 2013-2023 or 2013-2017,2023")
     p.add_argument("--products", nargs="+", default=list(UNION4),
-                   help="band prefixes OR-ed (gt0) into the label; default union4")
+                   help="band prefixes OR-ed into the label")
     p.add_argument("--grid_from", default=os.path.join(REPO, "out", "label_mosaics_v3", "label_2018.tif"),
-                   help="mosaic from a real predict run on the same chip grid; output copies its grid")
+                   help="predict-run mosaic whose grid to copy")
     p.add_argument("--overwrite", action="store_true")
-    p.add_argument("--check_dir", help="dir of label_<y>.tif from predict runs to compare against")
+    p.add_argument("--check_dir", help="predict-run label_<y>.tif dir to compare")
     p.add_argument("--verify_only", action="store_true")
     a = p.parse_args()
 

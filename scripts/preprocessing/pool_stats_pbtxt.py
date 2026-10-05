@@ -1,27 +1,7 @@
-"""Pool per-year tfdv stats.pbtxt summaries into one data_stats-style JSON.
+"""Pool per-year tfdv stats.pbtxt files into one data_stats-style JSON (the training stats_path).
 
-Each fullgrid export dir (allpreds_<year>/) ships a stats.pbtxt with, per
-numeric feature: tot_num_values, mean, std_dev, min, max, median, and a
-QUANTILES histogram. Streaming the raw TFRecords again just to pool
-normalization constants is wasteful, so this reads only
-those ~1.5 MiB summaries and pools them:
-
-  * count / mean / stddev  -- exact (Chan et al. parallel variance merge)
-  * min / max              -- exact (just keep the running values)
-  * median / robust_scale  -- from the mixture of per-year QUANTILES histograms
-                              (each bucket treated as uniform mass), solved by
-                              bisection on the pooled piecewise-uniform CDF
-
-The output matches aic_risk_modeling.train.data_stats.write_stats schema, plus a
-per-feature `robust_scale` (IQR/1.349) so robust-normed bands keep the tfdv
-quantile scale instead of falling back to std_dev. data_norm.get_norm_stats
-consumes it directly as stats_path.
-
-Usage:
-    python scripts/preprocessing/pool_stats_pbtxt.py \
-        --data_dirs gs://aic-amazon/data/fullgrid_v3/allpreds_2013/ ... \
-        --output gs://aic-amazon/data/fullgrid_v3/stats_2013_2022.json
-"""
+Moments, min and max are exact; median and robust_scale (IQR/1.349) come from the pooled quantile histograms.
+Usage: pool_stats_pbtxt.py --data_dirs gs://.../allpreds_2013/ ... --output stats.json"""
 
 import argparse
 import datetime
@@ -37,7 +17,6 @@ ROBUST_DIVISOR = 1.349  # 2 * 0.6745; matches std_dev for normal data
 
 
 def _quantile_buckets(num_stats):
-    """Return [(low, high, mass), ...] from the QUANTILES histogram, or []."""
     for hist in num_stats.histograms:
         if hist.type != statistics_pb2.Histogram.QUANTILES or not hist.buckets:
             continue
@@ -46,10 +25,10 @@ def _quantile_buckets(num_stats):
 
 
 class QuantilePool:
-    """Mixture of piecewise-uniform buckets; supports pooled quantile queries."""
+    """Mixture of uniform-mass buckets; quantiles by bisection on the pooled CDF."""
 
     def __init__(self):
-        self.buckets = []  # (low, high, mass)
+        self.buckets = []
 
     def add(self, buckets):
         self.buckets.extend(buckets)
@@ -59,7 +38,6 @@ class QuantilePool:
         return sum(m for _, _, m in self.buckets)
 
     def _cdf(self, v):
-        # Fraction of total mass at or below v, each bucket assumed uniform.
         acc = 0.0
         for low, high, mass in self.buckets:
             if v >= high:
@@ -76,7 +54,7 @@ class QuantilePool:
         hi = max(high for _, high, _ in self.buckets)
         if hi <= lo:
             return lo
-        for _ in range(100):  # bisection to ~machine precision on [lo, hi]
+        for _ in range(100):
             mid = 0.5 * (lo + hi)
             if self._cdf(mid) < target:
                 lo = mid
@@ -167,8 +145,8 @@ def pool_stats(data_dirs, stats_filename='stats.pbtxt'):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--data_dirs', nargs='+', required=True,
-                    help='Export dirs (local or gs://), each with a stats.pbtxt')
-    ap.add_argument('--output', required=True, help='Output JSON (local or gs://)')
+                    help='export dirs, each with a stats.pbtxt')
+    ap.add_argument('--output', required=True)
     ap.add_argument('--stats_filename', default='stats.pbtxt')
     args = ap.parse_args()
 

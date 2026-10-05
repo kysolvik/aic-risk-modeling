@@ -1,7 +1,4 @@
-"""Preprocess
-
-Preprocess utilities for AIC Risk Modeling.
-"""
+"""Preprocessing utilities."""
 
 from .climate_indices import download_clim_indices
 

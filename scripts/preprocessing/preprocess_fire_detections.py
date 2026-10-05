@@ -1,24 +1,8 @@
 #!/usr/bin/env python
-"""Rasterize VIIRS or MODIS hotspot detection points into annual geotiffs.
+"""Rasterize VIIRS or MODIS hotspot points into annual GeoTIFFs holding each cell's earliest burn date.
 
-Reads a shapefile of VIIRS hotspot detections and burns them onto a raster
-grid, one geotiff per year, where each cell holds the *minimum* (earliest)
-date of burn among the detections that fall in it. Output projection,
-resolution, and extent are specified on the command line.
-
-Run python preprocess_viirs_snpp.py --help for options.
-
-Date encoding (`--date-encoding`):
-  doy       day-of-year, 1-366 (default; matches MODIS MCD64A1 BurnDate)
-  yyyymmdd  integer calendar date, e.g. 20230115
-
-Cells with no detection are set to `--nodata` (default 0).
-
-Satellite (`--satellite`, `--split-by-satellite`): filter and/or split on the
-SATELLITE field (e.g. MODIS Terra/Aqua). When splitting, one raster per
-satellite per year is written and `--output-template` must contain
-`{satellite}`, which is filled with the lowercased value (e.g. modis_terra_2020).
-"""
+Optional SCAN/TRACK/CONFIDENCE filters and per-satellite splitting ({satellite} in --output-template).
+Usage: preprocess_fire_detections.py <input.shp> <output_dir> --crs C --resolution R --extent ..."""
 
 import argparse
 import os
@@ -33,8 +17,8 @@ from rasterio.transform import from_origin
 
 # Encoding name -> raster dtype able to hold the encoded values.
 DATE_ENCODINGS = {
-    "doy": "uint16",       # 1-366
-    "yyyymmdd": "int32",   # e.g. 20230115 exceeds uint16
+    "doy": "uint16",
+    "yyyymmdd": "int32",
 }
 
 # VIIRS categorical CONFIDENCE -> ordinal, so --confidence-min 0 drops low.
@@ -84,73 +68,63 @@ def parse_args():
         "--scan-limit",
         type=float,
         default=None,
-        help="Keep only detections with SCAN < this (drops oversized off-nadir pixels)",
+        help="keep SCAN < this (drops large off-nadir pixels)",
     )
     parser.add_argument(
         "--track-limit",
         type=float,
         default=None,
-        help="Keep only detections with TRACK < this (drops oversized off-nadir pixels)",
+        help="keep TRACK < this (drops large off-nadir pixels)",
     )
     parser.add_argument(
         "--confidence-min",
         type=float,
         default=None,
-        help=(
-            "Keep only detections with CONFIDENCE > this. MODIS is 0-100 "
-            "(29 keeps nominal+high); VIIRS l/n/h maps to 0/1/2 (0 drops low)"
-        ),
+        help="keep CONFIDENCE > this; VIIRS l/n/h = 0/1/2",
     )
     parser.add_argument(
         "--satellite",
         nargs="+",
         default=None,
-        help=(
-            "Keep only detections whose SATELLITE is one of these values "
-            "(case-insensitive, e.g. Terra Aqua)"
-        ),
+        help="keep only these SATELLITE values (case-insensitive)",
     )
     parser.add_argument(
         "--split-by-satellite",
         action="store_true",
-        help=(
-            "Write separate rasters per SATELLITE value; --output-template "
-            "must contain {satellite}"
-        ),
+        help="one raster per SATELLITE; template needs {satellite}",
     )
     parser.add_argument(
         "--src-crs",
         default=None,
-        help="Source CRS to assume if the shapefile has none (e.g. 'EPSG:4326')",
+        help="source CRS if the shapefile has none",
     )
     parser.add_argument(
         "--years",
         type=int,
         nargs="+",
         default=None,
-        help="Only process these years (default: every year present in the data)",
+        help="only these years (default: all)",
     )
     parser.add_argument(
         "--nodata",
         type=int,
         default=0,
-        help="Value for cells with no detection (default: 0)",
+        help="value for cells with no detection",
     )
     parser.add_argument(
         "--output-template",
         default="viirs_snpp_{year}.tif",
-        help="Output filename template (default: viirs_snpp_{year}.tif)",
+        help="output filename template",
     )
     parser.add_argument(
         "--compress",
         default="lzw",
-        help="GeoTIFF compression (default: lzw); use 'none' to disable",
+        help="GeoTIFF compression; 'none' to disable",
     )
     return parser.parse_args()
 
 
 def encode_dates(dates, encoding):
-    """Encode a series of datetimes to integer cell values per `encoding`."""
     dates = pd.to_datetime(dates)
     if encoding == "doy":
         return dates.dt.dayofyear.to_numpy()
@@ -162,11 +136,7 @@ def encode_dates(dates, encoding):
 
 
 def apply_attribute_filters(gdf, scan_limit, track_limit, confidence_min):
-    """Drop detections failing the SCAN/TRACK upper limits or CONFIDENCE floor.
-
-    Limits are strict: SCAN < scan_limit, TRACK < track_limit,
-    CONFIDENCE > confidence_min. A None limit disables that filter.
-    """
+    """Drop detections with SCAN >= scan_limit, TRACK >= track_limit or CONFIDENCE <= confidence_min."""
     filters = [
         ("SCAN", scan_limit, lambda col, lim: col < lim),
         ("TRACK", track_limit, lambda col, lim: col < lim),
@@ -195,7 +165,6 @@ def apply_attribute_filters(gdf, scan_limit, track_limit, confidence_min):
 
 
 def satellite_labels(gdf):
-    """Return the SATELLITE field as stripped strings, raising if absent."""
     if "SATELLITE" not in gdf.columns:
         raise KeyError(
             f"Field 'SATELLITE' not found; columns: {list(gdf.columns)}"
@@ -204,7 +173,6 @@ def satellite_labels(gdf):
 
 
 def apply_satellite_filter(gdf, satellites):
-    """Keep detections whose SATELLITE matches one of `satellites` (case-insensitive)."""
     if satellites is None:
         return gdf
     wanted = {s.strip().lower() for s in satellites}
@@ -219,7 +187,6 @@ def apply_satellite_filter(gdf, satellites):
 
 
 def build_transform(extent, resolution):
-    """Return (transform, width, height) for the output grid."""
     xmin, ymin, xmax, ymax = extent
     if xmax <= xmin or ymax <= ymin:
         raise ValueError(f"Invalid extent {extent}: need xmin<xmax and ymin<ymax")
@@ -234,11 +201,7 @@ def build_transform(extent, resolution):
 
 
 def rasterize_min_date(geometries, values, transform, out_shape, dtype, nodata):
-    """Burn `values` onto the grid, keeping the minimum value per cell.
-
-    rasterio burns shapes in order and later shapes overwrite earlier ones,
-    so sorting descending makes the smallest (earliest) date land last and win.
-    """
+    """Burn `values` onto the grid keeping the per-cell minimum (sorted descending so the earliest wins)."""
     order = np.argsort(values, kind="stable")[::-1]
     shapes = (
         (geom, int(val))
@@ -272,7 +235,6 @@ def main():
             f"Date field '{args.date_field}' not found; columns: {list(gdf.columns)}"
         )
 
-    # Establish source CRS, then reproject to the requested output projection.
     if gdf.crs is None:
         if args.src_crs is None:
             raise ValueError(
@@ -281,7 +243,6 @@ def main():
         gdf = gdf.set_crs(args.src_crs)
     gdf = gdf.to_crs(args.crs)
 
-    # Drop rows we can't place or date.
     gdf = gdf[gdf.geometry.notna() & gdf[args.date_field].notna()]
     gdf = apply_attribute_filters(
         gdf, args.scan_limit, args.track_limit, args.confidence_min

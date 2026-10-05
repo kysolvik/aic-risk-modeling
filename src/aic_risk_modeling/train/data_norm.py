@@ -1,3 +1,4 @@
+"""Feature normalization from tfdv stats.pbtxt or data_stats JSON, applied in tf.data."""
 import json
 
 from google.protobuf import text_format
@@ -6,7 +7,6 @@ import tensorflow as tf
 from . import transforms
 
 def load_stats_from_text(path):
-    """Load tfdv-generated DatasetFeatureStatisticsList from a text file."""
     stats_list = statistics_pb2.DatasetFeatureStatisticsList()
 
     with tf.io.gfile.GFile(path, 'r') as f:
@@ -17,27 +17,17 @@ def load_stats_from_text(path):
     return stats_list
 
 def load_stats_json(path):
-    """Load stats written by data_stats.write_stats (local or gs://)."""
     with tf.io.gfile.GFile(path, 'r') as f:
         return json.load(f)
 
 def _robust_scale_from_quantiles(num_stats):
-    """Robust scale (IQR / 1.349) from a tfdv QUANTILES histogram.
-
-    1.349 = 2 * 0.6745, so for normally distributed data this matches the
-    standard deviation. Robust normalization uses this instead of std_dev so a
-    nodata value baked into the raw values (e.g. AgERA5 temperature
-    unmask(0), whose 0 K pixels inflate std_dev ~10x and squash the band)
-    cannot corrupt the scale. As long as no data is below a25 or above q75,
-     should be fairly robust. Returns None when no usable quantile
-    histogram is present or the IQR is degenerate.
-    """
+    """IQR / 1.349 from a tfdv QUANTILES histogram (= std for normal data), or None."""
     from tensorflow_metadata.proto.v0 import statistics_pb2
     for hist in num_stats.histograms:
         if hist.type != statistics_pb2.Histogram.QUANTILES or not hist.buckets:
             continue
         edges = [hist.buckets[0].low_value] + [b.high_value for b in hist.buckets]
-        n = len(edges) - 1  # number of equal-count buckets (deciles => 10)
+        n = len(edges) - 1
         if n < 1:
             continue
 
@@ -55,11 +45,7 @@ def _robust_scale_from_quantiles(num_stats):
 
 
 def get_norm_stats(stats_list, target_feature):
-    """Extract normalization statistics for a given feature.
-
-    Accepts either a tfdv DatasetFeatureStatisticsList proto or the dict
-    loaded from a data_stats JSON file.
-    """
+    """Normalization stats for one feature from a stats proto or a data_stats dict."""
     if isinstance(stats_list, dict):
         return stats_list.get('features', stats_list).get(target_feature)
     for dataset in stats_list.datasets:
@@ -92,17 +78,12 @@ def _normalize_single_features_dict(f, normalize_list):
     return normalize_list
 
 def get_normalize_list(config):
-    """Retrieve flat list of variable names to normalize.
-
-    IMPORTANT: if transform is defined for var, skips normalizing
-    """
+    """Timestep-expanded names to z-score; transformed features are skipped unless value-preserving."""
     normalize_list = []
 
-    # Input features
     for k, f in config['input_features'].items():
         normalize_list = _normalize_single_features_dict(f, normalize_list)
 
-    # Output features
     f = config['output_features']
     normalize_list = _normalize_single_features_dict(f, normalize_list)
 
@@ -118,10 +99,7 @@ def _robust_normalize_single_features_dict(f, robust_list):
     return robust_list
 
 def get_robust_normalize_list(config):
-    """Retrieve flat list of variable names that should use robust
-    normalization: filters out min NA values (values equal to the feature's
-    global min are replaced) plus median instead of mean centering.
-    """
+    """Timestep-expanded names listed under `robust_norm` in the config."""
     robust_list = []
 
     for k, f in config['input_features'].items():
@@ -133,25 +111,16 @@ def get_robust_normalize_list(config):
     return robust_list
 
 def load_stats(stats_path):
-    """Load normalization stats from a data_stats JSON or a tfdv stats.pbtxt."""
     if stats_path.endswith('.json'):
         return load_stats_json(stats_path)
     return load_stats_from_text(stats_path)
 
 
 def create_normalizer(stats_path, features_to_normalize, robust_features=None):
-    """Create a normalization function based on provided statistics.
+    """Build a tf.data map fn that standardizes `features_to_normalize` in place.
 
-    `stats_path` may be a data_stats JSON file (*.json) or a tfdv stats.pbtxt.
-
-    `robust_features` is an iterable of (already timestep-expanded) feature
-    names that should use robust normalization instead of the default: median
-    (rather than mean) centering, and values equal to the feature's global min
-    replaced with that center before scaling. This is meant for features
-    exported with a nodata value (e.g. -32768) baked into the raw values,
-    which otherwise skews the mean/variance used for standardization. See
-    `get_robust_normalize_list` for deriving this from a training config.
-    """
+    Robust features are median-centred, scaled by IQR/1.349 when available, and have values
+    equal to the global min (a nodata sentinel) replaced by the median."""
     robust_features = set(robust_features or [])
     norm_constants = {}
     stats = load_stats(stats_path)
@@ -171,11 +140,6 @@ def create_normalizer(stats_path, features_to_normalize, robust_features=None):
                 is_robust = name in robust_features
                 if is_robust:
                     center_val = stats['median']
-                    # Scale by a robust spread (IQR/1.349) when the stats source
-                    # provides quantiles, so a nodata sentinel baked into the
-                    # raw values cannot inflate the scale and squash the band.
-                    # Falls back to std_dev for sources without quantiles
-                    # (e.g. data_stats JSON), preserving prior behavior.
                     scale_val = stats.get('robust_scale') or stats['stddev']
                 else:
                     center_val = stats['mean']
@@ -190,11 +154,7 @@ def create_normalizer(stats_path, features_to_normalize, robust_features=None):
                 else:
                     out_tensor = features[name]
 
-                # Some exported bands carry NaN where the source asset has no
-                # coverage (im_chirps_cwd_monthly is ~4-5% of chips). The stats
-                # exclude NaN from accumulation, so center/scale stay finite, but
-                # an unfilled NaN pixel propagates all the way to the loss.
-                # Impute the center so those pixels standardize to 0.
+                # Some bands carry NaN where the source has no coverage; impute the center.
                 out_tensor = tf.cast(out_tensor, tf.float32)
                 out_tensor = tf.where(tf.math.is_finite(out_tensor),
                                       out_tensor, center)
