@@ -1,5 +1,8 @@
 """Helpers to download non-spatial climate indices"""
 
+import io
+import urllib.request
+
 import pandas as pd
 
 # NOAA's headers declare their missing value inconsistently.
@@ -9,6 +12,54 @@ NODATA_ABS = 60.0
 
 # Set max no data gap to fill with linear interpolation
 MAX_FILL_GAP = 2
+
+# CPC sources, more quickly update
+CPC_SOI_URL = 'https://www.cpc.ncep.noaa.gov/data/indices/soi'
+CPC_SSTOI_URL = 'https://www.cpc.ncep.noaa.gov/data/indices/sstoi.indices'
+# Anomaly columns of sstoi.indices (monthly OISST; the file repeats the 'ANOM' header)
+SSTOI_COLUMNS = ['YR', 'MON', 'nino12', 'nino12_anom', 'nino3', 'nino3_anom',
+                 'nino4', 'nino4_anom', 'nino34', 'nino34_anom']
+SSTOI_INDICES = {'nino34': 'nino34_anom', 'nino4': 'nino4_anom'}
+
+
+def _fetch_text(url):
+    with urllib.request.urlopen(url, timeout=60) as resp:
+        return resp.read().decode('ascii', errors='replace')
+
+
+def _parse_cpc_soi(text):
+    """Standardized SOI from CPC's fixed-width year x month table.
+
+    The file holds two tables (anomaly, then standardized); the one after the
+    'STANDARDIZED' header is used. Fields are 6 characters wide and can run
+    together ('-999.9-999.9'), so they are sliced, not split.
+    """
+    lines = text.splitlines()
+    try:
+        start = next(i for i, l in enumerate(lines) if 'STANDARDIZED' in l)
+    except StopIteration:
+        raise ValueError('CPC SOI: no STANDARDIZED table found') from None
+    rows = []
+    for line in lines[start:]:
+        head = line[:4]
+        if not head.isdigit():
+            if rows:
+                break  # end of the table
+            continue
+        year = int(head)
+        for m in range(12):
+            field = line[4 + 6 * m: 10 + 6 * m].strip()
+            if field:
+                rows.append((pd.Timestamp(year, m + 1, 1), float(field)))
+    return pd.DataFrame(rows, columns=['Date', 'metric'])
+
+
+def _parse_cpc_sstoi(text, index_name):
+    """One Nino-region anomaly column from CPC's monthly OISST sstoi.indices."""
+    df = pd.read_csv(io.StringIO(text), sep=r'\s+', skiprows=1, header=None,
+                     names=SSTOI_COLUMNS)
+    dates = pd.to_datetime(dict(year=df['YR'], month=df['MON'], day=1))
+    return pd.DataFrame({'Date': dates, 'metric': df[SSTOI_INDICES[index_name]].astype(float)})
 
 
 def download_clim_indices(
@@ -25,7 +76,8 @@ def download_clim_indices(
             interpolation.
 
     Args:
-    index_name: one of 'amo', 'soi', 'oni', 'mei', 'tna'.
+    index_name: one of 'amo', 'soi', 'oni', 'mei', 'tna' (PSL/NCEI), or the
+        CPC sources 'soi_cpc', 'nino34', 'nino4' (see CPC_SOI_URL, CPC_SSTOI_URL).
     year_start: First year to download (but samples are monthly)
     year_end: Last year for download (but samples are monthly)
     last_month: Last month of year_end to return (default: the full year)
@@ -35,7 +87,10 @@ def download_clim_indices(
         'soi':'https://psl.noaa.gov/data/timeseries/month/data/soi.long.csv',
         'oni':'https://psl.noaa.gov/data/correlation/oni.csv',
         'mei': 'https://psl.noaa.gov/data/correlation/meiv2.csv',
-        'tna': 'https://psl.noaa.gov/data/correlation/tna.csv'
+        'tna': 'https://psl.noaa.gov/data/correlation/tna.csv',
+        'soi_cpc': CPC_SOI_URL,
+        'nino34': CPC_SSTOI_URL,
+        'nino4': CPC_SSTOI_URL,
     }
 
     try:
@@ -43,7 +98,11 @@ def download_clim_indices(
     except KeyError:
         raise ValueError(f'{index_name} not found. Current options are {list(clim_registry.keys())}')
 
-    if index_name == 'amo':
+    if index_name == 'soi_cpc':
+        df = _parse_cpc_soi(_fetch_text(download_url))
+    elif index_name in SSTOI_INDICES:
+        df = _parse_cpc_sstoi(_fetch_text(download_url), index_name)
+    elif index_name == 'amo':
         df = pd.read_csv(download_url, skiprows=1, sep='\s+')
         df['Date'] = df['Year'].astype(str) + '-' + df['month'].astype(str) + '-01'
         df = df.drop(columns=['Year','month'])[['Date','SSTA']]
