@@ -14,7 +14,8 @@ MAX_FILL_GAP = 2
 def download_clim_indices(
         index_name: str,
         year_start: int,
-        year_end: int
+        year_end: int,
+        last_month: int = 12
     ) -> pd.DataFrame:
     """Download non-spatial climate indices from NOAA.
 
@@ -27,6 +28,7 @@ def download_clim_indices(
     index_name: one of 'amo', 'soi', 'oni', 'mei', 'tna'.
     year_start: First year to download (but samples are monthly)
     year_end: Last year for download (but samples are monthly)
+    last_month: Last month of year_end to return (default: the full year)
     """
     clim_registry = {
         'amo':'https://www.ncei.noaa.gov/pub/data/cmb/ersst/v5/index/ersst.v5.amo.dat',
@@ -54,7 +56,7 @@ def download_clim_indices(
     df = df.set_index('Date')
     df = df[~df.index.duplicated(keep='last')].sort_index()
 
-    wanted = pd.date_range(f'{year_start}-01-01', f'{year_end}-12-01', freq='MS')
+    wanted = pd.date_range(f'{year_start}-01-01', f'{year_end}-{last_month:02d}-01', freq='MS')
     absent = wanted.difference(df.index)
     if len(absent):
         raise ValueError(
@@ -79,7 +81,7 @@ def download_clim_indices(
                 f'the run exceeds MAX_FILL_GAP={MAX_FILL_GAP} months or it is at '
                 f'the edge of the window, where filling it would be extrapolation.')
 
-    n_expected = 12 * (year_end - year_start + 1)
+    n_expected = 12 * (year_end - year_start) + last_month
     if len(df) != n_expected:
         raise ValueError(f'{index_name}: got {len(df)} months, expected {n_expected}. '
                          f'Callers index this positionally; a length change '
