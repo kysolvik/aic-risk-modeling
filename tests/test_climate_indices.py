@@ -130,3 +130,66 @@ def test_caller_contract_values_column_is_positional_and_72_long():
     assert np.isfinite(vals).all()
     # y1 = the last 12 entries = 2023; y1ond = the last 3 = Oct-Dec 2023.
     assert len(vals[60:72]) == 12 and len(vals[69:72]) == 3
+
+
+# --------------------------------------------------------------------------- CPC sources
+# Trimmed copies of the real file layouts (fetched 2026-10-05).
+CPC_SOI_TEXT = """\
+(STAND TAHITI - STAND DARWIN)  SEA LEVEL PRESS
+                        ANOMALY
+
+YEAR   JAN   FEB   MAR   APR   MAY   JUN   JUL   AUG   SEP   OCT   NOV   DEC
+2025   0.3   0.9   2.8   0.9   0.7   0.5   1.0   0.7   0.1   1.9   1.8  -0.0
+2026   1.8   2.4   2.0  -1.1  -1.5  -2.4  -4.0  -1.8  -3.3-999.9-999.9-999.9
+
+(STAND TAHITI - STAND DARWIN)  SEA LEVEL PRESS
+                    STANDARDIZED    DATA
+
+YEAR   JAN   FEB   MAR   APR   MAY   JUN   JUL   AUG   SEP   OCT   NOV   DEC
+2025   0.2   0.5   1.7   0.5   0.4   0.3   0.6   0.4   0.0   1.1   1.1  -0.0
+2026   1.1   1.4   1.2  -0.6  -0.9  -1.4  -2.4  -1.1  -2.0-999.9-999.9-999.9
+"""
+
+CPC_SSTOI_TEXT = """\
+YR MON  NINO1+2   ANOM   NINO3    ANOM   NINO4    ANOM NINO3.4    ANOM
+2025  12   23.10   -0.50   25.00   -0.60   28.30   -0.40   26.00   -0.55
+2026   1   24.28   -0.24   25.84    0.17   28.01   -0.21   26.65    0.08
+2026   2   25.38   -0.72   26.26   -0.11   27.99   -0.11   26.54   -0.20
+"""
+
+
+class _StubFetchText:
+    def __init__(self, text):
+        self.text, self.original = text, None
+
+    def __enter__(self):
+        self.original = ci._fetch_text
+        ci._fetch_text = lambda url: self.text
+        return self
+
+    def __exit__(self, *exc):
+        ci._fetch_text = self.original
+
+
+def test_cpc_soi_reads_the_standardized_table_and_handles_run_together_sentinels():
+    with _StubFetchText(CPC_SOI_TEXT):
+        out = ci.download_clim_indices("soi_cpc", 2025, 2026, last_month=9)
+    assert len(out) == 21
+    # standardized table, not the anomaly table above it
+    assert float(out.loc["2026-07-01", "metric"]) == -2.4
+    assert float(out.loc["2026-09-01", "metric"]) == -2.0
+    assert float(out.loc["2025-03-01", "metric"]) == 1.7
+
+
+def test_cpc_soi_unpublished_months_raise():
+    """-999.9 placeholders for Oct-Dec are at the trailing edge: never filled."""
+    with _StubFetchText(CPC_SOI_TEXT), pytest.raises(ValueError):
+        ci.download_clim_indices("soi_cpc", 2025, 2026)
+
+
+def test_cpc_sstoi_picks_the_anomaly_column_of_each_region():
+    with _StubFetchText(CPC_SSTOI_TEXT):
+        n34 = ci.download_clim_indices("nino34", 2026, 2026, last_month=2)
+        n4 = ci.download_clim_indices("nino4", 2026, 2026, last_month=2)
+    assert list(n34["metric"]) == [0.08, -0.20]
+    assert list(n4["metric"]) == [-0.21, -0.11]
