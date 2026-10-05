@@ -69,10 +69,29 @@ def load_schema_from_gcs(gcs_dir: str) -> schema_pb2.Schema:
         f"Could not find schema.pbtxt in {gcs_dir}")
 
 
+DEFAULT_PATCH_SIZE = 128  # fullgrid v2/v3 chips; used when the schema has no shape
+
+
+def image_side(feature: schema_pb2.Feature) -> int:
+    """Side of a square `im_` feature from its schema shape (flattened length).
+
+    tfdv's infer_schema records the length of fixed-length features, so the chip
+    size travels with the data (128 at 463 m, 64 at 1 km). Falls back to
+    DEFAULT_PATCH_SIZE when the schema carries no shape.
+    """
+    if not feature.shape.dim:
+        return DEFAULT_PATCH_SIZE
+    n = int(feature.shape.dim[0].size)
+    side = math.isqrt(n)
+    if side * side != n:
+        raise ValueError(f'{feature.name}: length {n} is not a square image')
+    return side
+
+
 def schema_to_feature_spec(
     schema: schema_pb2.Schema,
     non_img_features: Optional[List[str]] = None,
-    patch_size: int = 128
+    patch_size: Optional[int] = None
 ) -> Dict[str, tf.io.FixedLenFeature]:
     """Convert a schema proto to a TensorFlow feature_spec dictionary.
 
@@ -85,7 +104,8 @@ def schema_to_feature_spec(
     Args:
         schema: schema proto
         non_img_features: names to treat as non-image (scalar) floats; default ['lon','lat','id']
-        patch_size: size each side of square patch
+        patch_size: size each side of square patch; None (default) reads it from
+            each image feature's schema shape (see `image_side`)
 
     Returns:
         Dict suitable for tf.io.parse_single_example
@@ -93,7 +113,8 @@ def schema_to_feature_spec(
     feature_spec = {}
     for feature in schema.feature:
         if feature.name.startswith('im_'):
-            tf_size = [patch_size, patch_size]
+            side = patch_size or image_side(feature)
+            tf_size = [side, side]
         else:
             feature_size = int(MessageToDict(feature)['shape']['dim'][0]['size'])
             if feature_size > 0:
@@ -117,7 +138,7 @@ def build_features_dict(
     patch_size: int
 ) -> Dict[str, tf.io.FixedLenFeature]:
     """Convenience wrapper—returns feature_spec (same shape as schema_to_feature_spec)"""
-    return schema_to_feature_spec(schema, patch_size)
+    return schema_to_feature_spec(schema, patch_size=patch_size)
 
 def _apply_single_transform(result, feature_name, transform_fn):
     if callable(transform_fn):
