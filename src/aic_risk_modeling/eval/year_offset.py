@@ -2,6 +2,10 @@
 
     gamma(t) = b0 + b_soi * z(SOI_{Oct-Dec, Y-1}) + b_prev * z(log basin burn_{Y-1})
 
+or, for the operational Oct 31 issue (form="nino4_cut", target panel only),
+
+    gamma(t) = b0 + b_clim * z(Nino 4_{Jul-Sep, Y-1})
+
 Emitted mean-centered over the fit years, so gamma is independent of pos_weight."""
 
 import numpy as np
@@ -15,6 +19,9 @@ PREV_BANDS = {"bd": ["im_BurnDate_-1_mean"],
               "union_sum": ["im_BurnDate_-1_mean", "im_viirs_snpp_-1_mean"],
               "union3": ["im_BurnDate_-1_mean", "im_viirs_snpp_-1_mean", "im_mod14_-1_mean"]}
 SOI_COL = "md_soi_y1ond"
+# Operational climate term: (CPC index, panel column from build_target_panel.py --cutoff_terms)
+CUT_CLIMATE = {"nino4_cut": ("nino4", "md_nino4_cut")}
+CUT_MONTHS = 3
 CHIP_PIXELS = 128 * 128
 
 
@@ -52,12 +59,17 @@ def load_panel(path, target="bd", prev_burn="union_sum", space="log1p"):
     return d
 
 
-def load_target_panel(path, target="bd", space="logit", emit_through=None):
+def load_target_panel(path, target="bd", space="logit", emit_through=None, form="soi_prev"):
     """load_panel for the long targets-only panel; prev-burn is the chip's lagged MCD64 count.
 
-    emit_through adds predict-only years to d.attrs["per_year"]; they never enter a fit."""
+    emit_through adds predict-only years to d.attrs["per_year"]; they never enter a fit.
+    form="nino4_cut" gives the single climate regressor zclim instead of zsoi/zprev."""
     if space != "logit":
         raise ValueError("the target panel only supports space='logit'")
+    if form in CUT_CLIMATE:
+        return _load_cut_panel(path, target, emit_through, form)
+    if form != "soi_prev":
+        raise ValueError(f"unknown form {form!r}")
     raw = pd.read_parquet(path)
     col = f"burn_{target}"
     d = raw.dropna(subset=[col, "prev_bd", SOI_COL]).copy()
@@ -84,6 +96,39 @@ def load_target_panel(path, target="bd", space="logit", emit_through=None):
     per_year["zprev"] = (lprev - lprev.mean()) / lprev.std()
     d["zsoi"] = d.year.map(per_year.zsoi)
     d["zprev"] = d.year.map(per_year.zprev)
+    d.attrs["per_year"] = per_year.rename_axis("year").reset_index()
+    return d
+
+
+def _load_cut_panel(path, target, emit_through, form):
+    from aic_risk_modeling.preprocess import cutoff
+    index, col = CUT_CLIMATE[form]
+    raw = pd.read_parquet(path)
+    if col not in raw:
+        raise ValueError(f"{path} lacks {col}: rebuild with build_target_panel.py --cutoff_terms")
+    tcol = f"burn_{target}"
+    d = raw.dropna(subset=[tcol, col]).copy()
+    p = (d[tcol] + 0.5) / (CHIP_PIXELS + 1.0)
+    d["y"] = np.log(p / (1.0 - p))
+    d["burn_w"] = d[tcol].astype(float)
+
+    per_year = d.groupby("year").agg(clim=(col, "first"))
+    last = int(per_year.index.max())
+    if emit_through is not None and emit_through > last:
+        from aic_risk_modeling.preprocess.climate_indices import download_clim_indices
+        s = download_clim_indices(index, last - 2, emit_through - 1,
+                                  last_month=cutoff.last_month(index))["metric"]
+
+        def window_mean(y):
+            return float(s.loc[[pd.Timestamp(yy, mm, 1)
+                                for yy, mm in cutoff.month_window(index, y, CUT_MONTHS)]].mean())
+
+        if not np.isclose(window_mean(last), per_year.loc[last, "clim"], atol=1e-9):
+            raise ValueError(f"CPC {index} disagrees with the panel -- calendar misaligned")
+        for y in range(last + 1, emit_through + 1):
+            per_year.loc[y] = {"clim": window_mean(y)}
+    per_year["zclim"] = (per_year.clim - per_year.clim.mean()) / per_year.clim.std()
+    d["zclim"] = d.year.map(per_year.zclim)
     d.attrs["per_year"] = per_year.rename_axis("year").reset_index()
     return d
 
@@ -177,6 +222,7 @@ def jackknife_r(result):
 SOI = [("zsoi", None)]
 PREV = [("zprev", None)]
 BOTH = [("zsoi", None), ("zprev", None)]
+CLIM = [("zclim", None)]
 
 
 def fit_final(d, fit_years, terms=BOTH, weighting="equal"):
