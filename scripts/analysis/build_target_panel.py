@@ -2,6 +2,9 @@
 
 Columns: burn_<product>, union counts, prev_<product> (year-1), lagged md_<index>_<slice>.
 Products absent in a year are NaN, never 0.
+--cutoff_terms adds burn_bd_cut (MCD64 burned by the mcd64a1 cutoff DOY of the forecast issued
+that year, so prev_bd_cut is known at issue) and md_<index>_cut (mean of the 3 newest CPC months
+at issue). Needs the earliest-DOY export (geebeam_targets_cutoff_463m.py).
 Usage: build_target_panel.py --data_dir gs://.../targets_only --out out/target_panel/panel.parquet"""
 
 import argparse
@@ -13,6 +16,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
+from aic_risk_modeling.preprocess import cutoff
 from aic_risk_modeling.preprocess.climate_indices import download_clim_indices
 
 PRODUCTS = {"bd": "im_BurnDate", "mod14": "im_mod14", "terra": "im_terra",
@@ -20,6 +24,8 @@ PRODUCTS = {"bd": "im_BurnDate", "mod14": "im_mod14", "terra": "im_terra",
 UNIONS = {"bd_mod14": ("bd", "mod14"),
           "union4": ("bd", "snpp", "mod14", "vnp64")}
 CLIM = ("soi", "tna", "oni", "mei", "amo")
+CUT_CLIM = ("soi_cpc", "nino34", "nino4")
+CUT_MONTHS = 3
 FIRST_YEAR = 2001
 LAST_YEAR = 2025
 
@@ -38,7 +44,7 @@ def _feature_spec(schema):
     return spec
 
 
-def read_counts(data_dir):
+def read_counts(data_dir, cutoff_terms=False):
     with tf.io.gfile.GFile(os.path.join(data_dir, "schema.json")) as f:
         schema = json.load(f)["features"]
     bands = {}
@@ -62,8 +68,12 @@ def read_counts(data_dir):
                 if key is None:
                     row[f"burn_{prod}"] = np.nan
                     continue
-                masks[prod] = ex[key].numpy() > 0
+                v = ex[key].numpy()
+                masks[prod] = v > 0
                 row[f"burn_{prod}"] = int(masks[prod].sum())
+                if cutoff_terms and prod == "bd":
+                    doy = cutoff.cutoff_doy("mcd64a1", year + 1)
+                    row["burn_bd_cut"] = int((masks[prod] & (v <= doy)).sum())
             for name, parts in UNIONS.items():
                 if all(p in masks for p in parts):
                     row[f"burn_{name}"] = int(np.logical_or.reduce([masks[p] for p in parts]).sum())
@@ -100,15 +110,31 @@ def climate_table(first_year, last_year):
     return pd.DataFrame.from_dict(rows, orient="index").rename_axis("year").reset_index()
 
 
+def cut_climate_table(first_year, last_year):
+    """One row per label year: mean of each CPC index over its CUT_MONTHS newest months at issue."""
+    rows = {y: {} for y in range(first_year, last_year + 1)}
+    for name in CUT_CLIM:
+        s = download_clim_indices(name, first_year - 2, last_year - 1,
+                                  last_month=cutoff.last_month(name))["metric"]
+        for y in rows:
+            months = [pd.Timestamp(yy, mm, 1) for yy, mm in cutoff.month_window(name, y, CUT_MONTHS)]
+            rows[y][f"md_{name}_cut"] = float(s.loc[months].mean())
+    return pd.DataFrame.from_dict(rows, orient="index").rename_axis("year").reset_index()
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data_dir", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--cutoff_terms", action="store_true")
     a = p.parse_args()
 
-    d = add_prev(read_counts(a.data_dir))
+    d = add_prev(read_counts(a.data_dir, a.cutoff_terms))
     d = d.merge(climate_table(FIRST_YEAR, LAST_YEAR), on="year", how="left", validate="m:1")
+    if a.cutoff_terms:
+        d = d.merge(cut_climate_table(FIRST_YEAR, LAST_YEAR), on="year", how="left",
+                    validate="m:1")
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     d.to_parquet(a.out)
     print(f"wrote {a.out}: {len(d)} rows, {d.md_id.nunique()} chips, "

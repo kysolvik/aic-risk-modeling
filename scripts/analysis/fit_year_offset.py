@@ -8,7 +8,7 @@ import os
 import sys
 
 from aic_risk_modeling.eval.year_offset import (  # noqa: F401
-    BOTH, PREV_BANDS, SOI, TARGETS, build_offsets, evaluate, fit_final, jackknife_r,
+    BOTH, CLIM, PREV_BANDS, SOI, TARGETS, build_offsets, evaluate, fit_final, jackknife_r,
     load_panel, load_target_panel, run_checks)
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -47,6 +47,8 @@ def main():
                    help="chip weighting of the year effect")
     p.add_argument("--emit_through", type=int, default=None,
                    help="target panel: emit predict-only years up to this")
+    p.add_argument("--form", default="soi_prev", choices=["soi_prev", "nino4_cut"],
+                   help="nino4_cut = operational Oct 31 form (target panel)")
     a = p.parse_args()
 
     if a.check:
@@ -55,12 +57,17 @@ def main():
         run_sensitivity(a.panel)
         return
 
+    cut = a.form != "soi_prev"
+    if cut and a.panel_kind != "target":
+        sys.exit("--form nino4_cut needs --panel_kind target")
+    terms = CLIM if cut else BOTH
     lo, hi = (int(v) for v in a.fit_years.split("-"))
     fit_years = list(range(lo, hi + 1))
     if a.panel_kind == "target":
         panel = a.panel if a.panel != PANEL else TARGET_PANEL
-        d = load_target_panel(panel, target=a.target, space=a.space, emit_through=a.emit_through)
-        val = d[d.year <= hi]
+        d = load_target_panel(panel, target=a.target, space=a.space, emit_through=a.emit_through,
+                              form=a.form)
+        val = d[d.year.between(lo, hi)] if cut else d[d.year <= hi]
     else:
         if a.emit_through is not None:
             sys.exit("--emit_through needs --panel_kind target")
@@ -74,22 +81,27 @@ def main():
 
     if a.weighting != "equal" and a.panel_kind != "target":
         sys.exit("--weighting burn needs --panel_kind target")
-    beta, _ = fit_final(d, fit_years, weighting=a.weighting)
-    if beta[2] >= 0:
+    beta, _ = fit_final(d, fit_years, terms=terms, weighting=a.weighting)
+    if not cut and beta[2] >= 0:
         sys.exit(f"REFUSING to emit: b_prev = {beta[2]:+.4f} >= 0. A positive prev-burn "
                  "coefficient is persistence, which lags every turn. Investigate before shipping.")
 
-    fwd = evaluate(val, BOTH, protocol="forward", exclude_prev_from_clim=True, weighting=a.weighting)
-    loyo = evaluate(val, BOTH, exclude_prev_from_clim=True, weighting=a.weighting)
+    fwd = evaluate(val, terms, protocol="forward", exclude_prev_from_clim=True, weighting=a.weighting)
+    loyo = evaluate(val, terms, exclude_prev_from_clim=True, weighting=a.weighting)
     jack = jackknife_r(fwd)
-    offsets, level = build_offsets(d, beta, center_years=center_years)
+    offsets, level = build_offsets(d, beta, terms=terms, center_years=center_years)
+    if cut:
+        term_names, coeffs = ["nino4_jas_y1"], {"b0": float(beta[0]), "b_clim": float(beta[1])}
+    else:
+        term_names = ["soi_y1ond", "log_basin_prev_burn"]
+        coeffs = {"b0": float(beta[0]), "b_soi": float(beta[1]), "b_prev": float(beta[2])}
 
     doc = {
         "version": "gamma_v1",
         "fit": {"target": a.target, "prev_burn": a.prev_burn, "space": a.space,
                 "fit_years": fit_years, "protocol": "in-sample fit, forward-chained validation"},
-        "terms": ["soi_y1ond", "log_basin_prev_burn"],
-        "coeffs": {"b0": float(beta[0]), "b_soi": float(beta[1]), "b_prev": float(beta[2])},
+        "terms": term_names,
+        "coeffs": coeffs,
         "centering": {"note": "offsets are mean-centered over fit_years; the level is absorbed "
                               "by the network bias, which makes gamma independent of pos_weight",
                       "removed_level": level},
@@ -115,6 +127,9 @@ def main():
                                 note="offsets are mean-centered over center_years (the network's "
                                      "training years); the level is absorbed by the network bias")
         doc["emit_years"] = sorted(offsets)
+    if cut:
+        doc["version"] = doc["version"].replace("gamma_long", "gamma_cut")
+        doc["fit"].update(form=a.form, prev_burn=None)
     print(json.dumps(doc["coeffs"], indent=2))
     print(f"forward-chained r_year={fwd['r_year']:.3f} "
           f"(jackknife {jack[0]:.3f}..{jack[1]:.3f}, {jack[2]} carries it)  "
